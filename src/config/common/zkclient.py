@@ -215,9 +215,9 @@ class ZookeeperClient(object):
 
         self._conn_state = None
         self._sandesh_connection_info_update(status='INIT', message='')
+        self._lost_cb = None
 
         self.connect()
-
     # end __init__
 
     # start
@@ -251,6 +251,12 @@ class ZookeeperClient(object):
             return
         self._logger.info(msg)
     # end syslog
+
+    def set_lost_cb(self, lost_cb=None):
+        # set a callback to be called when kazoo state is lost
+        # set to None for default action
+        self._lost_cb = lost_cb
+    # end set_lost_cb
 
     def _zk_listener(self, state):
         if state == KazooState.CONNECTED:

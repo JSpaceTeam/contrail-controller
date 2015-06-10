@@ -1273,6 +1273,7 @@ class VncDbClient(object):
         msg = "Time elapsed in syncing ifmap: %s" % (str(end_time - start_time))
         self.config_log(msg, level=SandeshLevel.SYS_DEBUG)
         self._db_resync_done.set()
+        self._zk_db._zk_client.set_lost_cb()
     # end db_resync
 
     def wait_for_resync_done(self):
