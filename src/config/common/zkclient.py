@@ -261,7 +261,12 @@ class ZookeeperClient(object):
             # Lost the session with ZooKeeper Server
             # Best of option we have is to exit the process and restart all 
             # over again
-            os._exit(2)
+            self._sandesh_connection_info_update(status='DOWN',
+                                      message='Connection to Zookeeper lost')
+            if self._lost_cb:
+                self._lost_cb()
+            else:
+                os._exit(2)
         elif state == KazooState.SUSPENDED:
             # Update connection info
             self._sandesh_connection_info_update(status='INIT',
