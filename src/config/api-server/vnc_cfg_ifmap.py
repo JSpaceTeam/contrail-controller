@@ -104,13 +104,14 @@ class VncIfmapClient(VncIfmapClientGen):
         file.close()
 
     def __init__(self, db_client_mgr, ifmap_srv_ip, ifmap_srv_port,
-                 uname, passwd, ssl_options, ifmap_srv_loc=None):
+                 uname, passwd, ssl_options, ifmap_srv_loc=None, ifmap_disable = False):
         super(VncIfmapClient, self).__init__()
         self._ifmap_srv_ip = ifmap_srv_ip
         self._ifmap_srv_port = ifmap_srv_port
         self._username = uname
         self._password = passwd
         self._ssl_options = ssl_options
+        self._ifmap_disable = ifmap_disable
         self._CONTRAIL_XSD = "http://www.contrailsystems.com/vnc_cfg.xsd"
         self._IPERMS_NAME = "id-perms"
         self._IPERMS_FQ_NAME = "contrail:" + self._IPERMS_NAME
@@ -129,15 +130,15 @@ class VncIfmapClient(VncIfmapClientGen):
 
         self._db_client_mgr = db_client_mgr
         self._sandesh = db_client_mgr._sandesh
+        if not ifmap_disable:
+            ConnectionState.update(conn_type = ConnectionType.IFMAP,
+                name = 'IfMap', status = ConnectionStatus.INIT, message = '',
+                server_addrs = ["%s:%s" % (ifmap_srv_ip, ifmap_srv_port)])
+            self._conn_state = ConnectionStatus.INIT
 
-        ConnectionState.update(conn_type = ConnectionType.IFMAP,
-            name = 'IfMap', status = ConnectionStatus.INIT, message = '',
-            server_addrs = ["%s:%s" % (ifmap_srv_ip, ifmap_srv_port)])
-        self._conn_state = ConnectionStatus.INIT
-
-        # launch mapserver
-        if ifmap_srv_loc:
-            self._launch_mapserver(ifmap_srv_ip, ifmap_srv_port, ifmap_srv_loc)
+            # launch mapserver
+            if ifmap_srv_loc:
+               self._launch_mapserver(ifmap_srv_ip, ifmap_srv_port, ifmap_srv_loc)
 
         self._reset_cache_and_accumulator()
 
@@ -148,8 +149,9 @@ class VncIfmapClient(VncIfmapClientGen):
         self._imid_handler = Imid()
         imid = self._imid_handler
 
-        self._init_conn()
-        self._publish_config_root()
+        if not ifmap_disable:
+            self._init_conn()
+            self._publish_config_root()
 
     # end __init__
 
@@ -189,6 +191,8 @@ class VncIfmapClient(VncIfmapClientGen):
 
 
     def _publish_config_root(self):
+        if self._ifmap_disable:
+            return None
         # config-root
         buf = cStringIO.StringIO()
         perms = Provision.defaults.perms['config-root']
@@ -301,6 +305,8 @@ class VncIfmapClient(VncIfmapClientGen):
     # end publish_accumulated
 
     def _publish_to_ifmap(self, oper, oper_body, async, do_trace=True):
+        if self._ifmap_disable:
+            return None
         # safety check, if we proceed ifmap-server reports error
         # asking for update|delete in publish
         if not oper_body:
@@ -1000,12 +1006,12 @@ class VncServerKombuClient(VncKombuClient):
             self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
             raise
         finally:
-            method_name = obj_info['type'].replace('-', '_')
-            method = getattr(self._ifmap_db, "_ifmap_%s_create" % (method_name))
-            (ok, result) = method(obj_info, obj_dict)
-            if not ok:
-                self.config_log(result, level=SandeshLevel.SYS_ERR)
-                raise Exception(result)
+             method_name = obj_info['type'].replace('-', '_')
+             method = getattr(self._ifmap_db, "_ifmap_%s_create" % (method_name))
+             (ok, result) = method(obj_info, obj_dict)
+             if not ok:
+                 self.config_log(result, level=SandeshLevel.SYS_ERR)
+                 raise Exception(result)
     #end _dbe_create_notification
 
     def dbe_update_publish(self, obj_type, obj_ids):
@@ -1059,13 +1065,13 @@ class VncServerKombuClient(VncKombuClient):
             msg = "Failed to invoke type specific dbe_delete_notification"
             self.config_log(msg, level=SandeshLevel.SYS_ERR)
             raise
-        finally:
-            method_name = obj_info['type'].replace('-', '_')
-            method = getattr(self._ifmap_db, "_ifmap_%s_delete" % (method_name))
-            (ok, ifmap_result) = method(obj_info)
-            if not ok:
-                self.config_log(ifmap_result, level=SandeshLevel.SYS_ERR)
-                raise Exception(ifmap_result)
+        # finally:
+        #     method_name = obj_info['type'].replace('-', '_')
+        #     method = getattr(self._ifmap_db, "_ifmap_%s_delete" % (method_name))
+        #     (ok, ifmap_result) = method(obj_info)
+        #     if not ok:
+        #         self.config_log(ifmap_result, level=SandeshLevel.SYS_ERR)
+        #         raise Exception(ifmap_result)
     #end _dbe_delete_notification
 
 # end class VncKombuClient
@@ -1179,7 +1185,7 @@ class VncDbClient(object):
                  passwd, cass_srv_list,
                  rabbit_server, rabbit_port, rabbit_user, rabbit_password, rabbit_vhost,
                  reset_config=False, ifmap_srv_loc=None,
-                 zk_server_ip=None, db_prefix=''):
+                 zk_server_ip=None, db_prefix='', ifmap_disable = False):
 
         self._api_svr_mgr = api_svr_mgr
         self._sandesh = api_svr_mgr._sandesh
@@ -1202,9 +1208,8 @@ class VncDbClient(object):
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
 
         self._ifmap_db = VncIfmapClient(
-            self, ifmap_srv_ip, ifmap_srv_port,
-            uname, passwd, ssl_options, ifmap_srv_loc)
-
+             self, ifmap_srv_ip, ifmap_srv_port,
+             uname, passwd, ssl_options, ifmap_srv_loc,ifmap_disable=ifmap_disable)
         msg = "Connecting to cassandra on %s" % (cass_srv_list,)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
 
@@ -1242,7 +1247,7 @@ class VncDbClient(object):
 
     def db_resync(self):
         # Read contents from cassandra and publish to ifmap
-        mapclient = self._ifmap_db._mapclient
+
         self._ifmap_db.accumulator = []
         self._ifmap_db.accumulated_request_len = 0
         start_time = datetime.datetime.utcnow()
@@ -1383,13 +1388,13 @@ class VncDbClient(object):
             return
 
         try:
-            obj_ids = {'uuid': obj_uuid, 'imid': my_imid,
-                       'parent_imid': parent_imid}
-            method = getattr(self._ifmap_db, "_ifmap_%s_create" % (obj_type))
-            (ok, result) = method(obj_ids, obj_dict)
+             obj_ids = {'uuid': obj_uuid, 'imid': my_imid,
+                        'parent_imid': parent_imid}
+             method = getattr(self._ifmap_db, "_ifmap_%s_create" % (obj_type))
+             (ok, result) = method(obj_ids, obj_dict)
         except Exception as e:
             self.config_object_error(
-                obj_uuid, None, obj_type, 'dbe_resync:ifmap_create', str(e))
+                 obj_uuid, None, obj_type, 'dbe_resync:ifmap_create', str(e))
             return
     # end _dbe_resync
 
