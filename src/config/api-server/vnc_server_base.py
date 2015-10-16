@@ -1113,8 +1113,9 @@ class VncApiServerBase(VncApiServerGen):
         return {'enabled': mt}
 
     # end
-				def get_profile_info(self):
-        return self._profile_info
+
+	def get_profile_info(self):
+            return self._profile_info
     # end get_profile_info
 
     def get_resource_class(self, resource_type):
