@@ -1113,6 +1113,16 @@ class VncApiServerBase(VncApiServerGen):
         return {'enabled': mt}
 
     # end
+				def get_profile_info(self):
+        return self._profile_info
+    # end get_profile_info
+
+    def get_resource_class(self, resource_type):
+        if resource_type in self._resource_classes:
+            return self._resource_classes[resource_type]
+
+        return None
+    # end get_resource_class
 
     def mt_http_put(self):
         multi_tenancy = bottle.request.json['enabled']

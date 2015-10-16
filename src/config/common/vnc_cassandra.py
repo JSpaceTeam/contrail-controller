@@ -6,11 +6,11 @@ import pycassa
 from pycassa import ColumnFamily
 from pycassa.batch import Mutator
 from pycassa.system_manager import SystemManager, SIMPLE_STRATEGY
-from pycassa.pool import AllServersUnavailabl
+from pycassa.pool import AllServersUnavailable
 try:
     from vnc_api.gen.vnc_cassandra_client_gen import VncCassandraClientGen
 except:
-    from gen.vnc_cassandra_client_gen import  VncCassandraClientGene
+    from gen.vnc_cassandra_client_gen import  VncCassandraClientGen
 
 from exceptions import NoIdError
 from pysandesh.connection_info import ConnectionState
