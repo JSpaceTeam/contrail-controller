@@ -104,9 +104,9 @@ if 'API_MODULE' in env['ENV']:
     cd_client = 'cd ' + Dir("%s_vnc_api/" % module_name).path + ' && ' 
     sdist_client_gen = env.Command('dist/%s_vnc_api-0.1dev.tar.gz'%(module_name),
     				'setup.py', cd_client + 'python setup.py sdist')
-    env.Depends(sdist_client_gen, sdist_gen)
-    env.Depends(sdist_client_gen, sdist_client)
-    env.Depends(sdist_client_gen, client_rules)
+    gen_depends = [sdist_gen]
+    gen_depends.extend(client_rules)	
+    env.Depends(sdist_client_gen,gen_depends)
     env.Default(sdist_client_gen)
 
 # install everything before building distribution
