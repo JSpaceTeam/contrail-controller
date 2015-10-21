@@ -90,24 +90,6 @@ env.Default(sdist_gen)
 # generated files depend on autogeneration infra parts
 env.Depends(generated_rule, [autogen_infra_sources, autogen_sources])
 env.Depends(local_sources_rules, autogen_infra_sources)
-if 'API_MODULE' in env['ENV']:
-    #generate client side distribution
-    module_name = env['ENV']['API_MODULE']
-    sdist_client = env.Command("%s_vnc_api/%s" % (module_name, module_name), "vnc_api", [
-                                        Delete('$TARGET'),
-					Copy("$TARGET" + '/vnc_api', "$SOURCE")
-                                        ])
-    client_rules = []  
-    for file in Glob("#/%s/client/*" % module_name):
-	client_rules.append(env.Install("%s_vnc_api/" % module_name, file))
-    client_rules.append(env.Install("%s_vnc_api/%s"%(module_name, module_name), "vnc_api/__init__.py"))
-    cd_client = 'cd ' + Dir("%s_vnc_api/" % module_name).path + ' && ' 
-    sdist_client_gen = env.Command('dist/%s_vnc_api-0.1dev.tar.gz'%(module_name),
-    				'setup.py', cd_client + 'python setup.py sdist')
-    gen_depends = [sdist_gen]
-    gen_depends.extend(client_rules)	
-    env.Depends(sdist_client_gen,gen_depends)
-    env.Default(sdist_client_gen)
 
 # install everything before building distribution
 env.Depends(sdist_gen, sdist_depends)
