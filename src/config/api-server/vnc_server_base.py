@@ -16,10 +16,11 @@ from cfgm_common.exceptions import MaxRabbitPendingError, NoIdError
 from cfgm_common.rest import LinkObject
 from cfgm_common.uve.vnc_api.ttypes import VncApiCommon
 import netifaces
+from cfgm_common.vnc_extensions import ExtensionManager
 from csp.csp_api_context import APIContext
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from pysandesh.sandesh_base import Sandesh
-from stevedore import ExtensionManager
+
 
 import gen
 from gen.vnc_api_server_gen import VncApiServerGen
@@ -263,7 +264,7 @@ class VncApiServerBase(VncApiServerGen):
             auth_svc = vnc_auth.AuthService(self, self._args)
 
         self._pipe_start_app = auth_svc.get_middleware_app()
-        self.__load_middleware()
+
         if not self._pipe_start_app:
             self._pipe_start_app = bottle.app()
             # When the multi tenancy is disable, add 'admin' role into the
@@ -274,7 +275,7 @@ class VncApiServerBase(VncApiServerGen):
                 if bottle.request.app != self._pipe_start_app:
                     return
                 bottle.request.environ['HTTP_X_ROLE'] = 'admin'
-
+        self.__load_middleware()
         self._auth_svc = auth_svc
 
         # API/Permissions check
