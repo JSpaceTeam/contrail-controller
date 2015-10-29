@@ -373,8 +373,6 @@ class VncApiServerBase(VncApiServerGen):
             trace = self._generate_rest_api_request_trace()
             try:
                 response = handler(*args, **kwargs)
-                self._csp_logger.log_debug("Testing logging")
-                # self._generate_rest_api_response_trace(trace, response)
                 return response
             except Exception as e:
                 if trace:
@@ -745,6 +743,10 @@ class VncApiServerBase(VncApiServerGen):
             self._extension_mgrs['resourceApi'] = ExtensionManager(
                 'vnc_cfg_api.resourceApi',
                 api_server_ip=self._args.listen_ip_addr,
+                api_server_port=self._args.listen_port,
+                conf_sections=conf_sections, sandesh=self._sandesh)
+            self._extension_mgrs['rpcApi'] = ExtensionManager(
+                'vnc_cfg_api.rpcApi', api_server_ip=self._args.listen_ip_addr,
                 api_server_port=self._args.listen_port,
                 conf_sections=conf_sections, sandesh=self._sandesh)
             self._extension_mgrs['neutronApi'] = ExtensionManager(
