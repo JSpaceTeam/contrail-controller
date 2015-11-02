@@ -6,6 +6,7 @@ import copy
 import json
 from pprint import pformat
 import uuid
+from oslo_config import cfg
 import re
 import sys
 import logging
@@ -316,7 +317,7 @@ class VncApiServerBase(VncApiServerGen):
             if entry_func:
                 self._pipe_start_app = entry_func(self._pipe_start_app, self._settings)
             logging.warn("Successfully loaded middleware {}".format(name))
-        except ImportError:
+        except ImportError as e:
             logging.error("Failed to load middleware module {}".format(name))
 
     def __load_middleware(self):
@@ -748,7 +749,7 @@ class VncApiServerBase(VncApiServerGen):
             self._extension_mgrs['rpcApi'] = ExtensionManager(
                 'vnc_cfg_api.rpcApi', api_server_ip=self._args.listen_ip_addr,
                 api_server_port=self._args.listen_port,
-                conf_sections=conf_sections, sandesh=self._sandesh)
+                conf_sections=conf_sections, sandesh=self._sandesh, propogate_map_exceptions=True)
             self._extension_mgrs['neutronApi'] = ExtensionManager(
                 'vnc_cfg_api.neutronApi',
                 api_server_ip=self._args.listen_ip_addr,
@@ -1229,6 +1230,7 @@ class VncApiServerBase(VncApiServerGen):
 
         conf_parser.add_argument("-c", "--conf_file", action='append',
                                  help="Specify config file", metavar="FILE")
+
         args, remaining_argv = conf_parser.parse_known_args(args_str.split())
 
         defaults = {
@@ -1288,10 +1290,10 @@ class VncApiServerBase(VncApiServerGen):
         if args.conf_file:
             config = ConfigParser.SafeConfigParser({'admin_token': None})
             config.read(args.conf_file)
-            defaults.update(dict(config.items("DEFAULTS")))
-            if 'multi_tenancy' in config.options('DEFAULTS'):
+            defaults.update(dict(config.items("DEFAULT")))
+            if 'multi_tenancy' in config.defaults():
                 defaults['multi_tenancy'] = config.getboolean(
-                    'DEFAULTS', 'multi_tenancy')
+                    'DEFAULT', 'multi_tenancy')
             if 'SECURITY' in config.sections() and \
                             'use_certs' in config.options('SECURITY'):
                 if config.getboolean('SECURITY', 'use_certs'):
@@ -1305,8 +1307,8 @@ class VncApiServerBase(VncApiServerGen):
                             QuotaHelper.default_quota[str(k)] = int(v)
                     except ValueError:
                         pass
-            if 'default_encoding' in config.options('DEFAULTS'):
-                default_encoding = config.get('DEFAULTS', 'default_encoding')
+            if 'default_encoding' in config.defaults():
+                default_encoding = config.get('DEFAULT', 'default_encoding')
                 gen.resource_xsd.ExternalEncoding = default_encoding
 
         # Override with CLI options
@@ -1446,6 +1448,11 @@ class VncApiServerBase(VncApiServerGen):
                 self._args.cassandra_server_list.split()
         if type(self._args.collectors) is str:
             self._args.collectors = self._args.collectors.split()
+        #Parse config for olso configs. Try to move all config parsing to oslo cfg
+        config_args = []
+        config_args.append("--config-dir")
+        config_args.extend(args.conf_file)
+        cfg.CONF(args=config_args, default_config_files = args.conf_file)
 
     # end _parse_args
 
