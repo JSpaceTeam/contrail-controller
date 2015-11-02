@@ -1451,7 +1451,8 @@ class VncApiServerBase(VncApiServerGen):
         #Parse config for olso configs. Try to move all config parsing to oslo cfg
         config_args = []
         config_args.append("--config-dir")
-        config_args.extend(args.conf_file)
+        cfg_dir = str(args.conf_file[0]).rsplit("/", 1)[0]
+        config_args.append(cfg_dir)
         cfg.CONF(args=config_args, default_config_files = args.conf_file)
 
     # end _parse_args
