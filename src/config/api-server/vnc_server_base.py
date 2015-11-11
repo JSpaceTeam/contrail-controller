@@ -394,7 +394,7 @@ class VncApiServerBase(VncApiServerGen):
     # end route
 
     def config_log(self, err_str, level=SandeshLevel.SYS_INFO):
-        logging.log(level, err_str)
+        logging.warn(err_str)
 
     # end config_log
     def get_args(self):
