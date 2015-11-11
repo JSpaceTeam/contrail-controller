@@ -273,8 +273,6 @@ class VncApiServerBase(VncApiServerGen):
             @self._pipe_start_app.hook('before_request')
             @bottle.hook('before_request')
             def set_admin_role(*args, **kwargs):
-                if bottle.request.app != self._pipe_start_app:
-                    return
                 bottle.request.environ['HTTP_X_ROLE'] = 'admin'
         self.__load_middleware()
         self._auth_svc = auth_svc
