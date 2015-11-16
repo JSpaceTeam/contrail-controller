@@ -21,8 +21,6 @@ from cfgm_common.vnc_extensions import ExtensionManager
 from csp.csp_api_context import APIContext
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from pysandesh.sandesh_base import Sandesh
-
-
 import gen
 from gen.vnc_api_server_gen import VncApiServerGen
 from gevent import monkey
@@ -232,9 +230,7 @@ class VncApiServerBase(VncApiServerGen):
         self._profile_info = None
         self._sandesh = None
         self.csp_logger_init(self._settings)
-        from csp.csp_log_writer import CSPSandeshLogger
-
-        self._csp_logger = CSPSandeshLogger().get_csp_logger()  # CSP Logger
+        self._csp_logger = self.get_default_logger()
 
 
         # REST interface initialization
@@ -266,6 +262,7 @@ class VncApiServerBase(VncApiServerGen):
 
         self._pipe_start_app = auth_svc.get_middleware_app()
 
+
         if not self._pipe_start_app:
             self._pipe_start_app = bottle.app()
             # When the multi tenancy is disable, add 'admin' role into the
@@ -287,6 +284,7 @@ class VncApiServerBase(VncApiServerGen):
             self._db_connect(self._args.reset_config)
             self._db_init_entries()
 
+
     def homepage_http_get(self):
         json_body = {}
         json_links = []
@@ -306,6 +304,10 @@ class VncApiServerBase(VncApiServerGen):
         return json_body
 
     # end homepage_http_get
+
+    def get_default_logger(self):
+        from csp.csp_log_writer import CSPSandeshLogger
+        return CSPSandeshLogger().get_csp_logger()  # CSP Logger
 
     def __add_middleware(self,name, module):
         mod, func = module.split(':')
@@ -441,7 +443,6 @@ class VncApiServerBase(VncApiServerGen):
         return self._db_conn
 
     # end get_db_connection
-
     def _db_connect(self, reset_config):
         ifmap_ip = self._args.ifmap_server_ip
         ifmap_port = self._args.ifmap_server_port
@@ -463,6 +464,7 @@ class VncApiServerBase(VncApiServerGen):
                               cass_server_list, rabbit_server, rabbit_port,
                               rabbit_user, rabbit_password, rabbit_vhost,
                               reset_config, ifmap_loc, zk_server, self._args.cluster_id, ifmap_disable=self._args.disable_ifmap)
+
         self._db_conn = db_conn
 
     def _ensure_id_perms_present(self, obj_type, obj_uuid, obj_dict):
