@@ -500,7 +500,6 @@ class VncIfmapClient(VncIfmapClientGen):
                     lifetime='forever'))
             return request
 
-        mapclient = self._mapclient
         requests = []
         if 'self' in update:
             metalist = update['self']
