@@ -897,10 +897,11 @@ class VncServerCassandraClient(VncCassandraClient):
 
 class VncServerKombuClient(VncKombuClient):
     def __init__(self, db_client_mgr, rabbit_ip, rabbit_port, ifmap_db,
-                 rabbit_user, rabbit_password, rabbit_vhost):
+                 rabbit_user, rabbit_password, rabbit_vhost, ifmap_disable=False):
         self._db_client_mgr = db_client_mgr
         self._sandesh = db_client_mgr._sandesh
         self._ifmap_db = ifmap_db
+        self._ifmap_disable = ifmap_disable
         listen_port = db_client_mgr.get_server_port()
         q_name = 'vnc_config.%s-%s' %(socket.gethostname(), listen_port)
         super(VncServerKombuClient, self).__init__(
@@ -1006,11 +1007,12 @@ class VncServerKombuClient(VncKombuClient):
             raise
         finally:
              method_name = obj_info['type'].replace('-', '_')
-             method = getattr(self._ifmap_db, "_ifmap_%s_create" % (method_name))
-             (ok, result) = method(obj_info, obj_dict)
-             if not ok:
-                 self.config_log(result, level=SandeshLevel.SYS_ERR)
-                 raise Exception(result)
+             if not self._ifmap_disable:
+                 method = getattr(self._ifmap_db, "_ifmap_%s_create" % (method_name))
+                 (ok, result) = method(obj_info, obj_dict)
+                 if not ok:
+                     self.config_log(result, level=SandeshLevel.SYS_ERR)
+                     raise Exception(result)
     #end _dbe_create_notification
 
     def dbe_update_publish(self, obj_type, obj_ids):
@@ -1037,11 +1039,12 @@ class VncServerKombuClient(VncKombuClient):
         finally:
             ifmap_id = self._db_client_mgr.uuid_to_ifmap_id(obj_info['type'],
                                                             obj_info['uuid'])
-            method_name = obj_info['type'].replace('-', '_')
-            method = getattr(self._ifmap_db, "_ifmap_%s_update" % (method_name))
-            (ok, ifmap_result) = method(ifmap_id, new_obj_dict)
-            if not ok:
-                raise Exception(ifmap_result)
+            if not self._ifmap_disable:
+                method_name = obj_info['type'].replace('-', '_')
+                method = getattr(self._ifmap_db, "_ifmap_%s_update" % (method_name))
+                (ok, ifmap_result) = method(ifmap_id, new_obj_dict)
+                if not ok:
+                    raise Exception(ifmap_result)
     #end _dbe_update_notification
 
     def dbe_delete_publish(self, obj_type, obj_ids, obj_dict):
@@ -1201,6 +1204,7 @@ class VncDbClient(object):
 
         self._api_svr_mgr = api_svr_mgr
         self._sandesh = api_svr_mgr._sandesh
+        self._ifmap_disable = ifmap_disable
 
         # certificate auth
         ssl_options = None
@@ -1215,13 +1219,14 @@ class VncDbClient(object):
 
         self._db_resync_done = gevent.event.Event()
 
+
         msg = "Connecting to ifmap on %s:%s as %s" \
               % (ifmap_srv_ip, ifmap_srv_port, uname)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
-
         self._ifmap_db = VncIfmapClient(
-             self, ifmap_srv_ip, ifmap_srv_port,
-             uname, passwd, ssl_options, ifmap_srv_loc,ifmap_disable=ifmap_disable)
+            self, ifmap_srv_ip, ifmap_srv_port,
+            uname, passwd, ssl_options, ifmap_srv_loc,ifmap_disable=ifmap_disable)
+
         msg = "Connecting to cassandra on %s" % (cass_srv_list,)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
 
@@ -1236,7 +1241,7 @@ class VncDbClient(object):
         self._msgbus = VncServerKombuClient(self, rabbit_server,
                                             rabbit_port, self._ifmap_db,
                                             rabbit_user, rabbit_password,
-                                            rabbit_vhost)
+                                            rabbit_vhost, self._ifmap_disable)
     # end __init__
 
     def _update_default_quota(self):
@@ -1260,17 +1265,20 @@ class VncDbClient(object):
     def db_resync(self):
         # Read contents from cassandra and publish to ifmap
 
-        self._ifmap_db.accumulator = []
-        self._ifmap_db.accumulated_request_len = 0
+
         start_time = datetime.datetime.utcnow()
-        self._cassandra_db.walk(self._dbe_resync)
-        self.config_log("Cassandra DB walk completed.",
-            level=SandeshLevel.SYS_INFO)
-        self._ifmap_db.publish_accumulated()
+        if not self._ifmap_disable:
+            self._ifmap_db.accumulator = []
+            self._ifmap_db.accumulated_request_len = 0
+            self._cassandra_db.walk(self._dbe_resync)
+            self.config_log("Cassandra DB walk completed.",
+                level=SandeshLevel.SYS_INFO)
+            self._ifmap_db.publish_accumulated()
+            end_time = datetime.datetime.utcnow()
+            msg = "Time elapsed in syncing ifmap: %s" % (str(end_time - start_time))
+            self.config_log(msg, level=SandeshLevel.SYS_DEBUG)
         self._update_default_quota()
-        end_time = datetime.datetime.utcnow()
-        msg = "Time elapsed in syncing ifmap: %s" % (str(end_time - start_time))
-        self.config_log(msg, level=SandeshLevel.SYS_DEBUG)
+
         self._db_resync_done.set()
         self._zk_db._zk_client.set_lost_cb()
     # end db_resync
@@ -1371,6 +1379,9 @@ class VncDbClient(object):
         obj_type = None
         try:
             obj_type = json.loads(obj_cols['type'])
+            if obj_type == "project":
+                print("Project walk")
+
             (ok, obj_dicts) = self._cassandra_db.read(obj_type, [obj_uuid])
             obj_dict = obj_dicts[0]
 
@@ -1389,26 +1400,26 @@ class VncDbClient(object):
             self.config_object_error(
                 obj_uuid, None, obj_type, 'dbe_resync:cassandra_read', str(e))
             return
+        if not self._ifmap_disable:
+            try:
+                parent_type = obj_dict.get('parent_type', None)
+                method = getattr(self._ifmap_db, "_ifmap_%s_alloc" % (obj_type))
+                (ok, result) = method(parent_type, obj_dict['fq_name'])
+                (my_imid, parent_imid) = result
+            except Exception as e:
+                self.config_object_error(
+                    obj_uuid, None, obj_type, 'dbe_resync:ifmap_alloc', str(e))
+                return
 
-        try:
-            parent_type = obj_dict.get('parent_type', None)
-            method = getattr(self._ifmap_db, "_ifmap_%s_alloc" % (obj_type))
-            (ok, result) = method(parent_type, obj_dict['fq_name'])
-            (my_imid, parent_imid) = result
-        except Exception as e:
-            self.config_object_error(
-                obj_uuid, None, obj_type, 'dbe_resync:ifmap_alloc', str(e))
-            return
-
-        try:
-             obj_ids = {'uuid': obj_uuid, 'imid': my_imid,
-                        'parent_imid': parent_imid}
-             method = getattr(self._ifmap_db, "_ifmap_%s_create" % (obj_type))
-             (ok, result) = method(obj_ids, obj_dict)
-        except Exception as e:
-            self.config_object_error(
-                 obj_uuid, None, obj_type, 'dbe_resync:ifmap_create', str(e))
-            return
+            try:
+                 obj_ids = {'uuid': obj_uuid, 'imid': my_imid,
+                            'parent_imid': parent_imid}
+                 method = getattr(self._ifmap_db, "_ifmap_%s_create" % (obj_type))
+                 (ok, result) = method(obj_ids, obj_dict)
+            except Exception as e:
+                self.config_object_error(
+                     obj_uuid, None, obj_type, 'dbe_resync:ifmap_create', str(e))
+                return
     # end _dbe_resync
 
     def _dbe_check(self, obj_uuid, obj_cols):
@@ -1457,20 +1468,19 @@ class VncDbClient(object):
                 (ok, obj_uuid) = self._alloc_set_uuid(obj_type, obj_dict)
         except ResourceExistsError as e:
             return (False, (409, str(e)))
-
-        parent_type = obj_dict.get('parent_type', None)
-        method_name = obj_type.replace('-', '_')
-        method = getattr(self._ifmap_db, "_ifmap_%s_alloc" % (method_name))
-        (ok, result) = method(parent_type, obj_dict['fq_name'])
-        if not ok:
-            self.dbe_release(obj_type, obj_dict['fq_name'])
-            return False, result
-
-        (my_imid, parent_imid) = result
         obj_ids = {
-            'uuid': obj_dict['uuid'],
-            'imid': my_imid, 'parent_imid': parent_imid}
-
+            'uuid': obj_dict['uuid']
+        }
+        if not self._ifmap_disable:
+            parent_type = obj_dict.get('parent_type', None)
+            method_name = obj_type.replace('-', '_')
+            method = getattr(self._ifmap_db, "_ifmap_%s_alloc" % (method_name))
+            (ok, result) = method(parent_type, obj_dict['fq_name'])
+            if not ok:
+                self.dbe_release(obj_type, obj_dict['fq_name'])
+                return False, result
+            (my_imid, parent_imid) = result
+            obj_ids.update({'imid': my_imid, 'parent_imid': parent_imid})
         return (True, obj_ids)
     # end dbe_alloc
 
