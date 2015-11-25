@@ -119,6 +119,19 @@ _WEB_HOST = '0.0.0.0'
 _WEB_PORT = 8082
 _ADMIN_PORT = 8095
 
+
+sandesh_to_log_level = {
+        SandeshLevel.SYS_EMERG : logging.FATAL,
+        SandeshLevel.SYS_CRIT : logging.CRITICAL,
+        SandeshLevel.SYS_ALERT : logging.INFO,
+        SandeshLevel.SYS_NOTICE : logging.INFO,
+        SandeshLevel.SYS_INFO : logging.INFO,
+        SandeshLevel.SYS_WARN : logging.WARN,
+        SandeshLevel.SYS_DEBUG : logging.DEBUG,
+        SandeshLevel.SYS_ERR : logging.ERROR
+}
+
+
 _ACTION_RESOURCES = [
     {'uri': '/ref-update', 'link_name': 'ref-update',
      'method_name': 'ref_update_http_post'},
@@ -187,6 +200,19 @@ def mask_password(message, secret="***"):
     for pattern in _SANITIZE_PATTERNS:
         message = re.sub(pattern, secret, message)
     return message
+
+#Parse config for olso configs. Try to move all config parsing to oslo cfg
+elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
+cfg.CONF.register_cli_opt(cfg.BoolOpt(name='search_enabled', default=False),
+                              group=elastic_search_group)
+cfg.CONF.register_cli_opt(cfg.ListOpt('server_list',
+                                          item_type=cfg.types.String(),
+                                          default='127.0.0.1:9200',
+                                          help="Multiple servers option"), group=elastic_search_group)
+cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing',default=False,
+                                          help="Enable connection sniffing for elastic search driver")
+                              ,group=elastic_search_group)
+
 
 
 class VncApiServerBase(VncApiServerGen):
@@ -396,9 +422,14 @@ class VncApiServerBase(VncApiServerGen):
     # end route
 
     def config_log(self, err_str, level=SandeshLevel.SYS_INFO):
-        logging.warn(err_str)
-
+        log_level = logging.WARN
+        if level in sandesh_to_log_level:
+          log_level=sandesh_to_log_level[level]
+        logging.log(log_level, err_str)
     # end config_log
+
+
+
     def get_args(self):
         return self._args
 
@@ -527,11 +558,12 @@ class VncApiServerBase(VncApiServerGen):
     # end _get_default_id_perms
 
 
+
     def config_object_error(self, id, fq_name_str, obj_type,
                             operation, err_str):
-        # logger
-        pass
-
+        error_msg = "ConfigError id: %s, fq_name:%s, type: %s, operation:%s, error:%s" % (id, fq_name_str,
+                                                                                          obj_type, operation, err_str)
+        self._csp_logger.log_error(error_msg)
     # end config_object_error
 
     # uuid is parent's for collections
@@ -1448,7 +1480,7 @@ class VncApiServerBase(VncApiServerGen):
                 self._args.cassandra_server_list.split()
         if type(self._args.collectors) is str:
             self._args.collectors = self._args.collectors.split()
-        #Parse config for olso configs. Try to move all config parsing to oslo cfg
+
         config_args = []
         config_args.append("--config-dir")
         cfg_dir = str(args.conf_file[0]).rsplit("/", 1)[0]
