@@ -201,6 +201,10 @@ class GeneratedsSuper(object):
         return 42
 
     @staticmethod
+    def populate_long(name):
+        return 42
+    
+    @staticmethod
     def populate_unsignedInt(name):
         return 42
 
