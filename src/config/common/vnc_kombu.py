@@ -41,7 +41,7 @@ class VncKombuClient(object):
                         self._logger(msg, level=SandeshLevel.SYS_ERR)
 
                 self._obj_update_q = self._conn.SimpleQueue(self._update_queue_obj)
-
+                self._search_rc_producer = self._conn.Producer(self._conn.channel(), exchange=self.search_rc_exchange)
                 old_subscribe_greenlet = self._subscribe_greenlet
                 self._subscribe_greenlet = gevent.spawn(self._dbe_oper_subscribe)
                 if old_subscribe_greenlet:
@@ -70,6 +70,9 @@ class VncKombuClient(object):
 
         obj_upd_exchange = kombu.Exchange('vnc_config.object-update', 'fanout',
                                           durable=False)
+
+        self.search_rc_exchange = kombu.Exchange('vnc_config.search_rc', 'direct', durable=True,
+                                            delivery_mode='persistent')
 
         self._update_queue_obj = kombu.Queue(q_name, obj_upd_exchange)
         self._subscribe_greenlet = None

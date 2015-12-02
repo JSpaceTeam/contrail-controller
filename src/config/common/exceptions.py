@@ -131,3 +131,13 @@ class AmbiguousParentError(VncError):
 class InvalidSessionID(VncError):
     pass
 # end InvalidSessionID
+
+class SearchServiceError(VncError):
+    def __init__(self, message):
+        self._message = message
+    # end __init__
+
+    def __str__(self):
+        return 'Search Service unavailable : %s' % (str(self._message))
+    # end __str__
+# end class SearchServiceError
