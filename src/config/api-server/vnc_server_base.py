@@ -563,7 +563,7 @@ class VncApiServerBase(VncApiServerGen):
                             operation, err_str):
         error_msg = "ConfigError id: %s, fq_name:%s, type: %s, operation:%s, error:%s" % (id, fq_name_str,
                                                                                           obj_type, operation, err_str)
-        self._csp_logger.log_error(error_msg)
+        self.config_log(err_str, level=SandeshLevel.SYS_ERR)
     # end config_object_error
 
     # uuid is parent's for collections
