@@ -209,6 +209,10 @@ class GeneratedsSuper(object):
         return 42
 
     @staticmethod
+    def populate_unsignedShort(name):
+        return 21
+    
+    @staticmethod
     def populate_integer(name):
         if "prefix" in name:
             return 24
@@ -226,3 +230,5 @@ class GeneratedsSuper(object):
     @staticmethod
     def populate_boolean(name):
         return False
+
+
