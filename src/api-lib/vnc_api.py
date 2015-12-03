@@ -316,7 +316,7 @@ class VncApi(VncApiClientGen):
         for link in py_obj['links']:
             # strip base from *_url to get *_uri
             uri = link['link']['href'].replace(srv_root_url, '')
-            if link['link']['rel'] == 'collection':
+            if link['link']['rel'] in {'collection', 'rpc'}:
                 class_name = "%s" % (CamelCase(link['link']['name']))
                 cls = str_to_class(class_name)
                 if not cls:

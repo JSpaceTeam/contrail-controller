@@ -22,7 +22,7 @@ from csp.csp_api_context import APIContext
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from pysandesh.sandesh_base import Sandesh
 import gen
-from gen.vnc_api_server_gen import VncApiServerGen
+from gen.vnc_api_server_gen import VncApiServerGen, SERVICE_PATH
 from gevent import monkey
 from provision_defaults import Provision
 import vnc_auth
@@ -133,24 +133,24 @@ sandesh_to_log_level = {
 
 
 _ACTION_RESOURCES = [
-    {'uri': '/ref-update', 'link_name': 'ref-update',
+    {'uri': '/%s/ref-update'%(SERVICE_PATH), 'link_name': 'ref-update',
      'method_name': 'ref_update_http_post'},
-    {'uri': '/fqname-to-id', 'link_name': 'name-to-id',
+    {'uri': '/%s/fqname-to-id' % (SERVICE_PATH), 'link_name': 'name-to-id',
      'method_name': 'fq_name_to_id_http_post'},
-    {'uri': '/id-to-fqname', 'link_name': 'id-to-name',
+    {'uri': '/%s/id-to-fqname' % (SERVICE_PATH), 'link_name': 'id-to-name',
      'method_name': 'id_to_fq_name_http_post'},
     # ifmap-to-id only for ifmap subcribers using rest for publish
-    {'uri': '/ifmap-to-id', 'link_name': 'ifmap-to-id',
+    {'uri': '/%s/ifmap-to-id' % (SERVICE_PATH), 'link_name': 'ifmap-to-id',
      'method_name': 'ifmap_to_id_http_post'},
-    {'uri': '/db-check', 'link_name': 'database-check',
+    {'uri': '/%s/db-check' % (SERVICE_PATH), 'link_name': 'database-check',
      'method_name': 'db_check'},
-    {'uri': '/fetch-records', 'link_name': 'fetch-records',
+    {'uri': '/%s/fetch-records' % (SERVICE_PATH), 'link_name': 'fetch-records',
      'method_name': 'fetch_records'},
-    {'uri': '/start-profile', 'link_name': 'start-profile',
+    {'uri': '/%s/start-profile' % (SERVICE_PATH), 'link_name': 'start-profile',
      'method_name': 'start_profile'},
-    {'uri': '/stop-profile', 'link_name': 'stop-profile',
+    {'uri': '/%s/stop-profile' % (SERVICE_PATH), 'link_name': 'stop-profile',
      'method_name': 'stop_profile'},
-    {'uri': '/list-bulk-collection', 'link_name': 'list-bulk-collection',
+    {'uri': '/%s/list-bulk-collection' % (SERVICE_PATH), 'link_name': 'list-bulk-collection',
      'method_name': 'list_bulk_collection_http_post'},
 ]
 
@@ -949,11 +949,11 @@ class VncApiServerBase(VncApiServerGen):
     # end _list_collection
 
     def generate_url(self, obj_type, obj_uuid):
-        obj_uri_type = obj_type.replace('_', '-')
+        obj_uri_type = '/' + obj_type.replace('_', '-')
         try:
             url_parts = bottle.request.urlparts
-            return '%s://%s/%s/%s' \
-                   % (url_parts.scheme, url_parts.netloc, obj_uri_type, obj_uuid)
+            return '%s://%s%s%s/%s' \
+                   % (url_parts.scheme, url_parts.netloc, SERVICE_PATH, obj_uri_type, obj_uuid)
         except Exception as e:
             return '%s/%s/%s' % (self._base_url, obj_uri_type, obj_uuid)
 
