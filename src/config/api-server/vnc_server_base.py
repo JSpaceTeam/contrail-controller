@@ -133,24 +133,24 @@ sandesh_to_log_level = {
 
 
 _ACTION_RESOURCES = [
-    {'uri': '/%s/ref-update'%(SERVICE_PATH), 'link_name': 'ref-update',
+    {'uri': '%s/ref-update'%(SERVICE_PATH), 'link_name': 'ref-update',
      'method_name': 'ref_update_http_post'},
-    {'uri': '/%s/fqname-to-id' % (SERVICE_PATH), 'link_name': 'name-to-id',
+    {'uri': '%s/fqname-to-id' % (SERVICE_PATH), 'link_name': 'name-to-id',
      'method_name': 'fq_name_to_id_http_post'},
-    {'uri': '/%s/id-to-fqname' % (SERVICE_PATH), 'link_name': 'id-to-name',
+    {'uri': '%s/id-to-fqname' % (SERVICE_PATH), 'link_name': 'id-to-name',
      'method_name': 'id_to_fq_name_http_post'},
     # ifmap-to-id only for ifmap subcribers using rest for publish
-    {'uri': '/%s/ifmap-to-id' % (SERVICE_PATH), 'link_name': 'ifmap-to-id',
+    {'uri': '%s/ifmap-to-id' % (SERVICE_PATH), 'link_name': 'ifmap-to-id',
      'method_name': 'ifmap_to_id_http_post'},
-    {'uri': '/%s/db-check' % (SERVICE_PATH), 'link_name': 'database-check',
+    {'uri': '%s/db-check' % (SERVICE_PATH), 'link_name': 'database-check',
      'method_name': 'db_check'},
-    {'uri': '/%s/fetch-records' % (SERVICE_PATH), 'link_name': 'fetch-records',
+    {'uri': '%s/fetch-records' % (SERVICE_PATH), 'link_name': 'fetch-records',
      'method_name': 'fetch_records'},
-    {'uri': '/%s/start-profile' % (SERVICE_PATH), 'link_name': 'start-profile',
+    {'uri': '%s/start-profile' % (SERVICE_PATH), 'link_name': 'start-profile',
      'method_name': 'start_profile'},
-    {'uri': '/%s/stop-profile' % (SERVICE_PATH), 'link_name': 'stop-profile',
+    {'uri': '%s/stop-profile' % (SERVICE_PATH), 'link_name': 'stop-profile',
      'method_name': 'stop_profile'},
-    {'uri': '/%s/list-bulk-collection' % (SERVICE_PATH), 'link_name': 'list-bulk-collection',
+    {'uri': '%s/list-bulk-collection' % (SERVICE_PATH), 'link_name': 'list-bulk-collection',
      'method_name': 'list_bulk_collection_http_post'},
 ]
 
