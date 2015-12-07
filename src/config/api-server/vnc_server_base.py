@@ -1161,6 +1161,13 @@ class VncApiServerBase(VncApiServerGen):
         return None
     # end get_resource_class
 
+    def set_resource_class(self, resource_type, resource_class):
+        obj_type = resource_type.replace('-', '_')
+        self._resource_classes[obj_type]  = resource_class
+    # end set_resource_class
+
+
+
     def mt_http_put(self):
         multi_tenancy = bottle.request.json['enabled']
         user_token = bottle.request.get_header('X-Auth-Token')
