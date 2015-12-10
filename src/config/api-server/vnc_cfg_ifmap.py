@@ -1865,8 +1865,37 @@ class VncDbClient(object):
 
     def get_server_port(self):
         return self._api_svr_mgr.get_server_port()
-        # end get_server_port
+    # end get_server_port
 
+    def get_obj_uuids_from_elastic_search(self, obj_type, query):
+        size = None
+        from_ = None
+        sorter = None
+        filter = None
+        if 'size' in query:
+            size = query.size
+        if 'from' in query:
+            from_ = query['from']
+        if 'sorter' in query:
+            sorter = query.sorter
+        if 'filter' in query:
+            filter = query.filter
+        body = SearchUtil.convert_to_es_query_dsl(size, from_, sorter, filter)
+        matches = self._search_db.search(obj_type=obj_type, body=body)
+        total = matches['hits']['total']
+        hits = matches['hits']['hits']
+        children_fq_names_uuids = []
+        if hits:
+            for hit in hits:
+                obj_uuid = hit['_id']
+                print obj_uuid
+                try:
+                    fq_name = self.uuid_to_fq_name(obj_uuid)
+                except cfgm_common.exceptions.NoIdError:
+                    continue
+                children_fq_names_uuids.append((fq_name, obj_uuid))
+        return (True, children_fq_names_uuids, total)
+     #get_obj_uuids_from_elastic_search
 
 # end class VncDbClient
 
@@ -2042,7 +2071,6 @@ class VncSearchDbClient(VncSearchItf):
     def search(self, obj_type=None, body=None):
         print json.dumps(body)
         return self._es_client.search(index=self.index, doc_type=obj_type, body=body)
-
     # end search
 
     def __get_default_params(self):
@@ -2064,3 +2092,235 @@ class VncNoOpEsDb(VncSearchItf):
 
     def search_update(self, obj_type, obj_ids, obj_dict):
         pass
+
+class SearchUtil:
+    __special_str = ["like", "(", ")", ";", "!=", "!>", "!<", "<>", "<=", ">=", "=", "<", ">", "||", "&&", " ", "--",
+                     "\r\n", "\t"]
+
+    @classmethod
+    def convert_to_es_query_dsl(self, size, from_, sorter_str, filter):
+        body = {}
+        if size:
+            body['size'] = size
+        else:
+            body['size'] = 1000
+        if from_:
+            body['from'] = from_
+        if sorter_str:
+            sorter_list = sorter_str.split(',')
+            sorter_dicts = []
+            for sorter in sorter_list:
+                sorter_element = sorter.split()
+                if not sorter_element[1]:
+                    sorter_element[1] = 'asc'
+                sorter_dicts.append({sorter_element[0]: sorter_element[1].lower()})
+            body['sort'] = sorter_dicts
+        if filter:
+            body['query'] = {}
+            body['query']['filtered'] = {}
+            body['query']['filtered']['filter'] = self.__parser_filter(filter)
+        else:
+            body['query'] = {'match_all': {}}
+        return body
+    #end convert_to_es_query_dsl
+
+    @classmethod
+    def __convert_expression(self, word, json_obj):
+        json_obj_type=type(json_obj)
+        if type(word) is not dict:
+            if word[1] in ('=', 'eq'):
+                if (json_obj_type is list):
+                    json_obj.append({'term': {word[0] + '._raw': word[2]}})
+                else:
+                    json_obj['term'] = {word[0] + '._raw': word[2]}
+            elif word[1] == 'like':
+                if (json_obj_type is list):
+                    json_obj.append({'regexp': {word[0] + '._raw': '.*' + word[2] + '.*'}})
+                else:
+                    json_obj['regexp'] = {word[0] + '._raw': '.*' + word[2] + '.*'}
+            elif word[1] in ('>=','>','<','<='):
+                if word[1] == '>=':
+                    op='gte'
+                elif word[1] == '>':
+                    op='gt'
+                elif word[1] == '<':
+                    op='lt'
+                elif word[1] == '<=':
+                    op='lte'
+
+                if (json_obj_type is list):
+                    json_obj.append({'range':{word[0]:{op:word[2]}}})
+                else:
+                    json_obj['range'] = {'range':{word[0]:{op:word[2]}}}
+        else:
+            json_obj.append(word)
+    #end __convert_expression
+
+    @classmethod
+    def __convert(self, words):
+        if len(words) > 2:
+            while len(words) > 2:
+                operator_index = self.__get_first_operator_index(words)
+                word = words[operator_index]
+                value1 = words[operator_index - 2]
+                value2 = words[operator_index - 1]
+                list = []
+                json_obj = {}
+                if word in ('&&', 'and'):
+                    json_obj['and'] = list
+                elif word in ('||', 'or'):
+                    json_obj['or'] = list
+                self.__convert_expression(value1, list)
+                self.__convert_expression(value2, list)
+                del words[operator_index]
+                del words[operator_index - 1]
+                del words[operator_index - 2]
+                words.insert(operator_index - 2, json_obj)
+            return words[0]
+        else:
+            query = {}
+            self.__convert_expression(words[0], query)
+            return query
+    #end __convert
+
+    @classmethod
+    def __parser_filter(self, filter_str):
+        words = self.__reorder(filter_str)
+        filter = self.__convert(words)
+        return filter
+    #end __parser_filter
+
+    @classmethod
+    def __get_first_operator_index(self, words):
+        found = False
+        curr_index = 2
+        while (found == False and curr_index < len(words) - 1):
+            word = words[curr_index]
+            if type(word) is not tuple:
+                found = True
+            else:
+                curr_index = curr_index + 1
+        return curr_index
+    #end __get_first_operator_index
+
+    @classmethod
+    def __reorder(self, str):
+        variable_stack = ['#']
+        words_arr = []
+        current_str = str
+        while current_str is not None and current_str != '':
+            t = self.__parse_word(current_str)
+            word = t[0]
+            current_str = t[1]
+            if word == "(" or word == ")" or word == "&&" or word == "||" or word == "and" or word == "or":
+                if word == ")":
+                    while variable_stack[len(variable_stack) - 1] != "(":
+                        words_arr.append(variable_stack.pop())
+                    variable_stack.pop()
+                else:
+                    priority = self.__compare_priority(variable_stack[len(variable_stack) - 1], word)
+                    if priority:
+                        while priority:
+                            words_arr.append(variable_stack.pop())
+                            priority = self.__compare_priority(variable_stack[len(variable_stack) - 1], word)
+                    variable_stack.append(word)
+            else:
+                conditionTuple = self.__parse_word(current_str)
+                condition = conditionTuple[0]
+                current_str = conditionTuple[1]
+                value_tuple = self.__parse_word(current_str)
+                value_str = value_tuple[0]
+                current_str = value_tuple[1]
+                value = None
+                if value_str[0] == "'":
+                    value = value_str[1: len(value_str) - 1]
+                else:
+                    value = value_str
+                words_arr.append((word, condition, value))
+        while len(variable_stack) > 0:
+            top = variable_stack.pop()
+            if top != '#':
+                words_arr.append(top)
+        return words_arr
+    #end __reorder
+
+    @classmethod
+    def __compare_priority(self, ope1, ope2):
+        if ope1 in ('or', '||') and ope2 in ('and', '&&'):
+            return True
+        else:
+            return False
+    #end __compare_priority
+
+    @classmethod
+    def __parse_word(self, original_str):
+        is_single_quote = False
+        offset = 0
+        str = self.__trim_left(original_str)
+        length = len(str)
+        if length == 0:
+            return (None, None)
+        else:
+            special_chars = self.__check_special_str(str)
+            if special_chars is not None:
+                return (special_chars, str[len(special_chars):])
+            else:
+                with_slash = False
+                while (offset < length):
+                    c = str[offset]
+                    if c == '\\':
+                        offset += 1
+                        if with_slash:
+                            with_slash = False
+                        else:
+                            with_slash = True
+                    else:
+                        if c == '\'' and not with_slash:
+                            if is_single_quote:
+                                break
+                            else:
+                                is_single_quote = True
+                                offset += 1
+                        elif not is_single_quote:
+                            special_chars = self.__check_special_str(str[offset + 1:])
+                            if not special_chars:
+                                offset += 1
+                            else:
+                                break
+                        else:
+                            with_slash = False
+                            offset += 1
+                offset = min(offset, length - 1)
+                return (str[: offset + 1], str[offset + 1:])
+    # end __parse_word
+
+    @classmethod
+    def __trim_left(self, str):
+        offset = 0
+        length = len(str)
+        while offset < length and (str[offset] in (' ', '\t') or '\r\n'.find(str[offset]) >= 0):
+            offset = offset + 1
+        if offset > 0:
+            return str[offset:]
+        else:
+            return str
+    # end __trim_left
+
+    @classmethod
+    def __check_special_str(self, str):
+        if len(str) == 0:
+            return None
+        else:
+            special_chars = None
+            if len(str) > 1:
+                two_chars = str[0] + str[1]
+                if two_chars in self.__special_str:
+                    special_chars = two_chars
+            if not special_chars:
+                one_char = str[0]
+                if one_char in self.__special_str:
+                    special_chars = one_char
+            return special_chars
+    # end __check_special_str
+
+# end class SearchUtil
