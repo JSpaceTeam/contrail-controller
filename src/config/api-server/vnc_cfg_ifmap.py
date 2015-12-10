@@ -2138,7 +2138,7 @@ class SearchUtil:
                     json_obj.append({'regexp': {word[0] + '._raw': '.*' + word[2] + '.*'}})
                 else:
                     json_obj['regexp'] = {word[0] + '._raw': '.*' + word[2] + '.*'}
-            elif word[1] in ('>=','>','<','<='):
+            elif word[1] in ('>=','>','<','<=','gte','gt','lt','lte'):
                 if word[1] == '>=':
                     op='gte'
                 elif word[1] == '>':
@@ -2147,6 +2147,8 @@ class SearchUtil:
                     op='lt'
                 elif word[1] == '<=':
                     op='lte'
+                else:
+                    op=word[1]
 
                 if (json_obj_type is list):
                     json_obj.append({'range':{word[0]:{op:word[2]}}})
