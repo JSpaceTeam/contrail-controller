@@ -213,7 +213,8 @@ cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing',default=False,
                                           help="Enable connection sniffing for elastic search driver")
                               ,group=elastic_search_group)
 
-
+cfg.CONF.register_cli_opt(cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
+                          group=elastic_search_group)
 
 class VncApiServerBase(VncApiServerGen):
     """

@@ -1896,7 +1896,7 @@ class VncSearchDbClient(VncSearchItf):
         self.logger = logging.getLogger('elasticsearch')
         self._db_client_mgr = db_client_mgr
         self._msg_bus = msg_bus
-
+        self._consistency = "quorum"
         while True:
             try:
                 opts = {}
@@ -1916,6 +1916,7 @@ class VncSearchDbClient(VncSearchItf):
 
                 self._index_client = IndicesClient(self._es_client)
                 self.index, self._mapped_doc_types = self.__initialize_index_schema(reset_config)
+                self._mapped_doc_types = filter(lambda x : x not in {'project', 'domain'}, self._mapped_doc_types)
                 break
             except ConnectionError as ce:
                 self.logger.warn("Failed to connect to elastic search server {}. {}".format(elastic_srv_list, ce))
@@ -1994,7 +1995,7 @@ class VncSearchDbClient(VncSearchItf):
         if self.is_doc_type_mapped(obj_type):
             obj_dict_scrubbed = self._scrub_dict(obj_dict)
             self._es_client.index(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
-                                  body=json.dumps(obj_dict_scrubbed))
+                                  body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
 
     # end create
 
@@ -2004,15 +2005,18 @@ class VncSearchDbClient(VncSearchItf):
         if self.is_doc_type_mapped(obj_type):
             obj_dict_scrubbed = {}
             obj_dict_scrubbed["doc"] = self._scrub_dict(new_obj_dict)
-            self._es_client.update(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
-                                   body=json.dumps(obj_dict_scrubbed))
-
+            if self._es_client.exists(index=self.index, doc_type=obj_type, id=obj_ids['uuid']):
+                self._es_client.update(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
+                                   body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
+            else:
+                self.search_create(obj_type, obj_ids, new_obj_dict, **self.__get_default_params())
     # end dbe_update
 
     @search_db_trace(OP_DELETE)
     def search_delete(self, obj_type, obj_ids, obj_dict=None):
         if self.is_doc_type_mapped(obj_type):
-            self._es_client.delete(index=self.index, doc_type=obj_type, id=obj_ids['uuid'])
+            self._es_client.delete(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
+                                   **self.__get_default_params())
 
     # end dbe_delete
 
@@ -2027,7 +2031,17 @@ class VncSearchDbClient(VncSearchItf):
 
     # end dbe_list
 
+    def search(self, obj_type=None, body=None):
+        print json.dumps(body)
+        return self._es_client.search(index=self.index, doc_type=obj_type, body=body)
 
+    # end search
+
+    def __get_default_params(self):
+        return {
+            'consistency': self._consistency,
+            'timeout': str(cfg.CONF.elastic_search.timeout) + 's'
+        }
 
 
 # end VncSearchDbClient
