@@ -982,7 +982,8 @@ class VncServerKombuClient(VncKombuClient):
     # end
 
     def search_rc_publish(self, message):
-        self._search_q_put(message)
+        if message:
+            self._search_q_put(message)
 
     # end search_rc_publish
 
@@ -1884,6 +1885,9 @@ class VncSearchItf(object):
     def search_delete(self, obj_type, obj_ids, obj_dict):
         raise NotImplementedError()
 
+    def reconcile(self):
+        return False
+
 
 # end VncSearchItf
 
@@ -1928,6 +1932,10 @@ class VncSearchDbClient(VncSearchItf):
                 pass
 
     # __init__
+
+    def reconcile(self):
+        return True
+    # end reconcile
 
     def config_log(self, msg, level):
         self._db_client_mgr.config_log(msg, level)

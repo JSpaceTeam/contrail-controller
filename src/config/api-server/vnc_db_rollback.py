@@ -123,8 +123,10 @@ class VncDBRollBackHandler(object):
     # end __reconcile_delete
 
     def __reconciliation_message(self, op, obj_type, obj_ids):
-        message = {'reconcile': op, 'index': self._search_mgr.index}
-        message.update(obj_ids)
-        message.update({'type': obj_type})
-        return message
+        if self._search_mgr.reconcile():
+            message = {'reconcile': op, 'index': self._search_mgr.index}
+            message.update(obj_ids)
+            message.update({'type': obj_type})
+            return message
+        return None
         # end __reconciliation_message
