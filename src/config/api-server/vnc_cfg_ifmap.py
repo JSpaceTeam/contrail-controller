@@ -1702,7 +1702,7 @@ class VncDbClient(object):
 
     def dbe_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
                  obj_uuids=None, body=None, params=None):
-        if obj_uuids or parent_uuids or back_ref_uuids:
+        if obj_uuids or parent_uuids or back_ref_uuids or not self._search_db.enabled():
             method_name = obj_type.replace('-', '_')
             (ok, total) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
                                                    back_ref_uuids=back_ref_uuids,
@@ -1729,7 +1729,7 @@ class VncDbClient(object):
 
     def dbe_count(self, obj_type, parent_uuids=None, back_ref_uuids=None,
                   obj_uuids=None, body=None, params=None):
-        if not obj_uuids and not parent_uuids and not back_ref_uuids:
+        if not obj_uuids and not parent_uuids and not back_ref_uuids and self._search_db.enabled():
             (ok, result) = self._search_db.count(obj_type=obj_type, body=body, params=params)
         else:
             method_name = obj_type.replace('-', '_')
@@ -1927,6 +1927,9 @@ class VncSearchItf(object):
     def reconcile(self):
         return False
 
+    def enabled(self):
+        return False
+
 
 # end VncSearchItf
 
@@ -1975,6 +1978,11 @@ class VncSearchDbClient(VncSearchItf):
     def reconcile(self):
         return True
     # end reconcile
+
+    def enabled(self):
+        return True
+
+    # end enabled
 
     def config_log(self, msg, level):
         self._db_client_mgr.config_log(msg, level)

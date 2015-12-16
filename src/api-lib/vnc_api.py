@@ -668,10 +668,9 @@ class VncApi(VncApiClientGen):
         if not detail:
             return json.loads(content)
 
-        resource_dicts = json.loads(content)['%ss' %(obj_type)]
+        resource_dicts = json.loads(content)['%s' %(obj_type)]
         resource_objs = []
-        for resource_dict in resource_dicts:
-            obj_dict = resource_dict['%s' %(obj_type)]
+        for obj_dict in resource_dicts:
             resource_obj = obj_class.from_dict(**obj_dict)
             resource_obj.clear_pending_updates()
             resource_obj.set_server_conn(self)
