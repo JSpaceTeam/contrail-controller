@@ -235,3 +235,7 @@ class GeneratedsSuper(object):
     def populate_unsignedByte(name):
         return 1
 
+    @staticmethod
+    def populate_int(name):
+        return 21
+
