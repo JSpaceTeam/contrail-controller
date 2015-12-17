@@ -32,6 +32,8 @@ def CamelCase(input):
     return name
 #end CamelCase
 
+ASC = 'asc'
+DESC = 'desc'
 
 def str_to_class(class_name):
     try:
@@ -53,7 +55,6 @@ def _read_cfg(cfg_parser, section, option, default):
 
         return val
 #end _read_cfg
-
 class ActionUriDict(dict):
     """Action uri dictionary with operator([]) overloading to parse home page
        and populate the action_uri, if not populated already.
@@ -71,6 +72,81 @@ class ActionUriDict(dict):
             self.vnc_api._cfg_root_url = self.vnc_api._parse_homepage(homepage)
             return dict.__getitem__(self, key)
 
+
+class PagingContext(object):
+    """
+     A Paging context for sorting, paging and filtering
+     from:          The starting from index of the hits to return. Default to 0
+     size:            The number of hits to return. Default to 1000.
+     sorter:        Sorting to perform. Can either be in the form of fieldName, or fieldName desc/fieldName asc. Default to asc.
+     filter:          Filter string. Supported operations are and, or, lt ,lte , gt, gte, > ,>=, < ,<=, =, like, eq  .
+
+    Example:
+            from=1&sorter=name desc,uuid asc&filter=((a gt 30) and (b lt 20 or c =21)) or ((d <=20) and (name eq 'd  ddd'))
+
+            p = PagingContext(filters="name eq test").sort('amount', 'asc').sort('account_id', 'desc')
+    """
+    def __init__(self, start=0, size=1000, filters=None):
+        self._start = start
+        self._size = size
+        self._filters = filters
+        self._sorting = list()
+
+    @property
+    def start(self):
+        return self._start
+
+    @start.setter
+    def start(self, start):
+        if start < 0:
+            raise Exception('start cannot be less than zero')
+        self._start = start
+
+    @property
+    def size(self):
+        return self._size
+
+    @size.setter
+    def size(self, size):
+        if size < 0:
+            raise Exception('size cannot be less than zero')
+        self._size = size
+
+    @property
+    def filters(self):
+        return self._filters
+
+    @filters.setter
+    def filters(self, filters):
+        self._filters = filters
+
+    @property
+    def sorting(self):
+        return self._sorting
+
+    @sorting.setter
+    def sorting(self, sorting):
+        pass
+
+    def sort(self, name, order=ASC):
+        if order not in {ASC, DESC}:
+            raise Exception("Incorrect order it should be %s" % ({ASC, DESC}))
+        self._sorting.append("%s %s"%(name, order))
+        return self
+
+    def to_dict(self):
+        query = {}
+        if self.start:
+            query['start'] = self.start
+        if self.size:
+            query['size'] = self.size
+        if self.filters:
+            query['filter'] = self.filters
+        if self.sorting:
+            query['sorter'] = reduce(lambda x,y: x + ',' + y, self.sorting)
+        return query
+
+# end PagingContext
 
 class VncApi(VncApiClientGen):
     _DEFAULT_WEB_SERVER = "127.0.0.1"
@@ -605,7 +681,7 @@ class VncApi(VncApiClientGen):
 
     def resource_list(self, obj_type, parent_id=None, parent_fq_name=None,
                       back_ref_id=None, obj_uuids=None, fields=None,
-                      detail=False, count=False):
+                      detail=False, count=False, paging_ctx=None):
         if not obj_type:
             raise ResourceTypeUnknownError(obj_type)
 
@@ -649,6 +725,10 @@ class VncApi(VncApiClientGen):
         query_params['detail'] = detail
 
         query_params['count'] = count
+
+        if paging_ctx and isinstance(paging_ctx, PagingContext):
+            print(paging_ctx.to_dict())
+            query_params.update(paging_ctx.to_dict())
 
         if do_post_for_list:
             uri = self._action_uri.get('list-bulk-collection')
