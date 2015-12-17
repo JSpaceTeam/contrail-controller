@@ -2042,9 +2042,24 @@ class VncSearchDbClient(VncSearchItf):
     def _scrub_dict(self, obj_dict):
         if not isinstance(obj_dict, dict):
             return obj_dict
-        return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if v is not None)
+        return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if v is not None and not self._is_unsupported_entry(k))
 
     # end _scrub_dict
+
+    def _is_unsupported_entry(self, k):
+        '''
+        Removes unsupported entries from ES mostly related to blobs or data types that es has problems with.
+        Later this will be taken from generated schema as well
+        Args:
+            k:
+
+        Returns:
+
+        '''
+        if k in 'uuid_lslong' or k in 'uuid_mslong':
+            return True
+        return False
+    # end ___remove_unsupported_entries
 
     @search_db_trace(OP_CREATE)
     def search_create(self, obj_type, obj_ids, obj_dict):
