@@ -1335,7 +1335,7 @@ class VncDbClient(object):
 
         if cfg.CONF.elastic_search.search_enabled:
             self._search_db = VncSearchDbClient(self, self._msgbus, cfg.CONF.elastic_search.server_list,
-                                                index_settings=None)
+                                                index_settings=None, reset_config=reset_config)
             self.config_log("Elastic search enabled", level=SandeshLevel.SYS_NOTICE)
         else:
             self.config_log("Elastic search not enabled", level=SandeshLevel.SYS_NOTICE)
@@ -1936,6 +1936,8 @@ class VncSearchItf(object):
 class VncSearchDbClient(VncSearchItf):
     SEARCH_DB_MESSAGE = "SearchDBTrace: {} {}"
 
+    FILTERED_KEYWORDS = {'uuid_lslong', 'uuid_mslong', '_type'}
+
     def __init__(self, db_client_mgr, msg_bus, elastic_srv_list,
                  index_settings=None, reset_config=False, timeout=10):
         super(VncSearchDbClient, self).__init__()
@@ -2056,7 +2058,7 @@ class VncSearchDbClient(VncSearchItf):
         Returns:
 
         '''
-        if k in 'uuid_lslong' or k in 'uuid_mslong':
+        if k in self.FILTERED_KEYWORDS:
             return True
         return False
     # end ___remove_unsupported_entries
