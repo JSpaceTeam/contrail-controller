@@ -31,6 +31,7 @@ import ConfigParser
 from pprint import pformat
 import cgitb
 from cStringIO import StringIO
+from oslo_config import cfg
 #import GreenletProfiler
 
 import logging
@@ -162,6 +163,21 @@ def error_500(err):
 def error_503(err):
     return err.body
 # end error_503
+
+#Parse config for olso configs. Try to move all config parsing to oslo cfg
+elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
+cfg.CONF.register_cli_opt(cfg.BoolOpt(name='search_enabled', default=False),
+                              group=elastic_search_group)
+cfg.CONF.register_cli_opt(cfg.ListOpt('server_list',
+                                          item_type=cfg.types.String(),
+                                          default='127.0.0.1:9200',
+                                          help="Multiple servers option"), group=elastic_search_group)
+cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing',default=False,
+                                          help="Enable connection sniffing for elastic search driver")
+                              ,group=elastic_search_group)
+
+cfg.CONF.register_cli_opt(cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
+                          group=elastic_search_group)
 
 
 # Masking of password from openstack/common/log.py
@@ -1054,6 +1070,11 @@ class VncApiServer(VncApiServerGen):
                 self._args.cassandra_server_list.split()
         if type(self._args.collectors) is str:
             self._args.collectors = self._args.collectors.split()
+	config_args = []
+        config_args.append("--config-dir")
+        cfg_dir = str(args.conf_file[0]).rsplit("/", 1)[0]
+        config_args.append(cfg_dir)
+        cfg.CONF(args=config_args, default_config_files = args.conf_file)
     # end _parse_args
 
     # sigchld handler is currently not engaged. See comment @sigchld

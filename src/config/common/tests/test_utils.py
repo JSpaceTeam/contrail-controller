@@ -643,6 +643,24 @@ class FakeKombu(object):
         def channel(self):
             pass
         # end channel
+	class Producer(object):
+            _simple_exchange = {}
+
+            def __init__(self, conn, exchange):
+               pass
+            # end __init__
+
+            def publish(self, *args, **kwargs):
+                pass
+            # end put
+
+            def __enter__(self):
+                return self
+            # end __enter__
+
+            def __exit__(self, *args, **kwargs):
+                pass
+            # end __exit__
 # end class FakeKombu
 
 class FakeRedis(object):
