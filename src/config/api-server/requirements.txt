@@ -4,15 +4,7 @@ discoveryclient
 sandesh
 sandesh-common
 lxml>=2.3.3
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
 gevent
-=======
-gevent<=1.0.2
->>>>>>> Stashed changes
-=======
-gevent<=1.0.2
->>>>>>> Stashed changes
 geventhttpclient==1.0a
 pycassa>=1.7.2
 netaddr>=0.7.5
