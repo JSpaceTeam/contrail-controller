@@ -1704,18 +1704,17 @@ class VncDbClient(object):
                  obj_uuids=None, body=None, params=None, count=False):
         if obj_uuids or parent_uuids or back_ref_uuids or not self._search_db.enabled():
             method_name = obj_type.replace('-', '_')
-            (ok, total) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
+            if count:    
+                (ok, total) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
                                                    back_ref_uuids=back_ref_uuids,
                                                    obj_uuids=obj_uuids,
                                                    count=True)
-	    if count:
-                return (ok, total)
-            if ok:
-                (ok, cassandra_result) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
+                return (ok, None, total)
+            (ok, cassandra_result) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
                                                        back_ref_uuids=back_ref_uuids,
                                                        obj_uuids=obj_uuids,
                                                        count=False)
-            return (ok, cassandra_result, total)
+            return (ok, cassandra_result, len(cassandra_result))
         else:
             (ok, uuids, total) = self._search_db.dbe_list(obj_type=obj_type, params=params, body=body)
             children_fq_names_uuids = []

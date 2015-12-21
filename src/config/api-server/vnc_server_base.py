@@ -883,7 +883,7 @@ class VncApiServerBase(VncApiServerGen):
                          is_count=False, is_detail=False):
         method_name = obj_type.replace('-', '_')  # e.g. virtual_network
 
-        (ok, result) = self._db_conn.dbe_list(obj_type,
+        (ok, result, total) = self._db_conn.dbe_list(obj_type,
                                               parent_uuids, back_ref_uuids, obj_uuids, is_count)
         if not ok:
             self.config_object_error(None, None, '%ss' % (method_name),
@@ -892,7 +892,7 @@ class VncApiServerBase(VncApiServerGen):
 
         # If only counting, return early
         if is_count:
-            return {'%ss' % (obj_type): {'count': result}}
+            return {'%ss' % (obj_type): {'count': total}}
 
         fq_names_uuids = result
         obj_dicts = []

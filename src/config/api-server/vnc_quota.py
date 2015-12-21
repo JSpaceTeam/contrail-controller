@@ -67,7 +67,7 @@ class QuotaHelper(object):
                 return (False, (500, 'Internal error : Failed to read current '
                                 'resource count'))
         else:
-            (ok, res_list) = db_conn.dbe_list(obj_type,
+            (ok, res_list, total) = db_conn.dbe_list(obj_type,
                                               back_ref_uuids=[proj_uuid])
             if not ok:
                 return (False, (500, 'Internal error : Failed to read %s '
