@@ -1335,7 +1335,7 @@ class VncDbClient(object):
 
         if cfg.CONF.elastic_search.search_enabled:
             self._search_db = VncSearchDbClient(self, self._msgbus, cfg.CONF.elastic_search.server_list,
-                                                index_settings=None)
+                                                index_settings=None, reset_config=reset_config)
             self.config_log("Elastic search enabled", level=SandeshLevel.SYS_NOTICE)
         else:
             self.config_log("Elastic search not enabled", level=SandeshLevel.SYS_NOTICE)
@@ -1701,19 +1701,20 @@ class VncDbClient(object):
     # end dbe_update
 
     def dbe_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
-                 obj_uuids=None, body=None, params=None):
+                 obj_uuids=None, body=None, params=None, count=False):
         if obj_uuids or parent_uuids or back_ref_uuids or not self._search_db.enabled():
             method_name = obj_type.replace('-', '_')
-            (ok, total) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
+            if count:    
+                (ok, total) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
                                                    back_ref_uuids=back_ref_uuids,
                                                    obj_uuids=obj_uuids,
                                                    count=True)
-            if ok:
-                (ok, children_fq_names_uuids) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
+                return (ok, None, total)
+            (ok, cassandra_result) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
                                                        back_ref_uuids=back_ref_uuids,
                                                        obj_uuids=obj_uuids,
                                                        count=False)
-            return (ok, children_fq_names_uuids, total)
+            return (ok, cassandra_result, len(cassandra_result))
         else:
             (ok, uuids, total) = self._search_db.dbe_list(obj_type=obj_type, params=params, body=body)
             children_fq_names_uuids = []
@@ -1936,6 +1937,8 @@ class VncSearchItf(object):
 class VncSearchDbClient(VncSearchItf):
     SEARCH_DB_MESSAGE = "SearchDBTrace: {} {}"
 
+    FILTERED_KEYWORDS = {'uuid_lslong', 'uuid_mslong', '_type'}
+
     def __init__(self, db_client_mgr, msg_bus, elastic_srv_list,
                  index_settings=None, reset_config=False, timeout=10):
         super(VncSearchDbClient, self).__init__()
@@ -2042,9 +2045,24 @@ class VncSearchDbClient(VncSearchItf):
     def _scrub_dict(self, obj_dict):
         if not isinstance(obj_dict, dict):
             return obj_dict
-        return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if v is not None)
+        return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if v is not None and not self._is_unsupported_entry(k))
 
     # end _scrub_dict
+
+    def _is_unsupported_entry(self, k):
+        '''
+        Removes unsupported entries from ES mostly related to blobs or data types that es has problems with.
+        Later this will be taken from generated schema as well
+        Args:
+            k:
+
+        Returns:
+
+        '''
+        if k in self.FILTERED_KEYWORDS:
+            return True
+        return False
+    # end ___remove_unsupported_entries
 
     @search_db_trace(OP_CREATE)
     def search_create(self, obj_type, obj_ids, obj_dict):

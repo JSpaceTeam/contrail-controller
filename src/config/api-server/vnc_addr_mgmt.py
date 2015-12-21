@@ -564,7 +564,7 @@ class AddrMgmt(object):
             return True, ""
         proj_uuid = db_vn_dict['parent_uuid']
         # Read list of virtual networks for the given project
-        (ok, result) = db_conn.dbe_list('virtual-network', [proj_uuid])
+        (ok, result, total) = db_conn.dbe_list('virtual-network', [proj_uuid])
         if not ok:
             return (False, 'Internal error : Failed to read virtual networks')
 
