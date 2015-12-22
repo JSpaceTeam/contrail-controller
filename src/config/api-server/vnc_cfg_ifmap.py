@@ -1701,19 +1701,21 @@ class VncDbClient(object):
     # end dbe_update
 
     def dbe_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
-                 obj_uuids=None, body=None, params=None):
+                 obj_uuids=None, body=None, params=None, count=False):
         if obj_uuids or parent_uuids or back_ref_uuids or not self._search_db.enabled():
             method_name = obj_type.replace('-', '_')
             (ok, total) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
                                                    back_ref_uuids=back_ref_uuids,
                                                    obj_uuids=obj_uuids,
                                                    count=True)
+	    if count:
+                return (ok, total)
             if ok:
-                (ok, children_fq_names_uuids) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
+                (ok, cassandra_result) = self._cassandra_db.list(method_name, parent_uuids=parent_uuids,
                                                        back_ref_uuids=back_ref_uuids,
                                                        obj_uuids=obj_uuids,
                                                        count=False)
-            return (ok, children_fq_names_uuids, total)
+            return (ok, cassandra_result, total)
         else:
             (ok, uuids, total) = self._search_db.dbe_list(obj_type=obj_type, params=params, body=body)
             children_fq_names_uuids = []
