@@ -53,12 +53,16 @@ class VncKombuClientBase(object):
 
         self.obj_upd_exchange = kombu.Exchange('vnc_config.object-update', 'fanout',
                                                durable=False)
+        self.search_rc_exchange = kombu.Exchange('vnc_config.search_rc', 'direct', durable=True,
+                                            delivery_mode='persistent')
 
+        self._search_rc_producer = self._conn.Producer(self._conn.channel(), exchange=self.search_rc_exchange)
         # Register a handler for SIGTERM so that we can release the lock
         # Without it, it can take several minutes before new master is elected
         # If any app using this wants to register their own sigterm handler,
         # then we will have to modify this function to perhaps take an argument
         gevent.signal(signal.SIGTERM, self.sigterm_handler)
+       
 
     def num_pending_messages(self):
         return self._publish_queue.qsize()

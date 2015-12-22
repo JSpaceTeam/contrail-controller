@@ -19,6 +19,13 @@ def obj_to_json(obj):
     return dict((k, v) for k, v in obj.__dict__.iteritems())
 #end obj_to_json
 
+def obj_serializer_all( obj):
+        if hasattr(obj, 'serialize_to_json'):
+            return obj.serialize_to_json(obj.get_pending_updates())
+        else:
+            return dict((k, v) for k, v in obj.__dict__.iteritems())
+#end obj_serializer_all
+
 def json_to_obj(obj):
     pass
 #end json_to_obj

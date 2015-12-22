@@ -5,8 +5,13 @@
 """
 Layer that transforms VNC config objects to ifmap representation
 """
+import abc
+from elasticsearch.exceptions import TransportError, ConnectionError
 from cfgm_common.zkclient import ZookeeperClient, IndexAllocator
+from elasticsearch.client import IndicesClient
 from gevent import ssl, monkey
+from oslo_config import cfg
+from vnc_db_rollback import VncDBRollBackHandler, DB_ERROR, SEARCH_ERROR, OP_UPDATE, OP_DELETE, OP_CREATE
 monkey.patch_all()
 import gevent
 import gevent.event
@@ -354,6 +359,7 @@ class VncIfmapClient(object):
 
         mapclient.set_session_id(newSessionResult(result).get_session_id())
         mapclient.set_publisher_id(newSessionResult(result).get_publisher_id())
+
     # end _init_conn
 
     def _get_api_server(self):
@@ -371,6 +377,8 @@ class VncIfmapClient(object):
 
 
     def _publish_config_root(self):
+        if self._ifmap_disable:
+            return None
         # config-root
         buf = cStringIO.StringIO()
         perms = Provision.defaults.perms
@@ -566,6 +574,7 @@ class VncIfmapClient(object):
                 del self._id_to_metas[self_imid]
         else:
             del self._id_to_metas[self_imid]
+
     # end _delete_id_self_meta
 
     def _delete_id_pair_meta_list(self, id1, meta_list):
@@ -686,6 +695,16 @@ class VncIfmapClient(object):
                 gevent.sleep(
                     self._get_api_server().get_ifmap_health_check_interval())
     # end _health_checker
+
+    def fq_name_to_ifmap_id(self, obj_type, fq_name):
+        return cfgm_common.imid.get_ifmap_id_from_fq_name(obj_type, fq_name)
+
+    # end fq_name_to_ifmap_id
+
+    def ifmap_id_to_fq_name(self, ifmap_id):
+        return cfgm_common.imid.get_fq_name_from_ifmap_id(ifmap_id)
+        # end ifmap_id_to_fq_name
+
 
 # end class VncIfmapClient
 
@@ -961,17 +980,21 @@ class VncServerCassandraClient(VncCassandraClient):
 # end class VncCassandraClient
 
 
+
 class VncServerKombuClient(VncKombuClient):
     def __init__(self, db_client_mgr, rabbit_ip, rabbit_port, ifmap_db,
-                 rabbit_user, rabbit_password, rabbit_vhost, rabbit_ha_mode):
+                 rabbit_user, rabbit_password, rabbit_vhost, rabbit_ha_mode, ifmap_disable=False):
         self._db_client_mgr = db_client_mgr
         self._sandesh = db_client_mgr._sandesh
         self._ifmap_db = ifmap_db
+        self._ifmap_disable = ifmap_disable
         listen_port = db_client_mgr.get_server_port()
         q_name = 'vnc_config.%s-%s' %(socket.gethostname(), listen_port)
         super(VncServerKombuClient, self).__init__(
             rabbit_ip, rabbit_port, rabbit_user, rabbit_password, rabbit_vhost,
             rabbit_ha_mode, q_name, self._dbe_subscribe_callback, self.config_log)
+        self._rc_queue = Queue()
+        self._search_rc_publish_greenlet = gevent.spawn(self._search_rc_publish)
 
     # end __init__
 
@@ -981,6 +1004,7 @@ class VncServerKombuClient(VncKombuClient):
 
     def config_log(self, msg, level):
         self._db_client_mgr.config_log(msg, level)
+
     # end config_log
 
     def uuid_to_fq_name(self, uuid):
@@ -990,6 +1014,45 @@ class VncServerKombuClient(VncKombuClient):
     def dbe_uve_trace(self, oper, typ, uuid, body):
         self._db_client_mgr.dbe_uve_trace(oper, typ, uuid, body)
     # end uuid_to_fq_name
+
+    def _search_q_put(self, message):
+        if self._rabbit_vhost == "__NONE__":
+            return
+        self._rc_queue.put(message)
+
+    # end
+
+    def search_rc_publish(self, message):
+        if message:
+            self._search_q_put(message)
+
+    # end search_rc_publish
+
+    def _search_rc_publish(self):
+        '''
+        Publish search reconcilation messages to reconcilation queue
+        :return:
+        '''
+        self._db_client_mgr.wait_for_resync_done()
+        while True:
+            try:
+                message = self._rc_queue.get()
+                while True:
+                    try:
+                        self._search_rc_producer.publish(message, serializer='json', routing_key='',
+                                                         expiration=360, delivery_mode='persistent')
+                        break
+                    except Exception as e:
+                        log_str = "Disconnected from rabbitmq. Reinitializing connection: %s" % str(e)
+                        self.config_log(log_str, level=SandeshLevel.SYS_WARN)
+                        time.sleep(1)
+                        self.connect()
+            except Exception as e:
+                log_str = "Unknown exception in _dbe_oper_publish greenlet" + str(e)
+                self.config_log(log_str, level=SandeshLevel.SYS_ERR)
+                time.sleep(1)
+
+    # end _search_rc_publish
 
     def dbe_oper_publish_pending(self):
         return self.num_pending_messages()
@@ -1006,6 +1069,7 @@ class VncServerKombuClient(VncKombuClient):
         notify_trace.body = json.dumps(oper_info)
 
         return notify_trace
+
     # end _generate_msgbus_notify_trace
 
     def _dbe_subscribe_callback(self, oper_info):
@@ -1058,10 +1122,11 @@ class VncServerKombuClient(VncKombuClient):
             self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
             raise
         finally:
-            (ok, result) = self._ifmap_db.object_create(obj_info, obj_dict)
-            if not ok:
-                self.config_log(result, level=SandeshLevel.SYS_ERR)
-                raise Exception(result)
+            if not self._ifmap_disable:
+                (ok, result) = self._ifmap_db.object_create(obj_info, obj_dict)
+                if not ok:
+                    self.config_log(result, level=SandeshLevel.SYS_ERR)
+                    raise Exception(result)
     #end _dbe_create_notification
 
     def dbe_update_publish(self, obj_type, obj_ids):
@@ -1090,12 +1155,13 @@ class VncServerKombuClient(VncKombuClient):
             self.config_log(msg, level=SandeshLevel.SYS_ERR)
             raise
         finally:
-            ifmap_id = self._db_client_mgr.uuid_to_ifmap_id(obj_info['type'],
+            if not self._ifmap_disable:
+                ifmap_id = self._db_client_mgr.uuid_to_ifmap_id(obj_info['type'],
                                                             obj_info['uuid'])
-            (ok, ifmap_result) = self._ifmap_db.object_update(
-                obj_info['type'], ifmap_id, new_obj_dict)
-            if not ok:
-                raise Exception(ifmap_result)
+                (ok, ifmap_result) = self._ifmap_db.object_update(
+                    obj_info['type'], ifmap_id, new_obj_dict)
+                if not ok:
+                    raise Exception(ifmap_result)
     #end _dbe_update_notification
 
     def dbe_delete_publish(self, obj_type, obj_ids, obj_dict):
@@ -1121,11 +1187,12 @@ class VncServerKombuClient(VncKombuClient):
             self.config_log(msg, level=SandeshLevel.SYS_ERR)
             raise
         finally:
-            (ok, ifmap_result) = self._ifmap_db.object_delete(obj_info['type'],
+            is self._ifmap_disable:
+                (ok, ifmap_result) = self._ifmap_db.object_delete(obj_info['type'],
                                                               obj_info)
-            if not ok:
-                self.config_log(ifmap_result, level=SandeshLevel.SYS_ERR)
-                raise Exception(ifmap_result)
+                if not ok:
+                    self.config_log(ifmap_result, level=SandeshLevel.SYS_ERR)
+                    raise Exception(ifmap_result)
     #end _dbe_delete_notification
 
 # end class VncKombuClient
@@ -1275,12 +1342,13 @@ class VncZkClient(object):
 class VncDbClient(object):
     def __init__(self, api_svr_mgr, ifmap_srv_ip, ifmap_srv_port, uname,
                  passwd, cass_srv_list,
-                 rabbit_servers, rabbit_port, rabbit_user, rabbit_password,
+                 rabbit_server, rabbit_port, rabbit_user, rabbit_password, rabbit_vhost,
                  rabbit_vhost, rabbit_ha_mode, reset_config=False,
-                 zk_server_ip=None, db_prefix='', cassandra_credential=None):
+                 zk_server_ip=None, db_prefix='', cassandra_credential=None, ifmap_disable=False):
 
         self._api_svr_mgr = api_svr_mgr
         self._sandesh = api_svr_mgr._sandesh
+        self._ifmap_disable = ifmap_disable
 
         self._UVEMAP = {
             "virtual_network" : "ObjectVNTable",
@@ -1318,9 +1386,8 @@ class VncDbClient(object):
         msg = "Connecting to ifmap on %s:%s as %s" \
               % (ifmap_srv_ip, ifmap_srv_port, uname)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
-
         self._ifmap_db = VncIfmapClient(
-            self, ifmap_srv_ip, ifmap_srv_port, uname, passwd, ssl_options)
+            self, ifmap_srv_ip, ifmap_srv_port, uname, passwd, ssl_options,  ifmap_disable=ifmap_disable)
 
         msg = "Connecting to cassandra on %s" % (cass_srv_list,)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
@@ -1336,7 +1403,17 @@ class VncDbClient(object):
         self._msgbus = VncServerKombuClient(self, rabbit_servers,
                                             rabbit_port, self._ifmap_db,
                                             rabbit_user, rabbit_password,
-                                            rabbit_vhost, rabbit_ha_mode)
+                                            rabbit_vhost, rabbit_ha_mode, self._ifmap_disable))
+
+        if cfg.CONF.elastic_search.search_enabled:
+            self._search_db = VncSearchDbClient(self, self._msgbus, cfg.CONF.elastic_search.server_list,
+                                                index_settings=None, reset_config=reset_config)
+            self.config_log("Elastic search enabled", level=SandeshLevel.SYS_NOTICE)
+        else:
+            self.config_log("Elastic search not enabled", level=SandeshLevel.SYS_NOTICE)
+            self._search_db = VncNoOpEsDb()
+        self._rollback_handler = VncDBRollBackHandler(self, self._msgbus, self._cassandra_db, self._search_db)
+
     # end __init__
 
     def _update_default_quota(self):
@@ -1367,21 +1444,21 @@ class VncDbClient(object):
 
     def db_resync(self):
         # Read contents from cassandra and publish to ifmap
-        mapclient = self._ifmap_db._mapclient
-        start_time = datetime.datetime.utcnow()
-        self._cassandra_db.walk(self._dbe_resync)
-        self._ifmap_db._publish_to_ifmap_enqueue('publish_discovery', 1)
-        self.config_log("Cassandra DB walk completed.",
-            level=SandeshLevel.SYS_INFO)
+        if not self._ifmap_disable:
+            mapclient = self._ifmap_db._mapclient
+            start_time = datetime.datetime.utcnow()
+            self._cassandra_db.walk(self._dbe_resync)
+            self._ifmap_db._publish_to_ifmap_enqueue('publish_discovery', 1)
+            self.config_log("Cassandra DB walk completed.",
+                level=SandeshLevel.SYS_INFO)
         self._update_default_quota()
-        end_time = datetime.datetime.utcnow()
-        msg = "Time elapsed in syncing ifmap: %s" % (str(end_time - start_time))
-        self.config_log(msg, level=SandeshLevel.SYS_DEBUG)
+
         self._db_resync_done.set()
     # end db_resync
 
     def wait_for_resync_done(self):
         self._db_resync_done.wait()
+
     # end wait_for_resync_done
 
     def db_check(self):
@@ -1389,18 +1466,21 @@ class VncDbClient(object):
         check_results = self._cassandra_db.walk(self._dbe_check)
 
         return check_results
+
     # end db_check
 
     def db_read(self):
         # Read contents from cassandra
         read_results = self._cassandra_db.walk(self._dbe_read)
         return read_results
+
     # end db_check
 
     def _uuid_to_longs(self, id):
         msb_id = id.int >> 64
         lsb_id = id.int & ((1 << 64) - 1)
         return msb_id, lsb_id
+
     # end _uuid_to_longs
 
     def set_uuid(self, obj_type, obj_dict, id, do_lock=True):
@@ -1446,6 +1526,7 @@ class VncDbClient(object):
         obj_dict['uuid'] = str(id)
 
         return True
+
     # end set_uuid
 
     def _alloc_set_uuid(self, obj_type, obj_dict):
@@ -1453,6 +1534,7 @@ class VncDbClient(object):
         ok = self.set_uuid(obj_type, obj_dict, id)
 
         return (ok, obj_dict['uuid'])
+
     # end _alloc_set_uuid
 
     def match_uuid(self, obj_dict, obj_uuid):
@@ -1463,6 +1545,7 @@ class VncDbClient(object):
             return True
 
         return False
+
     # end match_uuid
 
     def update_subnet_uuid(self, vn_dict, do_update=False):
@@ -1498,6 +1581,7 @@ class VncDbClient(object):
         if updated and do_update:
             self._cassandra_db._cassandra_virtual_network_update(vn_uuid,
                                                                  vn_dict)
+
     # end update_subnet_uuid
 
     def _dbe_resync(self, obj_type, obj_uuids):
@@ -1590,6 +1674,7 @@ class VncDbClient(object):
         db_trace.operation = oper
         db_trace.body = json.dumps(body)
         return db_trace
+
     # end _generate_db_request_trace
 
     # Public Methods
@@ -1605,19 +1690,20 @@ class VncDbClient(object):
         except ResourceExistsError as e:
             return (False, (409, str(e)))
 
-        parent_type = obj_dict.get('parent_type')
-        (ok, result) = self._ifmap_db.object_alloc(obj_type, parent_type,
-                                                   obj_dict['fq_name'])
-        if not ok:
-            self.dbe_release(obj_type, obj_dict['fq_name'])
-            return False, result
-
-        (my_imid, parent_imid) = result
         obj_ids = {
-            'uuid': obj_dict['uuid'],
-            'imid': my_imid, 'parent_imid': parent_imid}
-
+            'uuid': obj_dict['uuid']
+        }
+        if not self._ifmap_disable:
+            parent_type = obj_dict.get('parent_type')
+            (ok, result) = self._ifmap_db.object_alloc(obj_type, parent_type,
+                                                   obj_dict['fq_name'])
+            if not ok:
+                self.dbe_release(obj_type, obj_dict['fq_name'])
+                return False, result
+            (my_imid, parent_imid) = result
+            obj_ids.update({'imid': my_imid, 'parent_imid': parent_imid})
         return (True, obj_ids)
+
     # end dbe_alloc
 
     def dbe_uve_trace(self, oper, typ, uuid, obj_dict):
@@ -1674,13 +1760,18 @@ class VncDbClient(object):
                     trace_msg(trace, 'DBRequestTraceBuf',
                               self._sandesh)
                     return ret
+                except SearchServiceError as se:
+                    # perform rollbacks based on operation
+                    raise
                 except Exception as e:
                     trace_msg(trace, 'DBRequestTraceBuf',
                               self._sandesh, error_msg=str(e))
-                    raise
+                    self._rollback_handler.handle_error(DB_ERROR, e, oper, obj_type, obj_ids, obj_dict)
 
             return wrapper2
+
         return wrapper1
+
     # dbe_trace
 
     # create/update indexes if object is shared
@@ -1749,14 +1840,17 @@ class VncDbClient(object):
     @dbe_trace('create')
     @build_shared_index('create')
     def dbe_create(self, obj_type, obj_ids, obj_dict):
+        self._search_db.search_create(obj_type, obj_ids, obj_dict)
         (ok, result) = self._cassandra_db.object_create(
             obj_type, obj_ids['uuid'], obj_dict)
+        (ok, result) = self._cassandra_db.create(method_name, obj_ids, obj_dict)
 
         # publish to ifmap via msgbus
         self._msgbus.dbe_create_publish(obj_type, obj_ids, obj_dict)
 
         return (ok, result)
     # end dbe_create
+
 
     # input id is ifmap-id + uuid
     def dbe_read(self, obj_type, obj_ids, obj_fields=None):
@@ -1773,6 +1867,19 @@ class VncDbClient(object):
             return (False, str(e))
 
         return (ok, cassandra_result[0])
+
+    # end dbe_read
+
+    def dbe_count_children(self, obj_type, obj_id, child_type):
+        method_name = obj_type.replace('-', '_')
+        try:
+            (ok, cassandra_result) = self._cassandra_db.count_children(method_name,
+                                                                       obj_id, child_type)
+        except NoIdError as e:
+            return (False, str(e))
+
+        return (ok, cassandra_result)
+
     # end dbe_read
 
     def dbe_count_children(self, obj_type, obj_id, child_type):
@@ -1811,6 +1918,7 @@ class VncDbClient(object):
     @dbe_trace('update')
     @build_shared_index('update')
     def dbe_update(self, obj_type, obj_ids, new_obj_dict):
+        self._search_db.search_update(obj_type, obj_ids, new_obj_dict)
         method_name = obj_type.replace('-', '_')
         (ok, cassandra_result) = self._cassandra_db.object_update(
             obj_type, obj_ids['uuid'], new_obj_dict)
@@ -1823,12 +1931,31 @@ class VncDbClient(object):
 
     def dbe_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
                  obj_uuids=None, count=False, filters=None,
-                 paginate_start=None, paginate_count=None):
-        (ok, cassandra_result) = self._cassandra_db.object_list(
-                 obj_type, parent_uuids=parent_uuids,
-                 back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
-                 count=count, filters=filters)
-        return (ok, cassandra_result)
+                 paginate_start=None, paginate_count=None,  body=None, params=None):
+        if obj_uuids or parent_uuids or back_ref_uuids or not self._search_db.enabled():
+            method_name = obj_type.replace('-', '_')
+            if count:    
+                (ok, total) =self._cassandra_db.object_list( obj_type, parent_uuids=parent_uuids,
+                                    back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
+                                    count=count, filters=filters)
+                return (ok, None, total)
+
+            (ok, cassandra_result, len(cassandra_result)) = self._cassandra_db.object_list(
+                                                                obj_type, parent_uuids=parent_uuids,
+                                                                back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
+                                                                count=count, filters=filters)
+
+            return (ok, cassandra_result, len(cassandra_result))
+        else:
+            (ok, uuids, total) = self._search_db.dbe_list(obj_type=obj_type, params=params, body=body)
+            children_fq_names_uuids = []
+            for obj_uuid in uuids:
+                try:
+                    fq_name = self.uuid_to_fq_name(obj_uuid)
+                except cfgm_common.exceptions.NoIdError:
+                    continue
+                children_fq_names_uuids.append((fq_name, obj_uuid))
+            return (ok, children_fq_names_uuids, total)
     # end dbe_list
 
     @dbe_trace('delete')
@@ -1836,6 +1963,7 @@ class VncDbClient(object):
         (ok, cassandra_result) = self._cassandra_db.object_delete(
             obj_type, obj_ids['uuid'])
 
+        self._search_db.search_delete(obj_type, obj_ids, obj_dict)
         # publish to ifmap via message bus (rabbitmq)
         self._msgbus.dbe_delete_publish(obj_type, obj_ids, obj_dict)
 
@@ -1848,26 +1976,33 @@ class VncDbClient(object):
 
     def dbe_release(self, obj_type, obj_fq_name):
         self._zk_db.delete_fq_name_to_uuid_mapping(obj_type, obj_fq_name)
+
     # end dbe_release
 
+    
     def dbe_oper_publish_pending(self):
         return self._msgbus.dbe_oper_publish_pending()
+
     # end dbe_oper_publish_pending
 
     def useragent_kv_store(self, key, value):
         self._cassandra_db.useragent_kv_store(key, value)
+
     # end useragent_kv_store
 
     def useragent_kv_retrieve(self, key):
         return self._cassandra_db.useragent_kv_retrieve(key)
+
     # end useragent_kv_retrieve
 
     def useragent_kv_delete(self, key):
         return self._cassandra_db.useragent_kv_delete(key)
+
     # end useragent_kv_delete
 
     def subnet_is_addr_allocated(self, subnet, addr):
         return self._zk_db.subnet_is_addr_allocated(subnet, addr)
+
     # end subnet_is_addr_allocated
 
     def subnet_set_in_use(self, subnet, addr):
@@ -1908,6 +2043,7 @@ class VncDbClient(object):
 
     def uuid_vnlist(self):
         return self._cassandra_db.uuid_vnlist()
+
     # end uuid_vnlist
 
     def uuid_to_ifmap_id(self, obj_type, id):
@@ -1918,22 +2054,27 @@ class VncDbClient(object):
     def fq_name_to_uuid(self, obj_type, fq_name):
         obj_uuid = self._cassandra_db.fq_name_to_uuid(obj_type, fq_name)
         return obj_uuid
+
     # end fq_name_to_uuid
 
     def uuid_to_fq_name(self, obj_uuid):
         return self._cassandra_db.uuid_to_fq_name(obj_uuid)
+
     # end uuid_to_fq_name
 
     def uuid_to_obj_type(self, obj_uuid):
         return self._cassandra_db.uuid_to_obj_type(obj_uuid)
+
     # end uuid_to_obj_type
 
     def uuid_to_obj_dict(self, obj_uuid):
         return self._cassandra_db.uuid_to_obj_dict(obj_uuid)
+
     # end uuid_to_obj_dict
 
     def uuid_to_obj_perms(self, obj_uuid):
         return self._cassandra_db.uuid_to_obj_perms(obj_uuid)
+
     # end uuid_to_obj_perms
 
     def ref_update(self, obj_type, obj_uuid, ref_type, ref_uuid, ref_data,
@@ -1951,6 +2092,7 @@ class VncDbClient(object):
 
     def get_resource_class(self, resource_type):
         return self._api_svr_mgr.get_resource_class(resource_type)
+
     # end get_resource_class
 
     def get_default_perms2(self, obj_type):
@@ -1959,20 +2101,24 @@ class VncDbClient(object):
     # Helper routines for REST
     def generate_url(self, obj_type, obj_uuid):
         return self._api_svr_mgr.generate_url(obj_type, obj_uuid)
+
     # end generate_url
 
     def config_object_error(self, id, fq_name_str, obj_type,
                             operation, err_str):
         self._api_svr_mgr.config_object_error(
             id, fq_name_str, obj_type, operation, err_str)
+
     # end config_object_error
 
     def config_log(self, msg, level):
         self._api_svr_mgr.config_log(msg, level)
+
     # end config_log
 
     def get_server_port(self):
         return self._api_svr_mgr.get_server_port()
+
     # end get_server_port
 
     # return all objects shared with us (tenant)
@@ -1991,5 +2137,495 @@ class VncDbClient(object):
 
         return shared
     # end get_shared_objects
+    def search(self, obj_type, body):
+        return self._search_db.search(obj_type=obj_type, body=body)
+
+    # search
+
+    def suggest(self, body):
+        return self._search_db.suggest(body)
+    # suggest
+
 
 # end class VncDbClient
+
+class VncSearchItf(object):
+    __metaclass__ = abc.ABCMeta
+
+    @abc.abstractmethod
+    def search_create(self, obj_type, obj_ids, obj_dict):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def search_update(self, obj_type, obj_ids, obj_dict):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def search_delete(self, obj_type, obj_ids, obj_dict):
+        raise NotImplementedError()
+
+    def reconcile(self):
+        return False
+
+    def enabled(self):
+        return False
+
+
+# end VncSearchItf
+
+class VncSearchDbClient(VncSearchItf):
+    SEARCH_DB_MESSAGE = "SearchDBTrace: {} {}"
+
+    FILTERED_KEYWORDS = {'uuid_lslong', 'uuid_mslong', '_type'}
+
+    def __init__(self, db_client_mgr, msg_bus, elastic_srv_list,
+                 index_settings=None, reset_config=False, timeout=10):
+        super(VncSearchDbClient, self).__init__()
+        self.logger = logging.getLogger('elasticsearch')
+        self._db_client_mgr = db_client_mgr
+        self._msg_bus = msg_bus
+        self._consistency = "quorum"
+        while True:
+            try:
+                opts = {}
+                if cfg.CONF.elastic_search.enable_sniffing:
+                    # sniff_on_start=True,
+                    # refresh nodes after a node fails to respond
+                    # sniff_on_connection_fail=True,
+                    # and also every 60 seconds
+                    # sniffer_timeout=60)
+                    opts = {
+                        'sniff_on_start': True,
+                        'sniff_on_connection_fail': True,
+                        'sniffer_timeout': 60
+                    }
+                self._es_client = Elasticsearch(hosts=elastic_srv_list,
+                                                timeout=timeout, **opts)
+
+                self._index_client = IndicesClient(self._es_client)
+                self.index, self._mapped_doc_types = self.__initialize_index_schema(reset_config)
+                self._mapped_doc_types = filter(lambda x : x not in {'project', 'domain'}, self._mapped_doc_types)
+                break
+            except ConnectionError as ce:
+                self.logger.warn("Failed to connect to elastic search server {}. {}".format(elastic_srv_list, ce))
+                gevent.sleep(5)
+                pass
+            except TransportError as te:
+                self.logger.warn("Failed to connect to elastic search server {}. {}".format(elastic_srv_list, te))
+                gevent.sleep(5)
+                pass
+
+    # __init__
+
+    def reconcile(self):
+        return True
+    # end reconcile
+
+    def enabled(self):
+        return True
+
+    # end enabled
+
+    def config_log(self, msg, level):
+        self._db_client_mgr.config_log(msg, level)
+
+    # end config_log
+
+    def is_doc_type_mapped(self, doc_type):
+        return doc_type in self._mapped_doc_types
+
+    # end __validate_doc_types
+
+    def search_db_trace(oper):
+        def wrapper1(func):
+            def wrapper2(self, obj_type, obj_ids, obj_dict):
+                msg = "Operation: %s, type: %s, id:%s, data:%s" % (oper, obj_type,
+                                                                   obj_ids, pformat(obj_dict))
+                try:
+                    ret = func(self, obj_type, obj_ids, obj_dict)
+                    self.trace_message(msg)
+                    return ret
+                except Exception as e:
+                    self.trace_message(msg, error_msg=str(e))
+                    self._db_client_mgr._rollback_handler.handle_error(SEARCH_ERROR, e, oper, obj_type, obj_ids,
+                                                                       obj_dict)
+
+            return wrapper2
+
+        return wrapper1
+
+    # dbe_trace
+
+    def trace_message(self, message, error_msg=""):
+        self.logger.warn(self.SEARCH_DB_MESSAGE.format(message, error_msg))
+
+    # trace_message
+
+    def __initialize_index_schema(self, reset_config, index_setting=None):
+        from gen.vnc_es_schema import get_es_schema
+        index, mapping = get_es_schema()
+        if reset_config and self._index_client.exists(index):
+            self._index_client.delete(index)
+
+        if index_setting:
+            mapping.update(index_setting)
+
+        if not self._index_client.exists(index):
+            result = self._index_client.create(index=index, body=mapping)
+            if 'acknowledged' in result and result['acknowledged']:
+                logger.warn("Updated search index successfully")
+            else:
+                logger.error("Failed to update search index")
+        mapped_doc_types = [k for k, v in mapping['mappings'].iteritems()]
+        return index, mapped_doc_types
+
+    # ____initialize_index_schema
+
+    def _scrub_dict(self, obj_dict):
+        if not isinstance(obj_dict, dict):
+            return obj_dict
+        return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if v is not None and not self._is_unsupported_entry(k))
+
+    # end _scrub_dict
+
+    def _is_unsupported_entry(self, k):
+        '''
+        Removes unsupported entries from ES mostly related to blobs or data types that es has problems with.
+        Later this will be taken from generated schema as well
+        Args:
+            k:
+
+        Returns:
+
+        '''
+        if k in self.FILTERED_KEYWORDS:
+            return True
+        return False
+    # end ___remove_unsupported_entries
+
+    @search_db_trace(OP_CREATE)
+    def search_create(self, obj_type, obj_ids, obj_dict):
+        if self.is_doc_type_mapped(obj_type):
+            obj_dict_scrubbed = self._scrub_dict(obj_dict)
+            self._es_client.index(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
+                                  body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
+
+    # end create
+
+
+    @search_db_trace(OP_UPDATE)
+    def search_update(self, obj_type, obj_ids, new_obj_dict):
+        if self.is_doc_type_mapped(obj_type):
+            obj_dict_scrubbed = {}
+            obj_dict_scrubbed["doc"] = self._scrub_dict(new_obj_dict)
+            if self._es_client.exists(index=self.index, doc_type=obj_type, id=obj_ids['uuid']):
+                self._es_client.update(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
+                                   body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
+            else:
+                self.search_create(obj_type, obj_ids, new_obj_dict, **self.__get_default_params())
+    # end dbe_update
+
+    @search_db_trace(OP_DELETE)
+    def search_delete(self, obj_type, obj_ids, obj_dict=None):
+        if self.is_doc_type_mapped(obj_type):
+            self._es_client.delete(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
+                                   **self.__get_default_params())
+
+    # end dbe_delete
+
+    def dbe_read(self, obj_type, obj_ids, obj_fields=None):
+        pass
+
+    # end dbe_read
+
+    def dbe_list(self, obj_type, body=None, params=None):
+        if params is None:
+            params = {}
+        elif params and 'filter' in params:
+            body = SearchUtil.convert_to_es_query_dsl(params)
+            self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
+        if 'size' not in params:
+            params['size'] = 1000
+        matches = self._es_client.search(index=self.index, doc_type=obj_type, body=body, params=params)
+        total = matches['hits']['total']
+        hits = matches['hits']['hits']
+        uuids = []
+        if hits:
+            for hit in hits:
+                obj_uuid = hit['_id']
+                uuids.append(obj_uuid)
+        return (True, uuids, total)
+
+    # dbe_list
+
+    def count(self, obj_type, body=None, params=None):
+        if params is None:
+            params = {}
+        elif params and 'filter' in params:
+            body = SearchUtil.convert_to_es_query_dsl(params)
+            self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
+        result = self._es_client.count(index=self.index, doc_type=obj_type, body=body, params=params)
+        total = result['count']
+        return (True, total)
+
+    # count
+
+    def search(self, obj_type=None, body=None, params=None):
+        self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
+        return self._es_client.search(index=self.index, doc_type=obj_type, body=body)
+    # end search
+
+    def __get_default_params(self):
+        return {
+            'consistency': self._consistency,
+            'timeout': str(cfg.CONF.elastic_search.timeout) + 's'
+        }
+
+    def suggest(self, body=None):
+        self.config_log('suggest body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
+        return self._es_client.suggest(body=body, index=self.index)
+
+    # suggest
+
+
+# end VncSearchDbClient
+
+
+class VncNoOpEsDb(VncSearchItf):
+    def search_create(self, obj_type, obj_ids, obj_dict):
+        pass
+
+    def search_delete(self, obj_type, obj_ids, obj_dict):
+        pass
+
+    def search_update(self, obj_type, obj_ids, obj_dict):
+        pass
+
+
+class SearchUtil:
+    _special_str = ["like", "(", ")", ";", "!=", "!>", "!<", "<>", "<=", ">=", "=", "<", ">", "||", "&&", " ", "--",
+                    "\r\n", "\t"]
+
+    @classmethod
+    def convert_to_es_query_dsl(self, params):
+        body = {}
+        if 'filter' in params:
+            body['query'] = {}
+            body['query']['filtered'] = {}
+            body['query']['filtered']['filter'] = self._parser_filter(params['filter'])
+        else:
+            body['query'] = {'match_all': {}}
+        return body
+
+    # end convert_to_es_query_dsl
+
+    @classmethod
+    def _convert_expression(self, word, json_obj):
+        json_obj_type = type(json_obj)
+        if type(word) is not dict:
+            if word[1] in ('=', 'eq'):
+                if (json_obj_type is list):
+                    json_obj.append({'term': {word[0] + '._raw': word[2]}})
+                else:
+                    json_obj['term'] = {word[0] + '._raw': word[2]}
+            elif word[1] == 'like':
+                if (json_obj_type is list):
+                    json_obj.append({'regexp': {word[0] + '._raw': '.*' + word[2] + '.*'}})
+                else:
+                    json_obj['regexp'] = {word[0] + '._raw': '.*' + word[2] + '.*'}
+            elif word[1] in ('>=', '>', '<', '<=', 'gte', 'gt', 'lt', 'lte'):
+                if word[1] == '>=':
+                    op = 'gte'
+                elif word[1] == '>':
+                    op = 'gt'
+                elif word[1] == '<':
+                    op = 'lt'
+                elif word[1] == '<=':
+                    op = 'lte'
+                else:
+                    op = word[1]
+
+                if (json_obj_type is list):
+                    json_obj.append({'range': {word[0]: {op: word[2]}}})
+                else:
+                    json_obj['range'] = {word[0]: {op: word[2]}}
+        else:
+            json_obj.append(word)
+
+    # end _convert_expression
+
+    @classmethod
+    def _convert(self, words):
+        if len(words) > 2:
+            while len(words) > 2:
+                operator_index = self._get_first_operator_index(words)
+                word = words[operator_index]
+                value1 = words[operator_index - 2]
+                value2 = words[operator_index - 1]
+                list = []
+                json_obj = {}
+                if word in ('&&', 'and'):
+                    json_obj['and'] = list
+                elif word in ('||', 'or'):
+                    json_obj['or'] = list
+                self._convert_expression(value1, list)
+                self._convert_expression(value2, list)
+                del words[operator_index]
+                del words[operator_index - 1]
+                del words[operator_index - 2]
+                words.insert(operator_index - 2, json_obj)
+            return words[0]
+        else:
+            query = {}
+            self._convert_expression(words[0], query)
+            return query
+
+    # end _convert
+
+    @classmethod
+    def _parser_filter(self, filter_str):
+        words = self._reorder(filter_str)
+        filter = self._convert(words)
+        return filter
+
+    # end _parser_filter
+
+    @classmethod
+    def _get_first_operator_index(self, words):
+        found = False
+        curr_index = 2
+        while (found == False and curr_index < len(words) - 1):
+            word = words[curr_index]
+            if type(word) is not tuple:
+                found = True
+            else:
+                curr_index = curr_index + 1
+        return curr_index
+
+    # end _get_first_operator_index
+
+    @classmethod
+    def _reorder(self, str):
+        variable_stack = ['#']
+        words_arr = []
+        current_str = str
+        while current_str is not None and current_str != '':
+            t = self._parse_word(current_str)
+            word = t[0]
+            current_str = t[1]
+            if word == "(" or word == ")" or word == "&&" or word == "||" or word == "and" or word == "or":
+                if word == ")":
+                    while variable_stack[len(variable_stack) - 1] != "(":
+                        words_arr.append(variable_stack.pop())
+                    variable_stack.pop()
+                else:
+                    priority = self._compare_priority(variable_stack[len(variable_stack) - 1], word)
+                    if priority:
+                        while priority:
+                            words_arr.append(variable_stack.pop())
+                            priority = self._compare_priority(variable_stack[len(variable_stack) - 1], word)
+                    variable_stack.append(word)
+            else:
+                conditionTuple = self._parse_word(current_str)
+                condition = conditionTuple[0]
+                current_str = conditionTuple[1]
+                value_tuple = self._parse_word(current_str)
+                value_str = value_tuple[0]
+                current_str = value_tuple[1]
+                value = None
+                if value_str[0] == "'":
+                    value = value_str[1: len(value_str) - 1]
+                else:
+                    value = value_str
+                words_arr.append((word, condition, value))
+        while len(variable_stack) > 0:
+            top = variable_stack.pop()
+            if top != '#':
+                words_arr.append(top)
+        return words_arr
+
+    # end _reorder
+
+    @classmethod
+    def _compare_priority(self, ope1, ope2):
+        if ope1 in ('or', '||') and ope2 in ('and', '&&'):
+            return True
+        else:
+            return False
+
+    # end _compare_priority
+
+    @classmethod
+    def _parse_word(self, original_str):
+        is_single_quote = False
+        offset = 0
+        str = self._trim_left(original_str)
+        length = len(str)
+        if length == 0:
+            return (None, None)
+        else:
+            special_chars = self._check_special_str(str)
+            if special_chars is not None:
+                return (special_chars, str[len(special_chars):])
+            else:
+                with_slash = False
+                while (offset < length):
+                    c = str[offset]
+                    if c == '\\':
+                        offset += 1
+                        if with_slash:
+                            with_slash = False
+                        else:
+                            with_slash = True
+                    else:
+                        if c == '\'' and not with_slash:
+                            if is_single_quote:
+                                break
+                            else:
+                                is_single_quote = True
+                                offset += 1
+                        elif not is_single_quote:
+                            special_chars = self._check_special_str(str[offset + 1:])
+                            if not special_chars:
+                                offset += 1
+                            else:
+                                break
+                        else:
+                            with_slash = False
+                            offset += 1
+                offset = min(offset, length - 1)
+                return (str[: offset + 1], str[offset + 1:])
+
+    # end _parse_word
+
+    @classmethod
+    def _trim_left(self, str):
+        offset = 0
+        length = len(str)
+        while offset < length and (str[offset] in (' ', '\t') or '\r\n'.find(str[offset]) >= 0):
+            offset = offset + 1
+        if offset > 0:
+            return str[offset:]
+        else:
+            return str
+
+    # end _trim_left
+
+    @classmethod
+    def _check_special_str(self, str):
+        if len(str) == 0:
+            return None
+        else:
+            special_chars = None
+            if len(str) > 1:
+                two_chars = str[0] + str[1]
+                if two_chars in self._special_str:
+                    special_chars = two_chars
+            if not special_chars:
+                one_char = str[0]
+                if one_char in self._special_str:
+                    special_chars = one_char
+            return special_chars
+    # end _check_special_str
+
+# end class SearchUtil

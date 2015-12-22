@@ -5,12 +5,18 @@
 import pycassa
 from pycassa import ColumnFamily
 from pycassa.batch import Mutator
-from pycassa.system_manager import SystemManager, SIMPLE_STRATEGY
+from pycassa.system_manager import SystemManager, SIMPLE_STRATEGY, UTF8_TYPE
 from pycassa.pool import AllServersUnavailable
 import gevent
 
 from vnc_api import vnc_api
 from exceptions import NoIdError, DatabaseUnavailableError
+try:
+    from vnc_api.gen.vnc_cassandra_client_gen import VncCassandraClientGen
+except:
+    from gen.vnc_cassandra_client_gen import  VncCassandraClientGen
+
+from exceptions import NoIdError
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
 from pysandesh.gen_py.process_info.ttypes import ConnectionType as ConnType
@@ -76,6 +82,8 @@ class VncCassandraClient(object):
             self._UUID_KEYSPACE_NAME: [(self._OBJ_UUID_CF_NAME, None),
                                        (self._OBJ_FQ_NAME_CF_NAME, None),
                                        (self._OBJ_SHARED_CF_NAME, None)]}
+            self._UUID_KEYSPACE_NAME: [(self._OBJ_UUID_CF_NAME, UTF8_TYPE),
+                                       (self._OBJ_FQ_NAME_CF_NAME, UTF8_TYPE)]}
 
         if keyspaces:
             self._keyspaces.update(keyspaces)
@@ -209,6 +217,8 @@ class VncCassandraClient(object):
                         comparator_type=comparator_type,
                         gc_grace_seconds=gc_grace_sec,
                         default_validation_class='UTF8Type')
+                        default_validation_class='UTF8Type',
+                        key_validation_class='UTF8Type')
                 else:
                     sys_mgr.create_column_family(keyspace_name, cf_name,
                         gc_grace_seconds=gc_grace_sec,
@@ -776,12 +786,13 @@ class VncCassandraClient(object):
 
     def fq_name_to_uuid(self, obj_type, fq_name):
         method_name = obj_type.replace('-', '_')
+        db_name = self.get_obj_type_to_db_type(method_name)
         fq_name_str = ':'.join(fq_name)
         col_start = '%s:' % (utils.encode_string(fq_name_str))
         col_fin = '%s;' % (utils.encode_string(fq_name_str))
         try:
             col_info_iter = self._obj_fq_name_cf.xget(
-                method_name, column_start=col_start, column_finish=col_fin)
+                db_name, column_start=col_start, column_finish=col_fin)
         except pycassa.NotFoundException:
             raise NoIdError('%s %s' % (obj_type, fq_name))
 

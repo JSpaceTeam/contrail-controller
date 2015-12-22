@@ -33,6 +33,7 @@ from pprint import pformat
 import cgitb
 from cStringIO import StringIO
 from lxml import etree
+from oslo_config import cfg
 #import GreenletProfiler
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,10 @@ from cfgm_common.uve.cfgm_cpuinfo.ttypes import NodeStatusUVE, \
 from sandesh.traces.ttypes import RestApiTrace
 from vnc_bottle import get_bottle_server
 
+_WEB_HOST = '0.0.0.0'
+_WEB_PORT = 8082
+_ADMIN_PORT = 8095
+
 _ACTION_RESOURCES = [
     {'uri': '/ref-update', 'link_name': 'ref-update',
      'method_name': 'ref_update_http_post'},
@@ -163,6 +168,21 @@ def error_500(err):
 def error_503(err):
     return err.body
 # end error_503
+
+#Parse config for olso configs. Try to move all config parsing to oslo cfg
+elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
+cfg.CONF.register_cli_opt(cfg.BoolOpt(name='search_enabled', default=False),
+                              group=elastic_search_group)
+cfg.CONF.register_cli_opt(cfg.ListOpt('server_list',
+                                          item_type=cfg.types.String(),
+                                          default='127.0.0.1:9200',
+                                          help="Multiple servers option"), group=elastic_search_group)
+cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing',default=False,
+                                          help="Enable connection sniffing for elastic search driver")
+                              ,group=elastic_search_group)
+
+cfg.CONF.register_cli_opt(cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
+                          group=elastic_search_group)
 
 
 # Masking of password from openstack/common/log.py
@@ -2253,7 +2273,6 @@ class VncApiServer(object):
             except NoIdError:
                 # uuid no longer valid. Delete?
                 pass
-
         fq_names_uuids = result
         obj_dicts = []
         if not is_detail:
