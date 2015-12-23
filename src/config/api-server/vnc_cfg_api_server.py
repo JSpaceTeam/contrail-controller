@@ -35,7 +35,7 @@ from cStringIO import StringIO
 from lxml import etree
 from oslo_config import cfg
 #import GreenletProfiler
-
+from gen.vnc_api_server_gen import SERVICE_PATH
 logger = logging.getLogger(__name__)
 
 """
@@ -1056,6 +1056,7 @@ class VncApiServer(object):
 
             if not ok:
                 # Create is done, log to system, no point in informing user
+                err_msg=""
                 self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
             # recurse down type hierarchy
             self.create_default_children(child_type, child_obj)
@@ -1074,7 +1075,7 @@ class VncApiServer(object):
             child_infos = parent_dict.get(child_field, [])
             for child_info in child_infos:
                 if child_info['to'][-1] == default_child_name:
-                    default_child_id = has_info['href'].split('/')[-1]
+                    default_child_id = child_info['href'].split('/')[-1]
                     del_method = getattr(self, '%s_http_delete' %(child_type))
                     del_method(default_child_id)
                     break
@@ -1136,22 +1137,23 @@ class VncApiServer(object):
 
             obj_type = resource_type.replace('-', '_')
             # leaf resource
-            obj.route('/%s/<id>' %(resource_type),
+            obj.route('%s/%s/<id>' %(SERVICE_PATH, resource_type),
                       'GET',
-                      getattr(obj, '%s_http_get' %(obj_type)))
-            obj.route('/%s/<id>' %(resource_type),
+                      getattr(obj, '%s_http_get' %( obj_type)))
+            obj.route('%s/%s/<id>' %(SERVICE_PATH, resource_type),
                       'PUT',
-                      getattr(obj, '%s_http_put' %(obj_type)))
-            obj.route('/%s/<id>' %(resource_type),
+                      getattr(obj, '%s_http_put' %( obj_type)))
+            obj.route('%s/%s/<id>' %(SERVICE_PATH, resource_type),
                       'DELETE',
-                      getattr(obj, '%s_http_delete' %(obj_type)))
+                      getattr(obj, '%s_http_delete' %( obj_type)))
             # collection of leaf
-            obj.route('/%ss' %(resource_type),
+            obj.route('%s/%s' %(SERVICE_PATH, resource_type),
                       'POST',
                       getattr(obj, '%ss_http_post' %(obj_type)))
-            obj.route('/%ss' %(resource_type),
+            obj.route('%s/%s' %(SERVICE_PATH, resource_type),
                       'GET',
                       getattr(obj, '%ss_http_get' %(obj_type)))
+
     # end _generate_resource_crud_uri
 
     def __init__(self, args_str=None):
@@ -1747,9 +1749,7 @@ class VncApiServer(object):
         apiConfig.body = body
 
         self._set_api_audit_info(apiConfig)
-        log = VncApiConfigLog(api_log=apiConfig, sandesh=self._sandesh)
-        log.send(sandesh=self._sandesh)
-
+        self.vnc_api_config_log(apiConfig)
         return {'uuid': id}
     # end ref_update_id_http_post
 
@@ -2019,7 +2019,7 @@ class VncApiServer(object):
                               rabbit_user, rabbit_password, rabbit_vhost,
                               rabbit_ha_mode, reset_config,
                               zk_server, self._args.cluster_id,
-                              cassandra_credential=cred)
+                              cassandra_credential=cred, ifmap_disable=self._args.disable_ifmap)
         self._db_conn = db_conn
     # end _db_connect
 
@@ -2239,7 +2239,7 @@ class VncApiServer(object):
                          req_fields=None):
         obj_type = resource_type.replace('-', '_') # e.g. virtual_network
 
-        (ok, result) = self._db_conn.dbe_list(obj_type,
+        (ok, result, total) = self._db_conn.dbe_list(obj_type,
                              parent_uuids, back_ref_uuids, obj_uuids, is_count,
                              filters)
         if not ok:
@@ -2249,13 +2249,13 @@ class VncApiServer(object):
 
         # If only counting, return early
         if is_count:
-            return {'%ss' %(resource_type): {'count': result}}
+            return {'%s' %(resource_type): {'count': total}}
 
         # filter out items not authorized
         for fq_name, uuid in result:
             (ok, status) = self._permissions.check_perms_read(get_request(), uuid)
             if not ok and status[0] == 403:
-                result.remove((fq_name,iuuid))
+                result.remove((fq_name, uuid))
 
         # include objects shared with tenant
         env = get_request().headers.environ
@@ -2349,9 +2349,9 @@ class VncApiServer(object):
                     continue
                 if (obj_dict['id_perms'].get('user_visible', True) or
                     self.is_admin_request()):
-                    obj_dicts.append({resource_type: obj_dict})
+                    obj_dicts.append(obj_dict)
 
-        return {'%ss' %(resource_type): obj_dicts}
+        return {'total': total, resource_type: obj_dicts}
     # end _list_collection
 
     def get_db_connection(self):
@@ -2359,13 +2359,14 @@ class VncApiServer(object):
     # end get_db_connection
 
     def generate_url(self, obj_type, obj_uuid):
-        obj_uri_type = obj_type.replace('_', '-')
+        obj_uri_type = '/' + obj_type.replace('_', '-')
         try:
-            url_parts = get_request().urlparts
-            return '%s://%s/%s/%s'\
-                % (url_parts.scheme, url_parts.netloc, obj_uri_type, obj_uuid)
+            url_parts = bottle.request.urlparts
+            return '%s://%s%s%s/%s' \
+                   % (url_parts.scheme, url_parts.netloc, SERVICE_PATH, obj_uri_type, obj_uuid)
         except Exception as e:
             return '%s/%s/%s' % (self._base_url, obj_uri_type, obj_uuid)
+
     # end generate_url
 
     def config_object_error(self, id, fq_name_str, obj_type,
@@ -2380,8 +2381,7 @@ class VncApiServer(object):
             apiConfig.error = "%s:%s" % (obj_type, err_str)
         self._set_api_audit_info(apiConfig)
 
-        log = VncApiConfigLog(api_log=apiConfig, sandesh=self._sandesh)
-        log.send(sandesh=self._sandesh)
+        self.vnc_api_config_log(apiConfig)
     # end config_object_error
 
     def config_log(self, err_str, level=SandeshLevel.SYS_INFO):
@@ -2471,10 +2471,7 @@ class VncApiServer(object):
             apiConfig.identifier_uuid = obj_uuid
             apiConfig.operation = 'put'
             self._set_api_audit_info(apiConfig)
-            log = VncApiConfigLog(api_log=apiConfig,
-                    sandesh=self._sandesh)
-            log.send(sandesh=self._sandesh)
-
+            self.vnc_api_config_log(apiConfig)
         # TODO check api + resource perms etc.
         if self.is_multi_tenancy_set():
             return self._permissions.check_perms_write(request, obj_uuid)
@@ -2621,11 +2618,15 @@ class VncApiServer(object):
             apiConfig.identifier_uuid = uuid_in_req
 
         self._set_api_audit_info(apiConfig)
-        log = VncApiConfigLog(api_log=apiConfig, sandesh=self._sandesh)
-        log.send(sandesh=self._sandesh)
+        self.vnc_api_config_log(apiConfig)
 
         return (True, uuid_in_req)
     # end _http_post_common
+
+
+    def vnc_api_config_log(self, apiConfig):
+        log = VncApiConfigLog(api_log=apiConfig, sandesh=self._sandesh)
+        log.send(sandesh=self._sandesh)
 
     def cleanup(self):
         # TODO cleanup sandesh context

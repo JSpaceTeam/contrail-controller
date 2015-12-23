@@ -28,6 +28,9 @@ from cfgm_common import ssl_adapter
 from pprint import pformat
 
 
+ASC = 'asc'
+DESC = 'desc'
+
 def check_homepage(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
@@ -131,7 +134,7 @@ class VncApi(object):
         # TODO allow for username/password to be present in creds file
 
         self._obj_serializer = self._obj_serializer_diff
-        for resource_type in vnc_api.gen.vnc_api_client_gen.all_resource_types:
+        for resource_type in gen.vnc_api_client_gen.all_resource_types:
             obj_type = resource_type.replace('-', '_')
             for oper_str in ('_create', '_read', '_update', '_delete',
                          's_list', '_get_default_id'):
@@ -144,6 +147,14 @@ class VncApi(object):
                 else:
                     setattr(self, '%s%s' %(obj_type, oper_str),
                         bound_method)
+
+        for rpc_type in gen.vnc_api_client_gen.all_rpc_input_types:
+            obj_type = rpc_type.replace('-','_')
+            method = self._rpc_execute
+            bound_method = functools.partial(method, rpc_type)
+            functools.update_wrapper(bound_method, method)
+            setattr(self, '%s_execute' % (obj_type), bound_method)
+
 
         cfg_parser = ConfigParser.ConfigParser()
         try:
@@ -449,6 +460,27 @@ class VncApi(object):
         content = self._request_server(rest.OP_DELETE, uri)
     # end _object_delete
 
+    @check_homepage
+    def _rpc_execute(self, res_type, obj):
+        obj_type = '%s-input' % (res_type.replace('-', '_'))
+        obj_cls = get_object_class(obj_type)
+        out_type = '%s-output' % (res_type.replace('-', '_'))
+        out_cls = get_object_class(out_type)
+
+        obj._pending_field_updates |= obj._pending_ref_updates
+        obj._pending_ref_updates = set([])
+        # Ignore fields with None value in json representation
+        json_param = json.dumps(obj, default = self._obj_serializer)
+        json_body = json_param
+        content = self._request_server(rest.OP_POST,
+                       obj_cls.resource_uri_base[res_type],
+                       data = json_body)
+        resp_dict = json.loads(content)
+        out = out_cls.from_dict(**resp_dict)
+        out.set_server_conn(self)
+        return out
+    # end _rpc_excecute
+
     def _object_get_default_id(self, res_type):
         obj_type = res_type.replace('-', '_')
         obj_cls = get_object_class(res_type)
@@ -606,6 +638,12 @@ class VncApi(object):
             elif link['link']['rel'] == 'action':
                 act_type = link['link']['name']
                 self._action_uri[act_type] = uri
+            elif link['link']['rel'] == 'rpc':
+                cls = utils.obj_type_to_vnc_class('%s-input' % (link['link']['name']), __name__)
+                if not cls:
+                    continue
+                resource_type = link['link']['name']
+                cls.resource_uri_base[resource_type] = uri
     #end _parse_homepage
 
     def _find_url(self, json_body, resource_name):
@@ -890,7 +928,7 @@ class VncApi(object):
     @check_homepage
     def resource_list(self, obj_type, parent_id=None, parent_fq_name=None,
                       back_ref_id=None, obj_uuids=None, fields=None,
-                      detail=False, count=False, filters=None):
+                      detail=False, count=False, filters=None, paging_ctx = None):
         if not obj_type:
             raise ResourceTypeUnknownError(obj_type)
 
@@ -938,6 +976,10 @@ class VncApi(object):
             query_params['filters'] = ','.join(
                 '%s==%s' %(k,json.dumps(v)) for k,v in filters.items())
 
+        if paging_ctx and isinstance(paging_ctx, PagingContext):
+            print(paging_ctx.to_dict())
+            query_params.update(paging_ctx.to_dict())
+
         if do_post_for_list:
             uri = self._action_uri.get('list-bulk-collection')
             if not uri:
@@ -960,11 +1002,10 @@ class VncApi(object):
         if not detail:
             return json.loads(content)
 
-        resource_dicts = json.loads(content)['%ss' %(obj_type)]
+        resource_dicts = json.loads(content)['%s' %(obj_type)]
         resource_objs = []
         for resource_dict in resource_dicts:
-            obj_dict = resource_dict['%s' %(obj_type)]
-            resource_obj = obj_class.from_dict(**obj_dict)
+            resource_obj = obj_class.from_dict(**resource_dict)
             resource_obj.clear_pending_updates()
             resource_obj.set_server_conn(self)
             resource_objs.append(resource_obj)
@@ -978,3 +1019,78 @@ class VncApi(object):
     #end set_auth_token
 
 #end class VncApi
+
+class PagingContext(object):
+    """
+     A Paging context for sorting, paging and filtering
+     from:          The starting from index of the hits to return. Default to 0
+     size:            The number of hits to return. Default to 1000.
+     sorter:        Sorting to perform. Can either be in the form of fieldName, or fieldName desc/fieldName asc. Default to asc.
+     filter:          Filter string. Supported operations are and, or, lt ,lte , gt, gte, > ,>=, < ,<=, =, like, eq  .
+
+    Example:
+            from=1&sorter=name desc,uuid asc&filter=((a gt 30) and (b lt 20 or c =21)) or ((d <=20) and (name eq 'd  ddd'))
+
+            p = PagingContext(filters="name eq test").sort('amount', 'asc').sort('account_id', 'desc')
+    """
+    def __init__(self, start=0, size=1000, filters=None):
+        self._start = start
+        self._size = size
+        self._filters = filters
+        self._sorting = list()
+
+    @property
+    def start(self):
+        return self._start
+
+    @start.setter
+    def start(self, start):
+        if start < 0:
+            raise Exception('start cannot be less than zero')
+        self._start = start
+
+    @property
+    def size(self):
+        return self._size
+
+    @size.setter
+    def size(self, size):
+        if size < 0:
+            raise Exception('size cannot be less than zero')
+        self._size = size
+
+    @property
+    def filters(self):
+        return self._filters
+
+    @filters.setter
+    def filters(self, filters):
+        self._filters = filters
+
+    @property
+    def sorting(self):
+        return self._sorting
+
+    @sorting.setter
+    def sorting(self, sorting):
+        pass
+
+    def sort(self, name, order=ASC):
+        if order not in {ASC, DESC}:
+            raise Exception("Incorrect order it should be %s" % ({ASC, DESC}))
+        self._sorting.append("%s %s"%(name, order))
+        return self
+
+    def to_dict(self):
+        query = {}
+        if self.start:
+            query['start'] = self.start
+        if self.size:
+            query['size'] = self.size
+        if self.filters:
+            query['filter'] = self.filters
+        if self.sorting:
+            query['sorter'] = reduce(lambda x,y: x + ',' + y, self.sorting)
+        return query
+
+# end PagingContext

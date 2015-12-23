@@ -9,14 +9,9 @@ from pycassa.system_manager import SystemManager, SIMPLE_STRATEGY, UTF8_TYPE
 from pycassa.pool import AllServersUnavailable
 import gevent
 
-from vnc_api import vnc_api
-from exceptions import NoIdError, DatabaseUnavailableError
-try:
-    from vnc_api.gen.vnc_cassandra_client_gen import VncCassandraClientGen
-except:
-    from gen.vnc_cassandra_client_gen import  VncCassandraClientGen
 
-from exceptions import NoIdError
+
+from exceptions import NoIdError, DatabaseUnavailableError
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
 from pysandesh.gen_py.process_info.ttypes import ConnectionType as ConnType
@@ -78,12 +73,9 @@ class VncCassandraClient(object):
         # returns an empty string
         self._generate_url = generate_url or (lambda x,y: '')
         self._cf_dict = {}
-        self._keyspaces = {
-            self._UUID_KEYSPACE_NAME: [(self._OBJ_UUID_CF_NAME, None),
-                                       (self._OBJ_FQ_NAME_CF_NAME, None),
+        self._keyspaces = { self._UUID_KEYSPACE_NAME: [(self._OBJ_UUID_CF_NAME, UTF8_TYPE),
+                                       (self._OBJ_FQ_NAME_CF_NAME, UTF8_TYPE),
                                        (self._OBJ_SHARED_CF_NAME, None)]}
-            self._UUID_KEYSPACE_NAME: [(self._OBJ_UUID_CF_NAME, UTF8_TYPE),
-                                       (self._OBJ_FQ_NAME_CF_NAME, UTF8_TYPE)]}
 
         if keyspaces:
             self._keyspaces.update(keyspaces)
@@ -216,7 +208,6 @@ class VncCassandraClient(object):
                         keyspace_name, cf_name,
                         comparator_type=comparator_type,
                         gc_grace_seconds=gc_grace_sec,
-                        default_validation_class='UTF8Type')
                         default_validation_class='UTF8Type',
                         key_validation_class='UTF8Type')
                 else:
@@ -254,10 +245,6 @@ class VncCassandraClient(object):
         self._logger(msg, level=SandeshLevel.SYS_NOTICE)
     # end _cassandra_init_conn_pools
 
-    def _get_resource_class(self, obj_type):
-        cls_name = '%s' %(utils.CamelCase(obj_type.replace('-', '_')))
-        return getattr(vnc_api, cls_name)
-    # end _get_resource_class
 
     def object_create(self, res_type, obj_id, obj_dict):
         obj_type = res_type.replace('-', '_')
@@ -786,7 +773,7 @@ class VncCassandraClient(object):
 
     def fq_name_to_uuid(self, obj_type, fq_name):
         method_name = obj_type.replace('-', '_')
-        db_name = self.get_obj_type_to_db_type(method_name)
+        db_name = method_name
         fq_name_str = ':'.join(fq_name)
         col_start = '%s:' % (utils.encode_string(fq_name_str))
         col_fin = '%s;' % (utils.encode_string(fq_name_str))

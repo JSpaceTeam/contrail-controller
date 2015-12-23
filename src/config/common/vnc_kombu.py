@@ -54,9 +54,8 @@ class VncKombuClientBase(object):
         self.obj_upd_exchange = kombu.Exchange('vnc_config.object-update', 'fanout',
                                                durable=False)
         self.search_rc_exchange = kombu.Exchange('vnc_config.search_rc', 'direct', durable=True,
-                                            delivery_mode='persistent')
+                                             delivery_mode='persistent')
 
-        self._search_rc_producer = self._conn.Producer(self._conn.channel(), exchange=self.search_rc_exchange)
         # Register a handler for SIGTERM so that we can release the lock
         # Without it, it can take several minutes before new master is elected
         # If any app using this wants to register their own sigterm handler,
@@ -113,6 +112,7 @@ class VncKombuClientBase(object):
                                            queues=self._update_queue_obj,
                                            callbacks=[self._subscribe])
             self._producer = kombu.Producer(self._channel, exchange=self.obj_upd_exchange)
+            self._search_rc_producer = kombu.Producer(self._conn.channel(), exchange=self.search_rc_exchange)
     # end _reconnect
 
     def _delete_queue(self):
@@ -177,6 +177,7 @@ class VncKombuClientBase(object):
                 # avoid 'reconnect()' here as that itself might cause exception
                 connected = False
     # end _publisher
+
 
     def _subscribe(self, body, message):
         try:

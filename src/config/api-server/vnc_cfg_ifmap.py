@@ -8,7 +8,8 @@ Layer that transforms VNC config objects to ifmap representation
 import abc
 from elasticsearch.exceptions import TransportError, ConnectionError
 from cfgm_common.zkclient import ZookeeperClient, IndexAllocator
-from elasticsearch.client import IndicesClient
+from elasticsearch.client import IndicesClient, Elasticsearch
+from fixtures._fixtures.mockpatch import mock
 from gevent import ssl, monkey
 from oslo_config import cfg
 from vnc_db_rollback import VncDBRollBackHandler, DB_ERROR, SEARCH_ERROR, OP_UPDATE, OP_DELETE, OP_CREATE
@@ -100,7 +101,7 @@ class VncIfmapClient(object):
         file.close()
 
     def __init__(self, db_client_mgr, ifmap_srv_ip, ifmap_srv_port,
-                 uname, passwd, ssl_options):
+                 uname, passwd, ssl_options, ifmap_disable=False):
         self._ifmap_srv_ip = ifmap_srv_ip
         self._ifmap_srv_port = ifmap_srv_port
         self._username = uname
@@ -124,15 +125,14 @@ class VncIfmapClient(object):
             name = 'IfMap', status = ConnectionStatus.INIT, message = '',
             server_addrs = ["%s:%s" % (ifmap_srv_ip, ifmap_srv_port)])
         self._conn_state = ConnectionStatus.INIT
-
-        self._reset()
-
+        self._ifmap_disable = ifmap_disable
         # Set the signal handler
         signal.signal(signal.SIGUSR2, self.handler)
-
-        self._init_conn()
-        self._publish_config_root()
-        self._health_checker_greenlet = gevent.spawn(self._health_checker)
+        if not self._ifmap_disable:
+            self._reset()
+            self._init_conn()
+            self._publish_config_root()
+            self._health_checker_greenlet = gevent.spawn(self._health_checker)
     # end __init__
 
     def object_alloc(self, obj_type, parent_type, fq_name):
@@ -977,6 +977,10 @@ class VncServerCassandraClient(VncCassandraClient):
 
         return walk_results
     # end walk
+
+    def _get_resource_class(self, obj_type):
+        return self._db_client_mgr.get_resource_class(obj_type)
+
 # end class VncCassandraClient
 
 
@@ -1039,8 +1043,8 @@ class VncServerKombuClient(VncKombuClient):
                 message = self._rc_queue.get()
                 while True:
                     try:
-                        self._search_rc_producer.publish(message, serializer='json', routing_key='',
-                                                         expiration=360, delivery_mode='persistent')
+                        #self._search_rc_producer.publish(message, serializer='json', routing_key='',
+                         #                                expiration=360) #delivery_mode='persistent')
                         break
                     except Exception as e:
                         log_str = "Disconnected from rabbitmq. Reinitializing connection: %s" % str(e)
@@ -1187,7 +1191,7 @@ class VncServerKombuClient(VncKombuClient):
             self.config_log(msg, level=SandeshLevel.SYS_ERR)
             raise
         finally:
-            is self._ifmap_disable:
+            if not self._ifmap_disable:
                 (ok, ifmap_result) = self._ifmap_db.object_delete(obj_info['type'],
                                                               obj_info)
                 if not ok:
@@ -1342,7 +1346,7 @@ class VncZkClient(object):
 class VncDbClient(object):
     def __init__(self, api_svr_mgr, ifmap_srv_ip, ifmap_srv_port, uname,
                  passwd, cass_srv_list,
-                 rabbit_server, rabbit_port, rabbit_user, rabbit_password, rabbit_vhost,
+                 rabbit_servers, rabbit_port, rabbit_user, rabbit_password,
                  rabbit_vhost, rabbit_ha_mode, reset_config=False,
                  zk_server_ip=None, db_prefix='', cassandra_credential=None, ifmap_disable=False):
 
@@ -1403,8 +1407,7 @@ class VncDbClient(object):
         self._msgbus = VncServerKombuClient(self, rabbit_servers,
                                             rabbit_port, self._ifmap_db,
                                             rabbit_user, rabbit_password,
-                                            rabbit_vhost, rabbit_ha_mode, self._ifmap_disable))
-
+                                            rabbit_vhost, rabbit_ha_mode, self._ifmap_disable)
         if cfg.CONF.elastic_search.search_enabled:
             self._search_db = VncSearchDbClient(self, self._msgbus, cfg.CONF.elastic_search.server_list,
                                                 index_settings=None, reset_config=reset_config)
@@ -1843,7 +1846,6 @@ class VncDbClient(object):
         self._search_db.search_create(obj_type, obj_ids, obj_dict)
         (ok, result) = self._cassandra_db.object_create(
             obj_type, obj_ids['uuid'], obj_dict)
-        (ok, result) = self._cassandra_db.create(method_name, obj_ids, obj_dict)
 
         # publish to ifmap via msgbus
         self._msgbus.dbe_create_publish(obj_type, obj_ids, obj_dict)
@@ -1940,7 +1942,7 @@ class VncDbClient(object):
                                     count=count, filters=filters)
                 return (ok, None, total)
 
-            (ok, cassandra_result, len(cassandra_result)) = self._cassandra_db.object_list(
+            (ok, cassandra_result) = self._cassandra_db.object_list(
                                                                 obj_type, parent_uuids=parent_uuids,
                                                                 back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
                                                                 count=count, filters=filters)

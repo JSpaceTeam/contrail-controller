@@ -11,7 +11,7 @@ import gen.resource_xsd
 import vnc_quota
 from pysandesh.sandesh_base import Sandesh, SandeshSystem
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
-
+from oslo_config import  cfg
 _WEB_HOST = '0.0.0.0'
 _WEB_PORT = 8082
 _ADMIN_PORT = 8095
@@ -69,6 +69,7 @@ def parse_args(args_str):
         'sandesh_send_rate_limit': SandeshSystem.get_sandesh_send_rate_limit(),
         'ifmap_health_check_interval': '60', # in seconds
         'stale_lock_seconds': '5', # lock but no resource past this => stale
+        'disable_ifmap': False
     }
     # ssl options
     secopts = {
@@ -99,15 +100,15 @@ def parse_args(args_str):
     if args.conf_file:
         config = ConfigParser.SafeConfigParser({'admin_token': None})
         config.read(args.conf_file)
-        if 'DEFAULTS' in config.sections():
-            defaults.update(dict(config.items("DEFAULTS")))
-            if 'multi_tenancy' in config.options('DEFAULTS'):
+        defaults.update(dict(config.items("DEFAULT")))
+
+        if 'multi_tenancy' in config.defaults():
                 defaults['multi_tenancy'] = config.getboolean(
-                    'DEFAULTS', 'multi_tenancy')
-            if 'multi_tenancy_with_rbac' in config.options('DEFAULTS'):
-                defaults['multi_tenancy_with_rbac'] = config.getboolean('DEFAULTS', 'multi_tenancy_with_rbac')
-            if 'default_encoding' in config.options('DEFAULTS'):
-                default_encoding = config.get('DEFAULTS', 'default_encoding')
+                    'DEFAULT', 'multi_tenancy')
+        if 'multi_tenancy_with_rbac' in config.defaults():
+                defaults['multi_tenancy_with_rbac'] = config.getboolean('DEFAULT', 'multi_tenancy_with_rbac')
+        if 'default_encoding' in config.defaults():
+                default_encoding = config.get('DEFAULT', 'default_encoding')
                 gen.resource_xsd.ExternalEncoding = default_encoding
         if 'SECURITY' in config.sections() and\
                 'use_certs' in config.options('SECURITY'):
@@ -282,6 +283,9 @@ def parse_args(args_str):
             help="Interval seconds to check for ifmap health, default 60")
     parser.add_argument("--stale_lock_seconds",
             help="Time after which lock without resource is stale, default 60")
+    parser.add_argument(
+        "--disable_ifmap", action="store_true",
+        help="Disable if map")
     args_obj, remaining_argv = parser.parse_known_args(remaining_argv)
     args_obj.config_sections = config
     if type(args_obj.cassandra_server_list) is str:
@@ -289,7 +293,11 @@ def parse_args(args_str):
             args_obj.cassandra_server_list.split()
     if type(args_obj.collectors) is str:
         args_obj.collectors = args_obj.collectors.split()
-
+    config_args = []
+    config_args.append("--config-dir")
+    cfg_dir = str(args.conf_file[0]).rsplit("/", 1)[0]
+    config_args.append(cfg_dir)
+    cfg.CONF(args=config_args, default_config_files = args.conf_file)
     return args_obj, remaining_argv
 # end parse_args
 

@@ -24,6 +24,8 @@ class Defaults(object):
 
         # set default perms2 of a new object
         # cloud-admin owner with full access, not shared with anyone
+        # set default perms2 of a new object
+        # cloud-admin owner with full access, not shared with anyone
         self.perms2 = PermType2(
                     'cloud-admin', PERMS_RWX,    # tenant, tenant-access
                     PERMS_NONE,                  # global-access
