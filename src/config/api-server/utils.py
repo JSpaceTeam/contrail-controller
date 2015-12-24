@@ -101,6 +101,17 @@ def parse_args(args_str):
         config = ConfigParser.SafeConfigParser({'admin_token': None})
         config.read(args.conf_file)
         defaults.update(dict(config.items("DEFAULT")))
+	
+	if 'DEFAULTS' in config.sections():
+            defaults.update(dict(config.items("DEFAULTS")))
+            if 'multi_tenancy' in config.options('DEFAULTS'):
+                defaults['multi_tenancy'] = config.getboolean(
+                    'DEFAULTS', 'multi_tenancy')
+            if 'multi_tenancy_with_rbac' in config.options('DEFAULTS'):
+                defaults['multi_tenancy_with_rbac'] = config.getboolean('DEFAULTS', 'multi_tenancy_with_rbac')
+            if 'default_encoding' in config.options('DEFAULTS'):
+                default_encoding = config.get('DEFAULTS', 'default_encoding')
+                gen.resource_xsd.ExternalEncoding = default_encoding	
 
         if 'multi_tenancy' in config.defaults():
                 defaults['multi_tenancy'] = config.getboolean(

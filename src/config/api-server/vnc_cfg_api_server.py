@@ -9,7 +9,7 @@ between http/rest, address management, authentication and database interfaces.
 from gevent import monkey
 monkey.patch_all()
 from gevent import hub
-
+import pdb
 # from neutron plugin to api server, the request URL could be large. fix the const
 import gevent.pywsgi
 gevent.pywsgi.MAX_REQUEST_LINE = 65535
@@ -1193,7 +1193,7 @@ class VncApiServer(object):
 
         for resource_type in gen.vnc_api_server_gen.all_resource_types:
             link = LinkObject('collection',
-                           self._base_url , '/%ss' %(resource_type),
+                           self._base_url , '/%s' %(resource_type),
                            '%s' %(resource_type))
             links.append(link)
 
@@ -1499,6 +1499,7 @@ class VncApiServer(object):
 
     # Public Methods
     def route(self, uri, method, handler):
+	#print("ADD ROUTE {}".format(uri))
         def handler_trap_exception(*args, **kwargs):
             set_context(ApiContext(external_req=bottle.request))
             trace = None
@@ -1922,7 +1923,8 @@ class VncApiServer(object):
 
     # Private Methods
     def _parse_args(self, args_str):
-        '''
+        import pdb
+	'''
         Eg. python vnc_cfg_api_server.py --ifmap_server_ip 192.168.1.17
                                          --ifmap_server_port 8443
                                          --ifmap_username test

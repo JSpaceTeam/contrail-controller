@@ -9,7 +9,6 @@ import errno
 import uuid
 import logging
 import coverage
-
 import cgitb
 cgitb.enable(format='text')
 
@@ -1153,7 +1152,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         flexmock(self._api_server).should_call('_list_collection').once()
         ret_list = self._vnc_lib.resource_list('virtual-network',
                                                obj_uuids=vn_uuids)
-        ret_uuids = [ret['uuid'] for ret in ret_list['virtual-networks']]
+        ret_uuids = [ret['uuid'] for ret in ret_list['virtual-network']]
         self.assertThat(set(vn_uuids), Equals(set(ret_uuids)))
 
         logger.info("Querying RIs by parent_id.")
@@ -1161,7 +1160,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         ret_list = self._vnc_lib.resource_list('routing-instance',
                                                parent_id=vn_uuids)
         ret_uuids = [ret['uuid']
-                     for ret in ret_list['routing-instances']]
+                     for ret in ret_list['routing-instance']]
         self.assertThat(set(ri_uuids),
             Equals(set(ret_uuids) & set(ri_uuids)))
 
@@ -1170,7 +1169,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         ret_list = self._vnc_lib.resource_list('virtual-machine-interface',
                                                back_ref_id=vn_uuids)
         ret_uuids = [ret['uuid']
-                     for ret in ret_list['virtual-machine-interfaces']]
+                     for ret in ret_list['virtual-machine-interface']]
         self.assertThat(set(vmi_uuids), Equals(set(ret_uuids)))
 
         logger.info("Querying VMIs by back_ref_id and extra fields.")
@@ -1179,10 +1178,10 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
                                                back_ref_id=vn_uuids,
                                                fields=['virtual_network_refs'])
         ret_uuids = [ret['uuid']
-                     for ret in ret_list['virtual-machine-interfaces']]
+                     for ret in ret_list['virtual-machine-interface']]
         self.assertThat(set(vmi_uuids), Equals(set(ret_uuids)))
         self.assertEqual(set(vmi['virtual_network_refs'][0]['uuid']
-            for vmi in ret_list['virtual-machine-interfaces']),
+            for vmi in ret_list['virtual-machine-interface']),
             set(vn_uuids))
 
         logger.info("Querying RIs by parent_id and filter.")
@@ -1190,7 +1189,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         ret_list = self._vnc_lib.resource_list('routing-instance',
             parent_id=vn_uuids,
             filters={'display_name':'%s-ri-5' %(self.id())})
-        self.assertThat(len(ret_list['routing-instances']), Equals(1))
+        self.assertThat(len(ret_list['routing-instance']), Equals(1))
 
         logger.info("Querying VNs by obj_uuids for children+backref fields.")
         flexmock(self._api_server).should_call('_list_collection').once()
@@ -1237,10 +1236,9 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             return objs
 
         vn_objs = create_vns()
-
         # unanchored summary list without filters
-        read_vn_dicts = self._vnc_lib.virtual_networks_list()['virtual-networks']
-        self.assertThat(len(read_vn_dicts), Not(LessThan(num_objs)))
+        read_vn_dicts = self._vnc_lib.virtual_networks_list()['virtual-network']
+	self.assertThat(len(read_vn_dicts), Not(LessThan(num_objs)))
         for obj in vn_objs:
             # locate created object, should only be one, expect exact fields
             obj_dict = [d for d in read_vn_dicts if d['uuid'] == obj.uuid]
@@ -1252,7 +1250,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         resp = self._vnc_lib.virtual_networks_list(
             filters={'display_name':vn_objs[2].display_name},
             fields=['is_shared'])
-        vn_dicts = resp['virtual-networks']
+        vn_dicts = resp['virtual-network']
         self.assertThat(len(vn_dicts), Equals(1))
         self.assertThat(vn_dicts[0]['uuid'], Equals(vn_objs[2].uuid))
         self.assertThat(set(['fq_name', 'uuid', 'href', 'is_shared']),
@@ -1276,7 +1274,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         # parent anchored summary list without filters, with extra fields
         read_vn_dicts = self._vnc_lib.virtual_networks_list(
             parent_id=proj_obj.uuid,
-            fields=['router_external'])['virtual-networks']
+            fields=['router_external'])['virtual-network']
         self.assertThat(len(read_vn_dicts), Equals(num_objs))
         for obj in vn_objs:
             # locate created object, should only be one, expect exact fields
@@ -1292,7 +1290,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         resp = self._vnc_lib.virtual_networks_list(
             parent_id=proj_obj.uuid,
             filters={'is_shared': vn_objs[2].is_shared})
-        read_vn_dicts = resp['virtual-networks']
+        read_vn_dicts = resp['virtual-network']
         self.assertThat(len(read_vn_dicts), Equals(num_objs))
         for obj in vn_objs:
             # locate created object, should only be one, expect exact fields
@@ -1327,7 +1325,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         resp = self._vnc_lib.virtual_networks_list(
             back_ref_id=ipam_obj.uuid,
             filters={'is_shared':vn_objs[2].is_shared})
-        read_vn_dicts = resp['virtual-networks']
+        read_vn_dicts = resp['virtual-network']
         self.assertThat(len(read_vn_dicts), Equals(num_objs))
         for obj in vn_objs:
             # locate created object, should only be one, expect exact fields
@@ -1342,7 +1340,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             back_ref_id=ipam_obj.uuid,
             filters={'display_name':vn_objs[2].display_name},
             fields=['is_shared', 'router_external'])
-        read_vn_dicts = resp['virtual-networks']
+        read_vn_dicts = resp['virtual-network']
         self.assertEqual(len(read_vn_dicts), 1)
         self.assertEqual(read_vn_dicts[0]['uuid'], vn_objs[2].uuid)
         self.assertEqual(read_vn_dicts[0]['is_shared'], True)
@@ -1407,7 +1405,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         listen_port = self._api_server._args.listen_port
         q_params = 'obj_uuids=%s,%s&fields=is_shared,router_external' %(
             vn1_obj.uuid, vn2_obj.uuid)
-        url = 'http://%s:%s/virtual-networks?%s' %(
+        url = 'http://%s:%s/virtual-network?%s' %(
             listen_ip, listen_port, q_params)
 
         def fake_non_admin_request(orig_method, *args, **kwargs):
@@ -1416,7 +1414,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             'is_admin_request', fake_non_admin_request):
             resp = requests.get(url)
             self.assertEqual(resp.status_code, 200)
-            read_vn_dicts = json.loads(resp.text)['virtual-networks']
+            read_vn_dicts = json.loads(resp.text)['virtual-network']
             self.assertEqual(len(read_vn_dicts), 1)
             self.assertEqual(read_vn_dicts[0]['uuid'], vn1_obj.uuid)
             self.assertEqual(read_vn_dicts[0]['is_shared'], True)
@@ -1894,7 +1892,7 @@ class TestLocalAuth(test_case.ApiServerTestCase):
 
         # equivalent to curl -u foo:bar http://localhost:8095/virtual-networks
         logger.info("Positive case")
-        url = 'http://localhost:%s/virtual-networks' %(admin_port)
+        url = 'http://localhost:%s/virtual-network' %(admin_port)
         resp = requests.get(url, auth=HTTPBasicAuth('foo', 'bar'))
         self.assertThat(resp.status_code, Equals(200))
 
