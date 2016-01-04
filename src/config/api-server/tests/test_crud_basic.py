@@ -2005,7 +2005,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
             del request.environ['SERVER_SOFTWARE']
 
             # /virtual-networks -> virtual-network
-            obj_type = request.path[1:-1]
+            obj_type = request.path[1:]
             if request.method == 'POST' and obj_type == 'virtual-network':
                 obj_name = request.json[obj_type]['fq_name'][-1]
                 if 'transform-create' in obj_name:
@@ -2021,7 +2021,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
 
         def validate_request(self, request):
             # /virtual-networks -> virtual-network
-            obj_type = request.path[1:-1]
+            obj_type = request.path[1:]
             if request.method == 'POST' and obj_type == 'virtual-network':
                 obj_name = request.json[obj_type]['fq_name'][-1]
                 if 'validate-create' in obj_name:
@@ -2048,7 +2048,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
             self._test_case.assertThat(request.environ['HTTP_X_CONTRAIL_USERAGENT'],
                                        Equals('bar'))
             if request.method == 'POST':
-                obj_type = request.path[1:-1]
+                obj_type = request.path[1:]
                 obj_name = request.json[obj_type]['fq_name'][-1]
                 if 'transform-create' in obj_name:
                     bottle.response.status = '234 Transformed Response'
@@ -2081,7 +2081,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
                           {'fq_name': obj.fq_name,
                            'parent_type': 'project',
                            'uuid': obj_request_uuid}}
-        status, content = self._http_post('/virtual-networks',
+        status, content = self._http_post('/virtual-network',
                               body=json.dumps(body_dict))
         self.assertThat(status, Equals(234))
         obj_dict = json.loads(content)['virtual-network']
@@ -2092,10 +2092,10 @@ class TestExtensionApi(test_case.ApiServerTestCase):
         self.assertThat(obj_dict['extra_field'], Equals('foo'))
 
         # read
-        status, content = self._http_get('/virtual-networks',
+        status, content = self._http_get('/virtual-network',
             query_params={'obj_uuids':'replace-me'+obj_dict['uuid']})
         self.assertThat(status, Equals(200))
-        objs_dict = json.loads(content)['virtual-networks']
+        objs_dict = json.loads(content)['virtual-network']
         self.assertThat(len(objs_dict), Equals(1))
         self.assertThat(objs_dict[0]['fq_name'][-1],
                         Equals('transform-create-foo'))
@@ -2116,7 +2116,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
         body_dict = {'virtual-network':
                         {'fq_name': obj.fq_name,
                         'parent_type': 'project'}}
-        status, content = self._http_post('/virtual-networks',
+        status, content = self._http_post('/virtual-network',
                               body=json.dumps(body_dict))
         self.assertThat(status, Equals(456))
         self.assertThat(content, Contains('invalidating create request'))

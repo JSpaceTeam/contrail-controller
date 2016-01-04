@@ -14,6 +14,7 @@ function usage {
   echo "  -p, --pep8                  Just run PEP8 and HACKING compliance check"
   echo "  -P, --no-pep8               Don't run static code checks"
   echo "  -c, --coverage              Generate coverage report"
+  echo "  -j, --junit                 Generate unit test report in junit format"
   echo "  -d, --debug                 Run tests with testtools instead of testr. This allows you to use the debugger."
   echo "  -h, --help                  Print this usage message"
   echo "  --hide-elapsed              Don't print the elapsed time for each test along with slow test list"
@@ -49,6 +50,7 @@ function process_options {
       -p|--pep8) just_pep8=1;;
       -P|--no-pep8) no_pep8=1;;
       -c|--coverage) coverage=1;;
+      -j|--junit) junit=1;;
       -d|--debug) debug=1;;
       --virtual-env-path)
         (( i++ ))
@@ -98,8 +100,8 @@ no_pep8=0
 coverage=0
 debug=0
 update=0
+junit=0
 concurrency=0
-
 LANG=en_US.UTF-8
 LANGUAGE=en_US:en
 LC_ALL=C
@@ -149,11 +151,15 @@ function run_tests {
     ${wrapper} python setup.py egg_info
   fi
   echo "Running \`${wrapper} $TESTRTESTS\`"
-  if ${wrapper} which subunit-2to1 2>&1 > /dev/null
+  
+  if [ $junit -eq 1 ]; then
+    echo "JUNIT STYLE REPORTS"
+    bash -c "${wrapper} $TESTRTESTS | ${wrapper} subunit2junitxml --no-passthrough --output-to test-results.xml"
+  elif ${wrapper} which subunit-2to1 2>&1 > /dev/null
   then
     # subunit-2to1 is present, testr subunit stream should be in version 2
     # format. Convert to version one before colorizing.
-    bash -c "${wrapper} $TESTRTESTS | ${wrapper} subunit-2to1 | ${wrapper} ${tools_path}/tools/colorizer.py"
+    bash -c "${wrapper} $TESTRTESTS | ${wrapper} subunit-2to1 | ${wrapper} ${tools_path}/tools/colorizer.py" 
   else
     bash -c "${wrapper} $TESTRTESTS | ${wrapper} ${tools_path}/tools/colorizer.py"
   fi

@@ -5,4 +5,5 @@ flexmock
 coverage
 webtest
 pyaml
+junitxml
 distribute>=0.7.3
