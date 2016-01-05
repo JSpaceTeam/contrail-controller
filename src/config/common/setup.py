@@ -11,7 +11,7 @@ def requirements(filename):
     return filter(bool, map(lambda y: c.sub('', y).strip(), lines))
 
 setup(
-    name='cfgm_common',
+    name='cfgm-common',
     version='0.1dev',
     packages=['cfgm_common',
               'cfgm_common.ifmap',
