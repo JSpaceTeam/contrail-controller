@@ -62,7 +62,10 @@ import utils
 import context
 from context import get_request, get_context, set_context
 from context import ApiContext
-import vnc_cfg_types
+try:
+    import vnc_cfg_types
+except:
+    pass
 from vnc_cfg_ifmap import VncDbClient
 
 from cfgm_common import ignore_exceptions, imid
