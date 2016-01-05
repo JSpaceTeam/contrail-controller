@@ -188,7 +188,7 @@ class VncApiServerBase(VncApiServer):
             # RPC /rpc
             obj_type = resource_type.replace('-', '_')
             # leaf resource
-            obj.route('%s/%s' % (SERVICE_PATH, obj_type),
+            obj.route('%s/%s' % (SERVICE_PATH, resource_type),
                       'POST',
                       getattr(obj, '%s_rpc_http_post' % (obj_type)))
 
@@ -265,7 +265,8 @@ class VncApiServerBase(VncApiServer):
         # call RPC implementation
         ok = True
         try:
-            rsp_body = self._extension_mgrs['rpcApi'].map_method('%s_execute' % resource_type, obj_dict)
+            method_name = resource_type.replace('-','_')
+            rsp_body = self._extension_mgrs['rpcApi'].map_method('%s_execute' % method_name, obj_dict)
         except KeyError as e:
             ok = False
             result = 'RPC not implemented'
@@ -285,7 +286,6 @@ class VncApiServerBase(VncApiServer):
 
     # Override Route
     def route(self, uri, method, handler):
-        print("Add route: %s " % uri)
 
         def handler_trap_exception(*args, **kwargs):
             set_context(ApiContext(external_req=bottle.request))
@@ -320,7 +320,7 @@ class VncApiServerBase(VncApiServer):
                     self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
 
                 raise
-
+        logger.debug("Add route: %s " % uri)
         bottle.route(uri, method, handler_trap_exception)
 
     # end route
