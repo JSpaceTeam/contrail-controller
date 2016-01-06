@@ -437,11 +437,11 @@ class VncApi(object):
     @check_homepage
     def _objects_list(self, res_type, parent_id=None, parent_fq_name=None,
                      obj_uuids=None, back_ref_id=None, fields=None,
-                     detail=False, count=False, filters=None):
+                     detail=False, count=False, filters=None, paging_context=None):
         return self.resource_list(res_type, parent_id=parent_id,
             parent_fq_name=parent_fq_name, back_ref_id=back_ref_id,
             obj_uuids=obj_uuids, fields=fields, detail=detail, count=count,
-            filters=filters)
+            filters=filters, paging_ctx=paging_context)
     # end _objects_list
 
     @check_homepage
@@ -977,7 +977,6 @@ class VncApi(object):
                 '%s==%s' %(k,json.dumps(v)) for k,v in filters.items())
 
         if paging_ctx and isinstance(paging_ctx, PagingContext):
-            print(paging_ctx.to_dict())
             query_params.update(paging_ctx.to_dict())
 
         if do_post_for_list:
