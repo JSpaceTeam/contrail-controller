@@ -57,6 +57,49 @@ class FlowTableKSyncObject;
 class FlowEvent;
 
 /////////////////////////////////////////////////////////////////////////////
+// Class to manage free-list of flow-entries
+// Flow allocation can happen from multiple threads. In scaled scenarios
+// allocation of flow-entries in multi-thread environment adds overheads.
+// The FlowEntryFreeList helps to maintain a per task free-list. Alloc/Free
+// can happen withou lock.
+//
+// Alloc and Free happens in a chunk. Alloc/Free are done based on thresholds
+// in task context of the corresponding flow-table
+/////////////////////////////////////////////////////////////////////////////
+class FlowEntryFreeList {
+public:
+    static const uint32_t kInitCount = (25 * 1000);
+    static const uint32_t kTestInitCount = (5 * 1000);
+    static const uint32_t kGrowSize = (1 * 1000);
+    static const uint32_t kMinThreshold = (4 * 1000);
+
+    typedef boost::intrusive::member_hook<FlowEntry,
+            boost::intrusive::list_member_hook<>,
+            &FlowEntry::free_list_node_> Node;
+    typedef boost::intrusive::list<FlowEntry, Node> FreeList;
+
+    FlowEntryFreeList(FlowTable *table);
+    virtual ~FlowEntryFreeList();
+
+    FlowEntry *Allocate(const FlowKey &key);
+    void Free(FlowEntry *flow);
+    void Grow();
+    uint32_t max_count() const { return max_count_; }
+    uint32_t free_count() const { return free_list_.size(); }
+    uint32_t alloc_count() const { return (max_count_ - free_list_.size()); }
+    uint32_t total_alloc() const { return total_alloc_; }
+    uint32_t total_free() const { return total_free_; }
+private:
+    FlowTable *table_;
+    uint32_t max_count_;
+    bool grow_pending_;
+    uint64_t total_alloc_;
+    uint64_t total_free_;
+    FreeList free_list_;
+    DISALLOW_COPY_AND_ASSIGN(FlowEntryFreeList);
+};
+
+/////////////////////////////////////////////////////////////////////////////
 // Flow addition is a two step process.
 // - FlowHandler :
 //   Flow is created in this context (file pkt_flow_info.cc).
@@ -78,7 +121,7 @@ struct FlowTaskMsg : public InterTaskMsg {
 };
 
 struct Inet4FlowKeyCmp {
-    bool operator()(const FlowKey &lhs, const FlowKey &rhs) {
+    bool operator()(const FlowKey &lhs, const FlowKey &rhs) const {
         const FlowKey &lhs_base = static_cast<const FlowKey &>(lhs);
         return lhs_base.IsLess(rhs);
     }
@@ -185,22 +228,20 @@ public:
                          const SecurityGroupList &sg_list);
     bool RevaluateRpfNH(FlowEntry *flow, const AgentRoute *rt);
 
-    // Update flow port bucket information
-    void DeleteByIndex(FlowEntry *flow);
-    void InsertByIndex(uint32_t flow_handle, FlowEntry *flow);
-    FlowEntry *FindByIndex(uint32_t flow_handle);
-    void DeleteVrouterEvictedFlow(FlowEntry *flow);
-    bool AddIndexFlowInfo(FlowEntry *fe, uint32_t flow_index, bool update);
-    void EvictVrouterFlow(FlowEntry *fe, uint32_t flow_index);
     void UpdateKSync(FlowEntry *flow, bool update);
+    void DeleteKSync(FlowEntry *flow);
 
     // FlowStatsCollector request queue events
     void NotifyFlowStatsCollector(FlowEntry *fe);
-    void UpdateFlowHandle(FlowEntry *flow, uint32_t flow_handle);
     void KSyncSetFlowHandle(FlowEntry *flow, uint32_t flow_handle);
+
+    // Free list
+    void GrowFreeList();
+    FlowEntryFreeList *free_list() { return &free_list_; }
 
     friend class FlowStatsCollector;
     friend class PktSandeshFlow;
+    friend class PktSandeshFlowStats;
     friend class FetchFlowRecord;
     friend class PktFlowInfo;
     friend void intrusive_ptr_release(FlowEntry *fe);
@@ -225,7 +266,6 @@ private:
              FlowEntry *new_rflow, bool update);
     void GetMutexSeq(tbb::mutex &mutex1, tbb::mutex &mutex2,
                      tbb::mutex **mutex_ptr_1, tbb::mutex **mutex_ptr_2);
-
     Agent *agent_;
     uint16_t table_index_;
     FlowTableKSyncObject *ksync_object_;
@@ -236,6 +276,7 @@ private:
     FlowIndexTree flow_index_tree_;
     // maintain the linklocal flow info against allocated fd, debug purpose only
     LinkLocalFlowInfoMap linklocal_flow_info_map_;
+    FlowEntryFreeList free_list_;
     tbb::mutex mutex_;
     DISALLOW_COPY_AND_ASSIGN(FlowTable);
 };

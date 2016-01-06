@@ -131,12 +131,14 @@ public:
     // Called from Create or GetReference to Allocate a KSyncEntry.
     // The KSyncEntry must be populated with fields in key and index
     virtual KSyncEntry *Alloc(const KSyncEntry *key, uint32_t index) = 0;
+    virtual void Free(KSyncEntry *entry);
 
     //Callback when all the entries in table are deleted
     virtual void EmptyTable(void) { };
     bool IsEmpty(void) { return tree_.empty(); }; 
 
     virtual bool DoEventTrace(void) { return true; }
+    virtual void PreFree(KSyncEntry *entry) { }
     static void Shutdown();
 
     std::size_t Size() { return tree_.size(); }

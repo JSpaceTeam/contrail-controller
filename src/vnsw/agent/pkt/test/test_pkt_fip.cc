@@ -22,7 +22,7 @@ public:
         agent_ = Agent::GetInstance();
         flow_proto_ = agent_->pkt()->get_flow_proto();
         client->WaitForIdle();
-        WAIT_FOR(1000, 100, (flow_proto_->FlowCount()));
+        WAIT_FOR(1000, 100, (flow_proto_->FlowCount() == 0U));
     }
 
     virtual void TearDown() {
@@ -352,7 +352,8 @@ static void Setup() {
     EXPECT_TRUE(ret);
     assert(ret == true);
 
-    Agent::GetInstance()->flow_stats_collector()->UpdateFlowAgeTime(AGE_TIME);
+    Agent::GetInstance()->flow_stats_manager()->
+        default_flow_stats_collector()->UpdateFlowAgeTime(AGE_TIME);
     AddAllowAcl("acl1", 1);
     client->WaitForIdle();
 }
@@ -1060,8 +1061,9 @@ TEST_F(FlowTest, Nat2NonNat) {
 
 // Non-Nat to Nat flow conversion test for traffic from VM to local VM
 TEST_F(FlowTest, NonNat2Nat) {
-    Agent::GetInstance()->flow_stats_collector()->UpdateFlowAgeTime
-        (FlowStatsCollector::FlowAgeTime);
+    Agent::GetInstance()->flow_stats_manager()->
+        default_flow_stats_collector()->
+        UpdateFlowAgeTime(FlowStatsCollector::FlowAgeTime);
     Ip4Address addr = Ip4Address::from_string("2.1.1.1");
     Ip4Address gw = Ip4Address::from_string("10.1.1.2");
     Inet4TunnelRouteAdd(bgp_peer_, "vrf1", addr, 32, gw,
@@ -1109,7 +1111,8 @@ TEST_F(FlowTest, NonNat2Nat) {
     EXPECT_TRUE(fe != NULL && fe->is_flags_set(FlowEntry::ShortFlow) == true &&
                 fe->short_flow_reason() == FlowEntry::SHORT_REVERSE_FLOW_CHANGE);
 
-    Agent::GetInstance()->flow_stats_collector()->UpdateFlowAgeTime(AGE_TIME);
+    Agent::GetInstance()->flow_stats_manager()->
+        default_flow_stats_collector()->UpdateFlowAgeTime(AGE_TIME);
     client->EnqueueFlowAge();
     client->WaitForIdle();
     vnet_table[1]->DeleteReq(bgp_peer_, "vrf1", addr, 32, NULL);
@@ -1638,9 +1641,6 @@ TEST_F(FlowTest, fip1_to_fip2_SNAT_DNAT_with_fixed_ip) {
 
     DelLink("virtual-machine-interface", "vnet5", "floating-ip", "fip_2");
     client->WaitForIdle();
-
-    EXPECT_TRUE(fe->is_flags_set(FlowEntry::ShortFlow) &&
-             fe->short_flow_reason() == FlowEntry::SHORT_NAT_CHANGE);
 }
 
 TEST_F(FlowTest, fixed_ip_fip_snat) {

@@ -232,6 +232,11 @@ void KSyncObject::FreeInd(KSyncEntry *entry, uint32_t index) {
     if (need_index_ == true && index != KSyncEntry::kInvalidIndex) {
         index_table_.Free(index);
     }
+    PreFree(entry);
+    Free(entry);
+}
+
+void KSyncObject::Free(KSyncEntry *entry) {
     delete entry;
 }
 
@@ -1521,7 +1526,9 @@ KSyncObjectManager *KSyncObjectManager::Init() {
 }
 
 void KSyncObjectManager::Shutdown() {
-    delete singleton_;
+    if (singleton_) {
+        delete singleton_;
+    }
     singleton_ = NULL;
 }
 

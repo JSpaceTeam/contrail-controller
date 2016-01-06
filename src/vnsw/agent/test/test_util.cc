@@ -2301,7 +2301,8 @@ bool FlowStats(FlowIp *input, int id, uint32_t bytes, uint32_t pkts) {
         LOG(DEBUG, "Flow not found");
         return false;
     }
-    FlowStatsCollector *fec = agent->flow_stats_collector();
+    FlowStatsCollector *fec =
+        agent->flow_stats_manager()->default_flow_stats_collector();
     FlowExportInfo *info = fec->FindFlowExportInfo(fe->key());
 
     if (info) {
@@ -2663,7 +2664,12 @@ void CreateVmportEnvInternal(struct PortInfo *input, int count, int acl_id,
         }
         if (with_ip6) {
             sprintf(instance_ip6, "instance6%d", input[i].intf_id);
-            AddInstanceIp(instance_ip6, input[i].intf_id, input[i].ip6addr);
+            if (ecmp) {
+                AddActiveActiveInstanceIp(instance_ip6, input[i].intf_id,
+                                          input[i].ip6addr);
+            } else {
+                AddInstanceIp(instance_ip6, input[i].intf_id, input[i].ip6addr);
+            }
         }
         if (!l2_vn) {
             AddLink("virtual-network", vn_name, "routing-instance", vrf_name);
@@ -2744,6 +2750,12 @@ void CreateV6VmportEnv(struct PortInfo *input, int count, int acl_id,
                        const char *vn, const char *vrf, bool with_v4_ip) {
     CreateVmportEnvInternal(input, count, acl_id, vn, vrf, NULL, false,
                             with_v4_ip, false, true, true);
+}
+
+void CreateV6VmportWithEcmp(struct PortInfo *input, int count, int acl_id,
+                       const char *vn, const char *vrf, bool with_v4_ip) {
+    CreateVmportEnvInternal(input, count, acl_id, vn, vrf, NULL, false,
+                            with_v4_ip, true, true, true);
 }
 
 void FlushFlowTable() {
@@ -3160,7 +3172,8 @@ bool FlowStatsMatch(const string &vrf_name, const char *sip,
     if (fe == NULL) {
         return false;
     }
-    FlowStatsCollector *fec = agent->flow_stats_collector();
+    FlowStatsCollector *fec = 
+        agent->flow_stats_manager()->default_flow_stats_collector();
     FlowExportInfo *info = fec->FindFlowExportInfo(key);
     if (info) {
         LOG(DEBUG, " bytes " << info->bytes() << " pkts " << info->packets());
@@ -3516,7 +3529,6 @@ BgpPeer *CreateBgpPeer(const Ip4Address &addr, std::string name) {
 
 static bool ControllerCleanupTrigger() {
     Agent::GetInstance()->controller()->Cleanup();
-    Agent::GetInstance()->set_controller_xmpp_channel(NULL, 1);
     return true;
 }
 
@@ -3524,10 +3536,16 @@ void DeleteBgpPeer(Peer *peer) {
     BgpPeer *bgp_peer = static_cast<BgpPeer *>(peer);
 
     AgentXmppChannel *channel = NULL;
+    XmppChannelMock *xmpp_channel = NULL;
+
     if (bgp_peer) {
         channel = bgp_peer->GetBgpXmppPeer();
         AgentXmppChannel::HandleAgentXmppClientChannelEvent(channel,
                                                             xmps::NOT_READY);
+    }
+    if (channel) {
+        xmpp_channel = static_cast<XmppChannelMock *>
+            (channel->GetXmppChannel());
     }
     client->WaitForIdle();
     TaskScheduler::GetInstance()->Stop();
@@ -3544,12 +3562,10 @@ void DeleteBgpPeer(Peer *peer) {
         (new TaskTrigger(boost::bind(ControllerCleanupTrigger), task_id, 0));
     trigger_->Set();
     client->WaitForIdle();
-    if (channel) {
-        XmppChannelMock *xmpp_channel = static_cast<XmppChannelMock *>
-            (channel->GetXmppChannel());
-        delete channel;
+    Agent::GetInstance()->reset_controller_xmpp_channel(0);
+    Agent::GetInstance()->reset_controller_xmpp_channel(1);
+    if (xmpp_channel)
         delete xmpp_channel;
-    }
 }
 
 void FillEvpnNextHop(BgpPeer *peer, std::string vrf_name,

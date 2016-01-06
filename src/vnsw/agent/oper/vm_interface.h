@@ -148,24 +148,28 @@ public:
         ServiceVlan();
         ServiceVlan(const ServiceVlan &rhs);
         ServiceVlan(uint16_t tag, const std::string &vrf_name,
-                    const Ip4Address &addr, uint8_t plen,
-                    const MacAddress &smac,
-                    const MacAddress &dmac);
+                    const Ip4Address &addr, const Ip6Address &addr6,
+                    const MacAddress &smac, const MacAddress &dmac);
         virtual ~ServiceVlan();
 
         bool operator() (const ServiceVlan &lhs, const ServiceVlan &rhs) const;
         bool IsLess(const ServiceVlan *rhs) const;
-        void Activate(VmInterface *interface, bool force_change) const;
+        void Activate(VmInterface *interface, bool force_change,
+                      bool old_ipv4_active, bool old_ipv6_active) const;
         void DeActivate(VmInterface *interface) const;
+        void V4RouteDelete(const Peer *peer) const;
+        void V6RouteDelete(const Peer *peer) const;
 
         uint16_t tag_;
         std::string vrf_name_;
         Ip4Address addr_;
-        uint8_t plen_;
+        Ip6Address addr6_;
         MacAddress smac_;
         MacAddress dmac_;
         mutable VrfEntryRef vrf_;
         mutable uint32_t label_;
+        mutable bool v4_rt_installed_;
+        mutable bool v6_rt_installed_;
     };
     typedef std::set<ServiceVlan, ServiceVlan> ServiceVlanSet;
 
@@ -359,6 +363,43 @@ public:
         InstanceIpSet list_;
     };
 
+    struct FatFlowEntry : ListEntry {
+        FatFlowEntry(): protocol(0), port(0) {}
+        FatFlowEntry(const FatFlowEntry &rhs):
+            protocol(rhs.protocol), port(rhs.port) {}
+        FatFlowEntry(const uint8_t proto, const uint16_t p):
+            protocol(proto), port(p) {}
+        virtual ~FatFlowEntry(){}
+        bool operator == (const FatFlowEntry &rhs) const {
+            return (rhs.protocol == protocol && rhs.port == port);
+        }
+
+        bool operator() (const FatFlowEntry  &lhs,
+                         const FatFlowEntry &rhs) const {
+            return lhs.IsLess(&rhs);
+        }
+
+        bool IsLess(const FatFlowEntry *rhs) const {
+            if (protocol != rhs->protocol) {
+                return protocol < rhs->protocol;
+            }
+            return port < rhs->port;
+        }
+        uint8_t protocol;
+        uint16_t port;
+    };
+    typedef std::set<FatFlowEntry, FatFlowEntry> FatFlowEntrySet;
+
+    struct FatFlowList {
+        FatFlowList(): list_() {}
+        ~FatFlowList() {}
+        void Insert(const FatFlowEntry *rhs);
+        void Update(const FatFlowEntry *lhs, const FatFlowEntry *rhs);
+        void Remove(FatFlowEntrySet::iterator &it);
+
+        FatFlowEntrySet list_;
+    };
+
     enum Trace {
         ADD,
         DELETE,
@@ -477,6 +518,11 @@ public:
         return instance_ipv6_list_;
     }
 
+    const FatFlowList &fat_flow_list() const {
+        return fat_flow_list_;
+    }
+
+    bool IsFatFlow(uint8_t protocol, uint16_t port) const;
     void set_vxlan_id(int vxlan_id) { vxlan_id_ = vxlan_id; }
     void set_subnet_bcast_addr(const Ip4Address &addr) {
         subnet_bcast_addr_ = addr;
@@ -668,7 +714,8 @@ private:
     void CleanupFloatingIpList();
     void UpdateFloatingIp(bool force_update, bool policy_change, bool l2);
     void DeleteFloatingIp(bool l2, uint32_t old_ethernet_tag);
-    void UpdateServiceVlan(bool force_update, bool policy_change);
+    void UpdateServiceVlan(bool force_update, bool policy_change,
+                           bool old_ipv4_active, bool old_ipv6_active);
     void DeleteServiceVlan();
     void UpdateStaticRoute(bool force_update, bool policy_change);
     void DeleteStaticRoute();
@@ -678,6 +725,8 @@ private:
     void DeleteAllowedAddressPair(bool l2);
     void UpdateSecurityGroup();
     void DeleteSecurityGroup();
+    void UpdateFatFlow();
+    void DeleteFatFlow();
     void UpdateL2TunnelId(bool force_update, bool policy_change);
     void DeleteL2TunnelId();
     void DeleteL2InterfaceRoute(bool old_l2_active, VrfEntry *old_vrf,
@@ -748,6 +797,7 @@ private:
     AllowedAddressPairList allowed_address_pair_list_;
     InstanceIpList instance_ipv4_list_;
     InstanceIpList instance_ipv6_list_;
+    FatFlowList fat_flow_list_;
 
     // Peer for interface routes
     std::auto_ptr<LocalVmPortPeer> peer_;
@@ -908,6 +958,7 @@ struct VmInterfaceConfigData : public VmInterfaceData {
     VmInterface::AllowedAddressPairList allowed_address_pair_list_;
     VmInterface::InstanceIpList instance_ipv4_list_;
     VmInterface::InstanceIpList instance_ipv6_list_;
+    VmInterface::FatFlowList fat_flow_list_;
     VmInterface::DeviceType device_type_;
     VmInterface::VmiType vmi_type_;
     // Parent physical-interface. Used in VMWare/ ToR logical-interface

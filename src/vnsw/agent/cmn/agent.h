@@ -7,6 +7,7 @@
 
 #include <vector>
 #include <stdint.h>
+#include <string>
 #include <net/ethernet.h>
 #include <boost/intrusive_ptr.hpp>
 #include <base/intrusive_ptr_back_ref.h>
@@ -33,6 +34,7 @@ class TaskScheduler;
 class AgentInit;
 class AgentStatsCollector;
 class FlowStatsCollector;
+class FlowStatsManager;
 namespace OVSDB {
 class OvsdbClient;
 };
@@ -177,6 +179,7 @@ class VNController;
 class AgentSignal;
 class ServiceInstanceTable;
 class LoadbalancerTable;
+class LoadbalancerPoolTable;
 class Agent;
 class RESTServer;
 
@@ -194,6 +197,7 @@ extern void RouterIdDepInit(Agent *agent);
 #define METADATA_NAT_PORT 80
 #define AGENT_INIT_TASKNAME "Agent::Init"
 #define AGENT_SHUTDOWN_TASKNAME "Agent::Shutdown"
+#define AGENT_FLOW_STATS_MANAGER_TASK "Agent::FlowStatsManager"
 #define IPV4_MULTICAST_BASE_ADDRESS "224.0.0.0"
 #define IPV6_MULTICAST_BASE_ADDRESS "ff00::"
 #define MULTICAST_BASE_ADDRESS_PLEN 8
@@ -234,6 +238,10 @@ public:
         INET6_UNICAST,
         ROUTE_TABLE_MAX
     };
+
+    typedef void (*FlowStatsReqHandler)(Agent *agent,
+                       uint32_t proto, uint32_t port,
+                       uint64_t timeout);
 
     Agent();
     virtual ~Agent();
@@ -502,13 +510,13 @@ public:
         xs_stime_[idx] = time;
     }
  
+    boost::shared_ptr<AgentXmppChannel> controller_xmpp_channel_ref(uint8_t idx);
     AgentXmppChannel *controller_xmpp_channel(uint8_t idx) const {
-        return agent_xmpp_channel_[idx];
+        return (agent_xmpp_channel_[idx]).get();
     }
 
-    void set_controller_xmpp_channel(AgentXmppChannel *channel, uint8_t idx) {
-        agent_xmpp_channel_[idx] = channel;
-    };
+    void set_controller_xmpp_channel(AgentXmppChannel *channel, uint8_t idx);
+    void reset_controller_xmpp_channel(uint8_t idx);
 
     // Service instance
    ServiceInstanceTable *service_instance_table() const {
@@ -519,13 +527,22 @@ public:
        service_instance_table_= table;
    }
 
-    // Loadbalancer-pool
+    // Loadbalancer
    LoadbalancerTable *loadbalancer_table() const {
        return loadbalancer_table_;
    }
 
    void set_loadbalancer_table(LoadbalancerTable *table) {
        loadbalancer_table_ = table;
+   }
+
+    // Loadbalancer-pool
+   LoadbalancerPoolTable *loadbalancer_pool_table() const {
+       return loadbalancer_pool_table_;
+   }
+
+   void set_loadbalancer_pool_table(LoadbalancerPoolTable *table) {
+       loadbalancer_pool_table_ = table;
    }
 
     // DNS XMPP Server
@@ -609,16 +626,6 @@ public:
 
     const std::string &module_name() const { return module_name_; }
     void set_module_name(const std::string &name) { module_name_ = name; }
-
-    // Multicast related
-    const std::string &multicast_label_range(uint8_t idx) { 
-        return label_range_[idx]; 
-    }
-    void SetAgentMcastLabelRange(uint8_t idx);
-    void ResetAgentMcastLabelRange(uint8_t idx) {
-
-        label_range_[idx].clear();
-    }
 
     AgentXmppChannel* mulitcast_builder() {
         return cn_mcast_builder_;
@@ -734,8 +741,8 @@ public:
     AgentStatsCollector *stats_collector() const;
     void set_stats_collector(AgentStatsCollector *asc);
 
-    FlowStatsCollector *flow_stats_collector() const;
-    void set_flow_stats_collector(FlowStatsCollector *fsc);
+    FlowStatsManager *flow_stats_manager() const;
+    void set_flow_stats_manager(FlowStatsManager *fsc);
 
     PktModule *pkt() const;
     void set_pkt(PktModule *pkt);
@@ -934,6 +941,15 @@ public:
     }
     Agent::ForwardingMode TranslateForwardingMode(const std::string &mode) const;
 
+    FlowStatsReqHandler& flow_stats_req_handler() {
+        return flow_stats_req_handler_;
+    }
+
+    void set_flow_stats_req_handler(FlowStatsReqHandler req) {
+        flow_stats_req_handler_ = req;
+    }
+ 
+    static uint16_t ProtocolStringToInt(const std::string &str);
 private:
 
     AgentParam *params_;
@@ -942,7 +958,7 @@ private:
     KSync *ksync_;
     AgentUveBase *uve_;
     AgentStatsCollector *stats_collector_;
-    FlowStatsCollector *flow_stats_collector_;
+    FlowStatsManager *flow_stats_manager_;
     PktModule *pkt_;
     ServicesModule *services_;
     VirtualGateway *vgw_;
@@ -952,7 +968,7 @@ private:
     VNController *controller_;
 
     EventManager *event_mgr_;
-    AgentXmppChannel *agent_xmpp_channel_[MAX_XMPP_SERVERS];
+    boost::shared_ptr<AgentXmppChannel> agent_xmpp_channel_[MAX_XMPP_SERVERS];
     AgentIfMapXmppChannel *ifmap_channel_[MAX_XMPP_SERVERS];
     XmppClient *xmpp_client_[MAX_XMPP_SERVERS];
     XmppInit *xmpp_init_[MAX_XMPP_SERVERS];
@@ -996,6 +1012,7 @@ private:
     VxLanTable *vxlan_table_;
     ServiceInstanceTable *service_instance_table_;
     LoadbalancerTable *loadbalancer_table_;
+    LoadbalancerPoolTable *loadbalancer_pool_table_;
     PhysicalDeviceTable *physical_device_table_;
     PhysicalDeviceVnTable *physical_device_vn_table_;
     std::auto_ptr<ConfigManager> config_manager_;
@@ -1038,7 +1055,6 @@ private:
     uint32_t dss_port_;
     int dss_xs_instances_;
     std::string discovery_client_name_;
-    std::string label_range_[MAX_XMPP_SERVERS];
     std::string ip_fabric_intf_name_;
     std::string vhost_interface_name_;
     std::string pkt_interface_name_;
@@ -1109,6 +1125,7 @@ private:
     uint32_t vrouter_max_bridge_entries_;
     uint32_t vrouter_max_oflow_bridge_entries_;
     std::string vrouter_build_info_;
+    FlowStatsReqHandler flow_stats_req_handler_;
 
     // Constants
     static const std::string config_file_;

@@ -86,6 +86,23 @@ AgentXmppChannel::~AgentXmppChannel() {
     channel_->UnRegisterReceive(xmps::BGP);
 }
 
+InetUnicastAgentRouteTable *AgentXmppChannel::PrefixToRouteTable
+    (const std::string &vrf_name, const IpAddress &prefix_addr) {
+    InetUnicastAgentRouteTable *rt_table = NULL;
+
+    if (prefix_addr.is_v4()) {
+        rt_table = agent_->vrf_table()->GetInet4UnicastRouteTable(vrf_name);
+    } else if (prefix_addr.is_v6()) {
+        rt_table = agent_->vrf_table()->GetInet6UnicastRouteTable(vrf_name);
+    }
+    if (rt_table == NULL) {
+        CONTROLLER_TRACE(Trace, GetBgpPeerName(), vrf_name,
+                         "Unable to fetch route table for prefix " +
+                         prefix_addr.to_string());
+    }
+    return rt_table;
+}
+
 void AgentXmppChannel::RegisterXmppChannel(XmppChannel *channel) {
     if (channel == NULL)
         return;
@@ -112,7 +129,9 @@ void AgentXmppChannel::CreateBgpPeer() {
     const string &addr = agent_->controller_ifmap_xmpp_server(xs_idx_);
     Ip4Address ip = Ip4Address::from_string(addr.c_str(), ec);
     assert(ec.value() == 0);
-    bgp_peer_id_.reset(new BgpPeer(ip, addr, this, id, Peer::BGP_PEER));
+    bgp_peer_id_.reset(new BgpPeer(ip, addr,
+                                   agent_->controller_xmpp_channel_ref(xs_idx_),
+                                   id, Peer::BGP_PEER));
 }
 
 void AgentXmppChannel::DeCommissionBgpPeer() {
@@ -585,7 +604,7 @@ void AgentXmppChannel::ReceiveV4V6Update(XmlPugi *pugi) {
     }
 }
 
-void AgentXmppChannel::AddEcmpRoute(string vrf_name, Ip4Address prefix_addr,
+void AgentXmppChannel::AddEcmpRoute(string vrf_name, IpAddress prefix_addr,
                                     uint32_t prefix_len, ItemType *item) {
     PathPreference::Preference preference = PathPreference::LOW;
     TunnelType::TypeBmap encap = TunnelType::MplsType(); //default
@@ -593,8 +612,11 @@ void AgentXmppChannel::AddEcmpRoute(string vrf_name, Ip4Address prefix_addr,
         preference = PathPreference::HIGH;
     }
     PathPreference rp(item->entry.sequence_number, preference, false, false);
-    InetUnicastAgentRouteTable *rt_table =
-        agent_->vrf_table()->GetInet4UnicastRouteTable(vrf_name);
+    InetUnicastAgentRouteTable *rt_table = PrefixToRouteTable(vrf_name,
+                                                              prefix_addr);
+    if (rt_table == NULL) {
+        return;
+    }
 
     ComponentNHKeyList comp_nh_list;
     for (uint32_t i = 0; i < item->entry.next_hops.next_hop.size(); i++) {
@@ -605,6 +627,11 @@ void AgentXmppChannel::AddEcmpRoute(string vrf_name, Ip4Address prefix_addr,
         if (ec.value() != 0) {
             CONTROLLER_TRACE(Trace, GetBgpPeerName(), vrf_name,
                              "Error parsing nexthop ip address");
+            continue;
+        }
+        if (!addr.is_v4()) {
+            CONTROLLER_TRACE(Trace, GetBgpPeerName(), vrf_name,
+                             "Non IPv4 address not supported as nexthop");
             continue;
         }
 
@@ -621,8 +648,8 @@ void AgentXmppChannel::AddEcmpRoute(string vrf_name, Ip4Address prefix_addr,
                                 label, item->entry.virtual_network,
                                 item->entry.security_group_list.security_group);
                     rt_table->AddClonedLocalPathReq(bgp_peer, vrf_name,
-                            prefix_addr,
-                            prefix_len, data);
+                                                    prefix_addr, prefix_len,
+                                                    data);
                     return;
                 }
 
@@ -900,13 +927,9 @@ void AgentXmppChannel::AddEvpnRoute(const std::string &vrf_name,
 
 void AgentXmppChannel::AddRemoteRoute(string vrf_name, IpAddress prefix_addr,
                                       uint32_t prefix_len, ItemType *item) {
-    InetUnicastAgentRouteTable *rt_table = NULL;
+    InetUnicastAgentRouteTable *rt_table = PrefixToRouteTable(vrf_name,
+                                                              prefix_addr);
 
-    if (prefix_addr.is_v4()) {
-        rt_table = agent_->vrf_table()->GetInet4UnicastRouteTable(vrf_name);
-    } else if (prefix_addr.is_v6()) {
-        rt_table = agent_->vrf_table()->GetInet6UnicastRouteTable(vrf_name);
-    }
     if (rt_table == NULL) {
         return;
     }
@@ -1003,11 +1026,6 @@ void AgentXmppChannel::AddRemoteRoute(string vrf_name, IpAddress prefix_addr,
             }
 
         case NextHop::VLAN: {
-            if (!prefix_addr.is_v4()) {
-                 CONTROLLER_TRACE(Trace, GetBgpPeerName(), vrf_name,
-                                  "VLAN NH not supported for non IPv4");
-                 return;
-            }
             const VlanNH *vlan_nh = static_cast<const VlanNH *>(nh);
             VmInterfaceKey intf_key(AgentKey::ADD_DEL_CHANGE,
                                     vlan_nh->GetIfUuid(), "");
@@ -1019,17 +1037,12 @@ void AgentXmppChannel::AddRemoteRoute(string vrf_name, IpAddress prefix_addr,
                                           path_preference,
                                           unicast_sequence_number(),
                                           this);
-            rt_table->AddVlanNHRouteReq(bgp_peer, vrf_name, prefix_addr.to_v4(),
+            rt_table->AddVlanNHRouteReq(bgp_peer, vrf_name, prefix_addr,
                                         prefix_len, data);
             break;
             }
         case NextHop::COMPOSITE: {
-            if (!prefix_addr.is_v4()) {
-                 CONTROLLER_TRACE(Trace, GetBgpPeerName(), vrf_name,
-                                  "Composite NH not supported for non IPv4");
-                 return;
-            }
-            AddEcmpRoute(vrf_name, prefix_addr.to_v4(), prefix_len, item);
+            AddEcmpRoute(vrf_name, prefix_addr, prefix_len, item);
             break;
             }
         case NextHop::VRF: {
@@ -1063,12 +1076,7 @@ void AgentXmppChannel::AddRemoteRoute(string vrf_name, IpAddress prefix_addr,
 void AgentXmppChannel::AddRoute(string vrf_name, IpAddress prefix_addr,
                                 uint32_t prefix_len, ItemType *item) {
     if (item->entry.next_hops.next_hop.size() > 1) {
-        if (!prefix_addr.is_v4()) {
-            CONTROLLER_TRACE(Trace, GetBgpPeerName(), vrf_name,
-                             "Multiple NH not supported for non IPv4");
-            return;
-        }
-        AddEcmpRoute(vrf_name, prefix_addr.to_v4(), prefix_len, item);
+        AddEcmpRoute(vrf_name, prefix_addr, prefix_len, item);
     } else {
         AddRemoteRoute(vrf_name, prefix_addr, prefix_len, item);
     }

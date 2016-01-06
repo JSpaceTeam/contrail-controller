@@ -43,11 +43,13 @@ class ResourceDbMixin(object):
         return True, ''
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn,
+            prop_list_updates=None, ref_update=None):
         return True, ''
 
     @classmethod
-    def post_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def post_dbe_update(cls, id, fq_name, obj_dict, db_conn,
+            prop_list_updates=None, ref_update=None):
         return True, ''
 
     @classmethod
@@ -117,7 +119,7 @@ class GlobalSystemConfigServer(Resource, GlobalSystemConfig):
     # end pre_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         ok, result = cls._check_asn(obj_dict, db_conn)
         if not ok:
             return ok, result
@@ -181,25 +183,16 @@ class FloatingIpServer(Resource, FloatingIp):
 
 
     @classmethod
-    def pre_dbe_delete(cls, id, obj_dict, db_conn):
+    def post_dbe_delete(cls, id, obj_dict, db_conn):
         vn_fq_name = obj_dict['fq_name'][:-2]
         fip_addr = obj_dict['floating_ip_address']
         db_conn.config_log('AddrMgmt: free FIP %s for vn=%s'
                            % (fip_addr, vn_fq_name),
                            level=SandeshLevel.SYS_DEBUG)
         cls.addr_mgmt.ip_free_req(fip_addr, vn_fq_name)
-        def undo():
-            cls.addr_mgmt.ip_alloc_req(vn_fq_name, asked_ip_addr=fip_addr,
-                                       alloc_id=obj_dict['uuid'])
-            db_conn.config_log('AddrMgmt: alloc %s FIP for vn=%s to recover DELETE failure'
-                               % (obj_dict['floating_ip_address'], vn_fq_name),
-                               level=SandeshLevel.SYS_DEBUG)
-            return True, ""
-        # end undo
-        get_context().push_undo(undo)
 
         return True, ""
-    # end pre_dbe_delete
+    # end post_dbe_delete
 
 
     @classmethod
@@ -312,7 +305,7 @@ class InstanceIpServer(Resource, InstanceIp):
     # end pre_dbe_create
 
     @classmethod
-    def pre_dbe_delete(cls, id, obj_dict, db_conn):
+    def post_dbe_delete(cls, id, obj_dict, db_conn):
         vn_fq_name = obj_dict['virtual_network_refs'][0]['to']
         if ((vn_fq_name == cfgm_common.IP_FABRIC_VN_FQ_NAME) or
                 (vn_fq_name == cfgm_common.LINK_LOCAL_VN_FQ_NAME)):
@@ -330,20 +323,9 @@ class InstanceIpServer(Resource, InstanceIp):
                            % (ip_addr, vn_fq_name),
                            level=SandeshLevel.SYS_DEBUG)
         cls.addr_mgmt.ip_free_req(ip_addr, vn_fq_name)
-        def undo():
-            cls.addr_mgmt.ip_alloc_req(vn_fq_name, asked_ip_addr=ip_addr,
-                                       alloc_id=obj_dict['uuid'])
-            db_conn.config_log(
-                'AddrMgmt: alloc %s for vn=%s to recover DELETE failure'
-                % (obj_dict['instance_ip_address'], vn_fq_name),
-                level=SandeshLevel.SYS_DEBUG)
-
-            return True, ""
-        # end undo
-        get_context().push_undo(undo)
 
         return True, ""
-    # end pre_dbe_delete
+    # end post_dbe_delete
 
     @classmethod
     def dbe_create_notification(cls, obj_ids, obj_dict):
@@ -385,6 +367,13 @@ class LogicalRouterServer(Resource, LogicalRouter):
 
 class VirtualMachineInterfaceServer(Resource, VirtualMachineInterface):
     generate_default_instance = False
+
+    portbindings = {}
+    portbindings['VIF_TYPE_VROUTER'] = 'vrouter'
+    portbindings['VIF_TYPE_HW_VEB'] = 'hw_veb'
+    portbindings['VNIC_TYPE_NORMAL'] = 'normal'
+    portbindings['VNIC_TYPE_DIRECT'] = 'direct'
+    portbindings['PORT_FILTER'] = True
 
     @classmethod
     def pre_dbe_create(cls, tenant_name, obj_dict, db_conn):
@@ -447,6 +436,37 @@ class VirtualMachineInterfaceServer(Resource, VirtualMachineInterface):
                 for aap in aaps or []:
                     if aap['mac'] == "":
                         aap['mac'] = obj_dict['virtual_machine_interface_mac_addresses']['mac_address']
+
+        if 'virtual_machine_interface_bindings' in obj_dict:
+            bindings = obj_dict['virtual_machine_interface_bindings']
+            kvps = bindings['key_value_pair']
+
+            vif_type_presence = False
+            vnic_type_presence = False
+            for kvp in kvps:
+                if kvp['key'] == 'vif_type':
+                    vif_type_presence = True
+                if kvp['key'] == 'vnic_type':
+                    vnic_type_presence = True
+                    if kvp['value'] == cls.portbindings['VNIC_TYPE_DIRECT']:
+                        if not 'provider_properties' in  vn_dict:
+                            msg = 'No provider details in direct port'
+                            return (False, (400, msg))
+                        vif_type = {'key' : 'vif_type', 'value' : cls.portbindings['VIF_TYPE_HW_VEB']}
+                        vif_type_presence = True
+                        kvps.append(vif_type)
+                        vif_params = {'port_filter': cls.portbindings['PORT_FILTER'], 'vlan' : str(vn_dict['provider_properties']['segmentation_id'])}
+                        vif_details = {'key' : 'vif_details', 'value' : vif_params}
+                        kvps.append(vif_details)
+
+            if not vif_type_presence:
+                vif_type = {'key' : 'vif_type', 'value' : cls.portbindings['VIF_TYPE_VROUTER']}
+                kvps.append(vif_type)
+
+            if not vnic_type_presence:
+                vnic_type = {'key' : 'vnic_type', 'value' : cls.portbindings['VNIC_TYPE_NORMAL']}
+                kvps.append(vnic_type)
+
         return True, ""
     # end pre_dbe_create
 
@@ -478,29 +498,57 @@ class VirtualMachineInterfaceServer(Resource, VirtualMachineInterface):
     # end post_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
-        if 'virtual_machine_interface_allowed_address_pairs' in obj_dict:
-            vmi_id = {'uuid': id}
-            try:
-                (read_ok, read_result) = db_conn.dbe_read('virtual-machine-interface', vmi_id)
-            except cfgm_common.exceptions.NoIdError as e:
-                return (False, (404, str(e)))
-            if not read_ok:
-                return (False, (500, read_result))
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
 
+        vmi_id = {'uuid': id}
+
+        try:
+            (read_ok, read_result) = db_conn.dbe_read('virtual-machine-interface', vmi_id)
+        except cfgm_common.exceptions.NoIdError as e:
+            return (False, (404, str(e)))
+        if not read_ok:
+            return (False, (500, read_result))
+
+        if 'virtual_machine_interface_allowed_address_pairs' in obj_dict:
             aap_config = obj_dict['virtual_machine_interface_allowed_address_pairs']
             if 'allowed_address_pair' in aap_config:
                 aaps = aap_config['allowed_address_pair']
                 for aap in aaps or []:
                     if aap['mac'] == "":
                         aap['mac'] = read_result['virtual_machine_interface_mac_addresses']['mac_address']
+
+
+        old_vnic_type = 'normal'
+        if 'virtual_machine_interface_bindings' in read_result:
+            bindings = read_result['virtual_machine_interface_bindings']
+            if 'key_value_pair' in bindings:
+                kvps = bindings['key_value_pair']
+                for kvp in kvps:
+                    if kvp['key'] == 'vnic_type':
+                        old_vnic_type = kvp['value']
+                        break
+
+        new_vnic_type = old_vnic_type
+        if 'virtual_machine_interface_bindings' in obj_dict:
+            bindings = obj_dict['virtual_machine_interface_bindings']
+            if 'key_value_pair' in bindings:
+                kvps = bindings['key_value_pair']
+                for kvp in kvps:
+                    if kvp['key'] == 'vnic_type':
+                        new_vnic_type = kvp['value']
+                        break
+
+        if (old_vnic_type  != new_vnic_type):
+            return (False, (409, "Vnic_type can not be modified"))
+
         return True, ""
+
     # end pre_dbe_update
 # end class VirtualMachineInterfaceServer
 
 class ServiceApplianceSetServer(Resource, ServiceApplianceSet):
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         (ok, result) = db_conn.dbe_list('loadbalancer-pool', back_ref_uuids=[id])
         if not ok:
             return (ok, result)
@@ -547,6 +595,42 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
     # end _check_route_targets
 
     @classmethod
+    def _check_provider_details(cls, obj_dict, db_conn, create):
+
+        properties = obj_dict.get('provider_properties')
+        if not properties:
+            return (True, '')
+
+        if not create:
+            try:
+                ok, result = db_conn.dbe_read(obj_type = 'virtual-network',
+                            obj_ids = {'uuid': obj_dict['uuid']},
+                            obj_fields=['virtual_machine_interface_back_refs', 'provider_properties'])
+            except cfgm_common.exceptions.NoIdError as e:
+                return (False, (404, str(e)))
+
+            old_properties = result.get('provider_properties')
+            if 'virtual_machine_interface_back_refs' in result:
+                if old_properties != properties:
+                    return (False, "Provider values can not be changed when VMs are already using")
+
+            if old_properties:
+                if not properties.get('segmentation_id'):
+                    properties['segmentation_id'] = old_properties.get('segmentation_id')
+
+                if not properties.get('physical_network'):
+                    properties['physical_network'] = old_properties.get('physical_network')
+
+        if not properties.get('segmentation_id'):
+            return (False, "Segmenation id must be configured")
+
+        if not properties.get('physical_network'):
+            return (False, "physical network must be configured")
+
+        return (True, '')
+
+
+    @classmethod
     def pre_dbe_create(cls, tenant_name, obj_dict, db_conn):
         user_visibility = obj_dict['id_perms'].get('user_visible', True)
         verify_quota_kwargs = {'db_conn': db_conn,
@@ -569,6 +653,11 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
         (ok, error) =  cls._check_route_targets(obj_dict, db_conn)
         if not ok:
             return (False, (400, error))
+
+        (ok, error) = cls._check_provider_details(obj_dict, db_conn, True)
+        if not ok:
+            return (False, (400, error))
+
         try:
             cls.addr_mgmt.net_create_req(obj_dict)
             def undo():
@@ -598,7 +687,7 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
     # end post_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         if ((fq_name == cfgm_common.IP_FABRIC_VN_FQ_NAME) or
                 (fq_name == cfgm_common.LINK_LOCAL_VN_FQ_NAME)):
             # Ignore ip-fabric subnet updates
@@ -607,6 +696,10 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
         (ok, error) =  cls._check_route_targets(obj_dict, db_conn)
         if not ok:
             return (False, (400, error))
+
+        (ok, error) = cls._check_provider_details(obj_dict, db_conn, False)
+        if not ok:
+            return (False, (409, error))
 
         if 'network_ipam_refs' not in obj_dict:
             # NOP for addr-mgmt module
@@ -620,6 +713,7 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
             return (False, (404, str(e)))
         if not read_ok:
             return (False, (500, read_result))
+
 
         (ok, result) = cls.addr_mgmt.net_check_subnet(obj_dict)
         if not ok:
@@ -762,7 +856,7 @@ class NetworkIpamServer(Resource, NetworkIpam):
     # end pre_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         ipam_uuid = obj_dict['uuid']
         ipam_id = {'uuid': ipam_uuid}
         try:
@@ -834,7 +928,7 @@ class VirtualDnsServer(Resource, VirtualDns):
     # end pre_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         return cls.validate_dns_server(obj_dict, db_conn)
     # end pre_dbe_update
 
@@ -994,7 +1088,7 @@ class VirtualDnsRecordServer(Resource, VirtualDnsRecord):
     # end pre_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         return cls.validate_dns_record(obj_dict, db_conn)
     # end pre_dbe_update
 
@@ -1136,7 +1230,7 @@ class SecurityGroupServer(Resource, SecurityGroup):
     # end pre_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         try:
             (ok, sec_dict) = db_conn.dbe_read('security-group', {'uuid': id})
         except cfgm_common.exceptions.NoIdError as e:
@@ -1203,7 +1297,7 @@ class NetworkPolicyServer(Resource, NetworkPolicy):
     # end pre_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         p_id = {'uuid': id}
         try:
             (read_ok, read_result) = db_conn.dbe_read('network-policy', p_id)
@@ -1232,7 +1326,7 @@ class LogicalInterfaceServer(Resource, LogicalInterface):
     # end pre_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         interface = {'uuid': id}
         try:
             (read_ok, read_result) = db_conn.dbe_read('logical-interface', interface)
@@ -1275,7 +1369,7 @@ class PhysicalInterfaceServer(Resource, PhysicalInterface):
     # end pre_dbe_create
 
     @classmethod
-    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn):
+    def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         # do not allow change in display name
         if 'display_name' in obj_dict:
             try:

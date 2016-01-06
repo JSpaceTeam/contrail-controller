@@ -216,8 +216,7 @@ bool FlowMgmtManager::RequestHandler(boost::shared_ptr<FlowMgmtRequest> req) {
         // being modified by two threads. Avoid the concurrency issue by
         // enqueuing a dummy request to flow-table queue. The reference will
         // be removed in flow processing context
-        FlowEvent flow_resp(FlowEvent::FREE_FLOW_REF,
-                                   req->flow().get(), NULL);
+        FlowEvent flow_resp(FlowEvent::FREE_FLOW_REF, req->flow().get());
         EnqueueFlowEvent(flow_resp);
         break;
     }
@@ -276,7 +275,7 @@ void FlowMgmtManager::AddFlow(FlowEntryPtr &flow) {
     LogFlow(flow.get(), "ADD");
 
     //Enqueue Add request to flow-stats-collector
-    agent_->flow_stats_collector()->AddEvent(flow);
+    agent_->flow_stats_manager()->AddEvent(flow);
 
     // Trace the flow add/change
     FlowMgmtKeyTree new_tree;
@@ -345,7 +344,7 @@ void FlowMgmtManager::DeleteFlow(FlowEntryPtr &flow) {
         return;
 
     //Enqueue Delete request to flow-stats-collector
-    agent_->flow_stats_collector()->DeleteEvent(flow.get()->key());
+    agent_->flow_stats_manager()->DeleteEvent(flow);
 
     FlowMgmtKeyTree *old_tree = &old_info->tree_;
     assert(old_tree);
@@ -365,10 +364,8 @@ void FlowMgmtManager::DeleteFlow(FlowEntryPtr &flow) {
 }
 
 void FlowMgmtManager::UpdateFlowIndex(FlowEntryPtr &flow) {
-    const FlowEntry *fe = flow.get();
     //Enqueue Flow Index Update Event request to flow-stats-collector
-    agent_->flow_stats_collector()->FlowIndexUpdateEvent(fe->key(),
-                                                         fe->flow_handle());
+    agent_->flow_stats_manager()->FlowIndexUpdateEvent(flow);
 }
 
 bool FlowMgmtManager::HasVrfFlows(uint32_t vrf_id) {

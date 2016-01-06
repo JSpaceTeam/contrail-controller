@@ -444,9 +444,6 @@ static void SetInEcmpIndex(const PktInfo *pkt, PktFlowInfo *flow_info,
         return;
     }
 
-    if (pkt->family == Address::INET6) {
-        //TODO::ECMP for v6
-    }
     Agent *agent = flow_info->agent;
     const InetUnicastRouteEntry *rt =
         static_cast<const InetUnicastRouteEntry *>(in->rt_);
@@ -1019,6 +1016,7 @@ void PktFlowInfo::IngressProcess(const PktInfo *pkt, PktControlInfo *in,
         return;
     }
 
+    CalculatePort(pkt, in->intf_);
     // We always expect route for source-ip for ingress flows.
     // If route not present, return from here so that a short flow is added
     UpdateRoute(&in->rt_, in->vrf_, pkt->ip_saddr, pkt->smac,
@@ -1150,6 +1148,7 @@ void PktFlowInfo::EgressProcess(const PktInfo *pkt, PktControlInfo *in,
     }
 
     if (out->intf_ && out->intf_->type() == Interface::VM_INTERFACE) {
+        CalculatePort(pkt, out->intf_);
         const VmInterface *vm_intf = static_cast<const VmInterface *>(out->intf_);
         if (vm_intf->IsFloatingIp(pkt->ip_daddr)) {
             pkt->l3_forwarding = true;
@@ -1338,6 +1337,51 @@ bool PktFlowInfo::Process(const PktInfo *pkt, PktControlInfo *in,
     return true;
 }
 
+//Mask source port or destination port if a port has fat flow
+//configuration. If both source port and destination port are
+//present in configuration then the lowest of the port takes
+//priority
+void PktFlowInfo::CalculatePort(const PktInfo *cpkt, const Interface *in) {
+    const VmInterface *intf = NULL;
+    PktInfo *pkt = const_cast<PktInfo *>(cpkt);
+
+    if (in == NULL || in->type() != Interface::VM_INTERFACE) {
+        return;
+    }
+
+    intf = static_cast<const VmInterface *>(in);
+    if (intf->fat_flow_list().list_.size() == 0) {
+        return;
+    }
+
+    uint16_t sport = pkt->sport;
+    if (pkt->ip_proto == IPPROTO_ICMP) {
+        sport = 0;
+    }
+    if (pkt->sport < pkt->dport) {
+        if (intf->IsFatFlow(pkt->ip_proto, sport)) {
+            pkt->dport = 0;
+            return;
+        }
+
+        if (intf->IsFatFlow(pkt->ip_proto, pkt->dport)) {
+            pkt->sport = 0;
+            return;
+        }
+        return;
+    }
+
+    if (intf->IsFatFlow(pkt->ip_proto, pkt->dport)) {
+        pkt->sport = 0;
+        return;
+    }
+
+    if (intf->IsFatFlow(pkt->ip_proto, sport)) {
+        pkt->dport = 0;
+        return;
+    }
+}
+
 // A flow can mean that traffic is seen on an interface. The path preference
 // module can potentially be interested in this event. Check and generate
 // traffic seen event
@@ -1431,7 +1475,7 @@ void PktFlowInfo::Add(const PktInfo *pkt, PktControlInfo *in,
                       PktControlInfo *out) {
     bool update = false;
     if (pkt->type == PktType::MESSAGE &&
-        pkt->agent_hdr.cmd != AgentHdr::TRAP_FLOW_MISS) {
+        pkt->agent_hdr.cmd == AgentHdr::TRAP_FLOW_MISS) {
         update = true;
     }
 

@@ -18,8 +18,7 @@
 #include <pkt/flow_table.h>
 #include <vrouter/flow_stats/flow_stats_collector.h>
 #include <vrouter/ksync/ksync_init.h>
-#include <ksync/ksync_entry.h>
-#include <vrouter/ksync/flowtable_ksync.h>
+#include <vrouter/ksync/ksync_flow_index_manager.h>
 
 #include <route/route.h>
 #include <cmn/agent_cmn.h>
@@ -97,32 +96,104 @@ InetUnicastRouteEntry FlowEntry::inet6_route_key_(NULL, Ip6Address(), 128,
 SecurityGroupList FlowEntry::default_sg_list_;
 
 /////////////////////////////////////////////////////////////////////////////
+// FlowData constructor/destructor
+/////////////////////////////////////////////////////////////////////////////
+FlowData::FlowData() {
+    Reset();
+}
+
+FlowData::~FlowData() {
+}
+
+void FlowData::Reset() {
+    smac = MacAddress();
+    dmac = MacAddress();
+    source_vn = "";
+    dest_vn = "";
+    source_sg_id_l.clear();
+    dest_sg_id_l.clear();
+    flow_source_vrf = VrfEntry::kInvalidIndex;
+    flow_dest_vrf = VrfEntry::kInvalidIndex;
+    match_p.Reset();
+    vn_entry.reset(NULL);
+    intf_entry.reset(NULL);
+    in_vm_entry.reset(NULL);
+    out_vm_entry.reset(NULL);
+    nh.reset(NULL);
+    vrf = VrfEntry::kInvalidIndex;
+    mirror_vrf = VrfEntry::kInvalidIndex;
+    dest_vrf = 0;
+    component_nh_idx = (uint32_t)CompositeNH::kInvalidComponentNHIdx;
+    source_plen = 0;
+    dest_plen = 0;
+    drop_reason = 0;
+    vrf_assign_evaluated = false;
+    pending_recompute = false;
+    if_index_info = 0;
+    tunnel_info.Reset();
+    flow_source_plen_map.clear();
+    flow_dest_plen_map.clear();
+    enable_rpf = true;
+    l2_rpf_plen = Address::kMaxV4PrefixLen;
+    vm_cfg_name = "";
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// MatchPolicy constructor/destructor
+/////////////////////////////////////////////////////////////////////////////
+MatchPolicy::MatchPolicy() {
+    Reset();
+}
+
+MatchPolicy::~MatchPolicy() {
+}
+
+void MatchPolicy::Reset() {
+    m_acl_l.clear();
+    policy_action = 0;
+    m_out_acl_l.clear();
+    out_policy_action = 0;
+    m_out_sg_acl_l.clear();
+    out_sg_rule_present = false;
+    out_sg_action = 0;
+    m_sg_acl_l.clear();
+    sg_rule_present = false;
+    sg_action = 0;
+    m_reverse_sg_acl_l.clear();
+    reverse_sg_rule_present = false;
+    reverse_sg_action = 0;
+    m_reverse_out_sg_acl_l.clear();
+    reverse_out_sg_rule_present = false;
+    reverse_out_sg_action = 0;
+    m_mirror_acl_l.clear();
+    mirror_action = 0;
+    m_out_mirror_acl_l.clear();
+    out_mirror_action = 0;
+    m_vrf_assign_acl_l.clear();
+    vrf_assign_acl_action = 0;
+    sg_action_summary = 0;
+    action_info.Clear();
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // FlowEntry constructor/destructor
 /////////////////////////////////////////////////////////////////////////////
-FlowEntry::FlowEntry(const FlowKey &k, FlowTable *flow_table) :
-    key_(k),
-    flow_table_(flow_table),
-    data_(),
-    l3_flow_(true),
-    flow_handle_(kInvalidFlowHandle),
-    ksync_entry_(NULL),
-    deleted_(false),
-    flags_(0),
-    short_flow_reason_(SHORT_UNKNOWN),
-    linklocal_src_port_(),
+FlowEntry::FlowEntry(FlowTable *flow_table) :
+    flow_table_(flow_table), flags_(0),
     linklocal_src_port_fd_(PktFlowInfo::kLinkLocalInvalidFd),
-    peer_vrouter_(),
     tunnel_type_(TunnelType::INVALID),
-    on_tree_(false), fip_(0),
-    fip_vmi_(AgentKey::ADD_DEL_CHANGE, nil_uuid(), "") {
-    refcount_ = 0;
-    nw_ace_uuid_ = FlowPolicyStateStr.at(NOT_EVALUATED);
-    sg_rule_uuid_= FlowPolicyStateStr.at(NOT_EVALUATED);
+    fip_vmi_(AgentKey::ADD_DEL_CHANGE, nil_uuid(), ""), fsc_(NULL) {
+    Reset();
     alloc_count_.fetch_and_increment();
 }
 
 FlowEntry::~FlowEntry() {
     assert(refcount_ == 0);
+    Reset();
+    alloc_count_.fetch_and_decrement();
+}
+
+void FlowEntry::Reset() {
     if (is_flags_set(FlowEntry::LinkLocalBindLocalSrcPort) &&
         (linklocal_src_port_fd_ == PktFlowInfo::kLinkLocalInvalidFd ||
          !linklocal_src_port_)) {
@@ -137,7 +208,29 @@ FlowEntry::~FlowEntry() {
         close(linklocal_src_port_fd_);
         flow_table_->DelLinkLocalFlowInfo(linklocal_src_port_fd_);
     }
-    alloc_count_.fetch_and_decrement();
+    data_.Reset();
+    l3_flow_ = true;
+    flow_handle_ = kInvalidFlowHandle;
+    deleted_ = false;
+    flags_ = 0;
+    short_flow_reason_ = SHORT_UNKNOWN;
+    linklocal_src_port_ = 0;
+    linklocal_src_port_fd_ = PktFlowInfo::kLinkLocalInvalidFd;
+    peer_vrouter_ = "";
+    tunnel_type_ = TunnelType::INVALID;
+    on_tree_ = false;
+    fip_ = 0;
+    fip_vmi_ = VmInterfaceKey(AgentKey::ADD_DEL_CHANGE, nil_uuid(), "");
+    refcount_ = 0;
+    nw_ace_uuid_ = FlowPolicyStateStr.at(NOT_EVALUATED);
+    sg_rule_uuid_= FlowPolicyStateStr.at(NOT_EVALUATED);
+    ksync_index_entry_ = std::auto_ptr<KSyncFlowIndexEntry>
+        (new KSyncFlowIndexEntry());
+}
+
+void FlowEntry::Reset(const FlowKey &k) {
+    Reset();
+    key_ = k;
 }
 
 void FlowEntry::Init() {
@@ -145,7 +238,14 @@ void FlowEntry::Init() {
 }
 
 FlowEntry *FlowEntry::Allocate(const FlowKey &key, FlowTable *flow_table) {
-    return new FlowEntry(key, flow_table);
+    // flow_table will be NULL for some UT cases
+    if (flow_table == NULL) {
+        FlowEntry *flow = new FlowEntry(flow_table);
+        flow->Reset(key);
+        return flow;
+    }
+
+    return flow_table->free_list()->Allocate(key);
 }
 
 // selectively copy fields from RHS
@@ -159,6 +259,7 @@ void FlowEntry::Copy(const FlowEntry *rhs) {
     tunnel_type_ = rhs->tunnel_type_;
     fip_ = rhs->fip_;
     fip_vmi_ = rhs->fip_vmi_;
+    flow_handle_ = rhs->flow_handle_;
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -178,7 +279,7 @@ void intrusive_ptr_release(FlowEntry *fe) {
             assert(it != flow_table->flow_entry_map_.end());
             flow_table->flow_entry_map_.erase(it);
         }
-        delete fe;
+        flow_table->free_list()->Free(fe);
     }
 }
 
@@ -224,8 +325,6 @@ bool FlowEntry::InitFlowCmn(const PktFlowInfo *info, const PktControlInfo *ctrl,
     data_.in_vm_entry = ctrl->vm_ ? ctrl->vm_ : NULL;
     data_.out_vm_entry = rev_ctrl->vm_ ? rev_ctrl->vm_ : NULL;
     l3_flow_ = info->l3_flow;
-    data_.vrouter_evicted_flow = false;
-
     return true;
 }
 
@@ -233,14 +332,7 @@ void FlowEntry::InitFwdFlow(const PktFlowInfo *info, const PktInfo *pkt,
                             const PktControlInfo *ctrl,
                             const PktControlInfo *rev_ctrl,
                             FlowEntry *rflow, Agent *agent) {
-    if (flow_handle_ != pkt->GetAgentHdr().cmd_param) {
-        if (flow_handle_ != FlowEntry::kInvalidFlowHandle) {
-            LOG(DEBUG, "Flow index changed from " << flow_handle_ 
-                << " to " << pkt->GetAgentHdr().cmd_param);
-        }
-        flow_handle_ = pkt->GetAgentHdr().cmd_param;
-    }
-
+    flow_handle_ = pkt->GetAgentHdr().cmd_param;
     if (InitFlowCmn(info, ctrl, rev_ctrl, rflow) == false) {
         return;
     }
@@ -448,22 +540,11 @@ bool FlowEntry::set_pending_recompute(bool value) {
     return false;
 }
 
-bool FlowEntry::set_flow_handle(uint32_t flow_handle, bool update) {
-    /* trigger update KSync on flow handle change */
+void FlowEntry::set_flow_handle(uint32_t flow_handle) {
     if (flow_handle_ != flow_handle) {
-        // TODO(prabhjot): enable when we handle ChangeKey failures
-#if 0
-        // Skip ksync index manipulation, for deleted flow entry
-        // as ksync entry is not available for deleted flow
-        if (!deleted_ && flow_handle_ == kInvalidFlowHandle) {
-            flow_table_->UpdateFlowHandle(this, flow_handle);
-        }
-#endif
+        assert(flow_handle_ == kInvalidFlowHandle);
         flow_handle_ = flow_handle;
-        flow_table_->UpdateKSync(this, update);
-        return true;
     }
-    return false;
 }
 
 const std::string& FlowEntry::acl_assigned_vrf() const {
@@ -1676,8 +1757,13 @@ void FlowEntry::SetAclFlowSandeshData(const AclDBEntry *acl,
     fe_sandesh_data.set_source_vn(data_.source_vn);
     fe_sandesh_data.set_dest_vn(data_.dest_vn);
     std::vector<uint32_t> v;
-    FlowExportInfo *info = agent->flow_stats_collector()->
-        FindFlowExportInfo(key_);
+    if (!fsc_) {
+        return;
+    }
+    const FlowExportInfo *info = fsc_->FindFlowExportInfo(key_);
+    if (!info) {
+        return;
+    }
     SecurityGroupList::const_iterator it;
     for (it = data_.source_sg_id_l.begin(); 
             it != data_.source_sg_id_l.end(); it++) {

@@ -9,6 +9,9 @@
 #include <db/db.h>
 #include <base/util.h>
 
+#include <cmn/agent_cmn.h>
+#include <boost/functional/factory.hpp>
+#include <cmn/agent_factory.h>
 #include <oper/interface_common.h>
 #include <oper/mirror_table.h>
 #include <oper/global_vrouter.h>
@@ -32,22 +35,23 @@
 
 FlowStatsCollector::FlowStatsCollector(boost::asio::io_service &io, int intvl,
                                        uint32_t flow_cache_timeout,
-                                       AgentUveBase *uve) :
+                                       AgentUveBase *uve,
+                                       uint32_t instance_id,
+                                       FlowAgingTableKey *key,
+                                       FlowStatsManager *aging_module) :
         StatsCollector(TaskScheduler::GetInstance()->GetTaskId
-                       ("Agent::StatsCollector"),
-                       StatsCollector::FlowStatsCollector,
+                       ("Agent::StatsCollector"), instance_id,
                        io, intvl, "Flow stats collector"),
-        agent_uve_(uve), delete_short_flow_(true),
+        agent_uve_(uve),
         flow_tcp_syn_age_time_(FlowTcpSynAgeTime),
         request_queue_(agent_uve_->agent()->task_scheduler()->
                        GetTaskId("Agent::StatsCollector"),
-                       StatsCollector::FlowStatsCollector,
-                       boost::bind(&FlowStatsCollector::RequestHandler, this,
-                                   _1)),
-        flow_export_count_(0), prev_flow_export_rate_compute_time_(0),
-        flow_export_rate_(0), threshold_(kDefaultFlowSamplingThreshold),
-        flow_export_msg_drops_(0), prev_cfg_flow_export_rate_(0),
-        msg_list_(kMaxFlowMsgsPerSend, FlowDataIpv4()), msg_index_(0) {
+                       instance_id,
+                       boost::bind(&FlowStatsCollector::RequestHandler, 
+                                   this, _1)),
+        msg_list_(kMaxFlowMsgsPerSend, FlowDataIpv4()), msg_index_(0),
+        flow_aging_key_(*key), instance_id_(instance_id),
+        flow_stats_manager_(aging_module) {
         flow_iteration_key_.Reset();
         flow_default_interval_ = intvl;
         if (flow_cache_timeout) {
@@ -58,13 +62,16 @@ FlowStatsCollector::FlowStatsCollector(boost::asio::io_service &io, int intvl,
         }
         flow_count_per_pass_ = FlowCountPerPass;
         UpdateFlowMultiplier();
+        deleted_ = false;
 }
 
 FlowStatsCollector::~FlowStatsCollector() {
+    flow_stats_manager_->FreeIndex(instance_id_);
 }
 
 void FlowStatsCollector::Shutdown() {
     StatsCollector::Shutdown();
+    request_queue_.Shutdown();
 }
 
 void FlowStatsCollector::UpdateFlowMultiplier() {
@@ -392,7 +399,7 @@ bool FlowStatsCollector::Run() {
             }
         }
 
-        if ((!deleted) && (delete_short_flow_ == true) &&
+        if ((!deleted) && (flow_stats_manager_->delete_short_flow() == true) &&
             info->is_flags_set(FlowEntry::ShortFlow)) {
             if (it != flow_tree_.end()) {
                 FlowKey next_flow_key =  it->first;
@@ -430,7 +437,6 @@ bool FlowStatsCollector::Run() {
         flow_iteration_key_.Reset();
     }
 
-    UpdateFlowThreshold(curr_time);
     /* Update the flow_timer_interval and flow_count_per_pass_ based on
      * total flows that we have
      */
@@ -619,21 +625,33 @@ void FlowStatsCollector::ExportFlow(const FlowKey &key,
                                     FlowExportInfo *info,
                                     uint64_t diff_bytes,
                                     uint64_t diff_pkts) {
+    uint32_t cfg_rate = agent_uve_->agent()->oper_db()->global_vrouter()->
+                        flow_export_rate();
     /* We should always try to export flows with Action as LOG regardless of
      * configured flow-export-rate */
-    if (!info->IsActionLog() &&
-        !agent_uve_->agent()->oper_db()->global_vrouter()->flow_export_rate()) {
-        flow_export_msg_drops_++;
+    if (!info->IsActionLog() && !cfg_rate) {
+        flow_stats_manager_->flow_export_msg_drops_++;
         return;
     }
 
-    if (!info->IsActionLog() && (diff_bytes < threshold_)) {
+    /* Subject a flow to sampling algorithm only when all of below is met:-
+     * a. if Log is not configured as action for flow
+     * b. actual flow-export-rate is >= 80% of configured flow-export-rate
+     * c. diff_bytes is lesser than the threshold
+     */
+    bool subject_flows_to_algorithm = false;
+    if (!info->IsActionLog() && (diff_bytes < threshold()) &&
+        flow_stats_manager_->flow_export_rate() >= ((double)cfg_rate) * 0.8) {
+        subject_flows_to_algorithm = true;
+    }
+
+    if (subject_flows_to_algorithm) {
         double probability = diff_bytes/threshold_;
-        uint32_t num = rand() % threshold_;
+        uint32_t num = rand() % threshold();
         if (num > diff_bytes) {
             /* Do not export the flow, if the random number generated is more
              * than the diff_bytes */
-            flow_export_msg_drops_++;
+            flow_stats_manager_->flow_export_msg_drops_++;
             return;
         }
         /* Normalize the diff_bytes and diff_packets reported using the
@@ -727,7 +745,7 @@ void FlowStatsCollector::ExportFlow(const FlowKey &key,
         //irrespective of direction.
         s_flow2.set_flowuuid(to_string(info->egress_uuid()));
         EnqueueFlowMsg();
-        flow_export_count_ += 2;
+        flow_stats_manager_->flow_export_count_ += 2;
     } else {
         if (info->is_flags_set(FlowEntry::IngressDir)) {
             s_flow.set_direction_ing(1);
@@ -736,16 +754,17 @@ void FlowStatsCollector::ExportFlow(const FlowKey &key,
             s_flow.set_direction_ing(0);
         }
         EnqueueFlowMsg();
-        flow_export_count_++;
+        flow_stats_manager_->flow_export_count_++;
     }
 }
 
-void FlowStatsCollector::UpdateFlowThreshold(uint64_t curr_time) {
+bool FlowStatsManager::UpdateFlowThreshold() {
+    uint64_t curr_time = UTCTimestampUsec();
     bool export_rate_calculated = false;
 
     /* If flows are not being exported, no need to update threshold */
     if (!flow_export_count_) {
-        return;
+        return true;
     }
     // Calculate Flow Export rate
     if (prev_flow_export_rate_compute_time_) {
@@ -756,46 +775,41 @@ void FlowStatsCollector::UpdateFlowThreshold(uint64_t curr_time) {
             diff_secs = diff_micro_secs/1000000;
         }
         if (diff_secs) {
-            flow_export_rate_ = flow_export_count_/diff_secs;
+            uint32_t flow_export_count = flow_export_count_reset();
+            flow_export_rate_ = flow_export_count/diff_secs;
             prev_flow_export_rate_compute_time_ = curr_time;
-            flow_export_count_ = 0;
             export_rate_calculated = true;
         }
     } else {
         prev_flow_export_rate_compute_time_ = curr_time;
         flow_export_count_ = 0;
-        return;
+        return true;
     }
 
-    uint32_t cfg_rate = agent_uve_->agent()->oper_db()->global_vrouter()->
-        flow_export_rate();
+    uint32_t cfg_rate = agent_->oper_db()->global_vrouter()->
+                            flow_export_rate();
     /* No need to update threshold when flow_export_rate is NOT calculated
      * and configured flow export rate has not changed */
     if (!export_rate_calculated &&
         (cfg_rate == prev_cfg_flow_export_rate_)) {
-        return;
+        return true;
     }
     // Update sampling threshold based on flow_export_rate_
-    if (flow_export_rate_ < cfg_rate/4) {
-        UpdateThreshold((threshold_ / 8));
-    } else if (flow_export_rate_ < cfg_rate/2) {
-        UpdateThreshold((threshold_ / 4));
-    } else if (flow_export_rate_ < cfg_rate/1.25) {
-        UpdateThreshold((threshold_ / 2));
+    if (flow_export_rate_ < ((double)cfg_rate) * 0.8) {
+        UpdateThreshold(kDefaultFlowSamplingThreshold);
     } else if (flow_export_rate_ > (cfg_rate * 3)) {
         UpdateThreshold((threshold_ * 4));
     } else if (flow_export_rate_ > (cfg_rate * 2)) {
         UpdateThreshold((threshold_ * 3));
-    } else if (flow_export_rate_ > (cfg_rate * 1.25)) {
+    } else if (flow_export_rate_ > ((double)cfg_rate) * 1.25) {
         UpdateThreshold((threshold_ * 2));
     }
     prev_cfg_flow_export_rate_ = cfg_rate;
+    return true;
 }
 
-void FlowStatsCollector::UpdateThreshold(uint32_t new_value) {
-    if (new_value != 0) {
-        threshold_ = new_value;
-    }
+uint32_t FlowStatsCollector::threshold() const {
+    return flow_stats_manager_->threshold();
 }
 
 bool FlowStatsCollector::RequestHandler(boost::shared_ptr<FlowExportReq> req) {
@@ -833,7 +847,6 @@ bool FlowStatsCollector::RequestHandler(boost::shared_ptr<FlowExportReq> req) {
 
     default:
          assert(0);
-
     }
     return true;
 }
@@ -847,6 +860,17 @@ FlowStatsCollector::FindFlowExportInfo(const FlowKey &flow) {
 
     return &it->second;
 }
+
+const FlowExportInfo *
+FlowStatsCollector::FindFlowExportInfo(const FlowKey &flow) const {
+    FlowEntryTree::const_iterator it = flow_tree_.find(flow);
+    if (it == flow_tree_.end()) {
+        return NULL;
+    }
+
+    return &it->second;
+}
+
 
 void FlowStatsCollector::NewFlow(const FlowKey &key,
                                  const FlowExportInfo &info) {
@@ -862,7 +886,6 @@ void FlowStatsCollector::NewFlow(const FlowKey &key,
     // Update source-vn port bitmap
     VnUveTable *vnte = static_cast<VnUveTable *>(agent_uve_->vn_uve_table());
     vnte->UpdateBitmap(info.source_vn(), proto, sport, dport);
-
     // Update dest-vn port bitmap
     vnte->UpdateBitmap(info.dest_vn(), proto, sport, dport);
 
@@ -916,34 +939,9 @@ void FlowStatsCollector::UpdateFlowIndex(const FlowKey &key, uint32_t idx) {
 /////////////////////////////////////////////////////////////////////////////
 // Introspect routines
 /////////////////////////////////////////////////////////////////////////////
-void SetFlowStatsInterval_InSeconds::HandleRequest() const {
-    SandeshResponse *resp;
-    if (get_interval() > 0) {
-        FlowStatsCollector *fec = Agent::GetInstance()->flow_stats_collector();
-        fec->set_expiry_time(get_interval() * 1000);
-        resp = new FlowStatsCfgResp();
-    } else {
-        resp = new FlowStatsCfgErrResp();
-    }
-
-    resp->set_context(context());
-    resp->Response();
-    return;
-}
-
-void GetFlowStatsInterval::HandleRequest() const {
-    FlowStatsIntervalResp_InSeconds *resp =
-        new FlowStatsIntervalResp_InSeconds();
-    resp->set_flow_stats_interval((Agent::GetInstance()->flow_stats_collector()->
-        expiry_time())/1000);
-
-    resp->set_context(context());
-    resp->Response();
-    return;
-}
-
 void FlowStatsCollectionParamsReq::HandleRequest() const {
-    FlowStatsCollector *col = Agent::GetInstance()->flow_stats_collector();
+    FlowStatsCollector *col = Agent::GetInstance()->
+        flow_stats_manager()->default_flow_stats_collector();
     FlowStatsCollectionParamsResp *resp = new FlowStatsCollectionParamsResp();
     resp->set_flow_export_rate(col->flow_export_rate());
     resp->set_sampling_threshold(col->threshold());
@@ -997,7 +995,8 @@ static void FlowExportInfoToSandesh(const FlowExportInfo &value,
 void FlowStatsRecordsReq::HandleRequest() const {
     FlowStatsCollector::FlowEntryTree::iterator it;
     vector<FlowStatsRecord> list;
-    FlowStatsCollector *col = Agent::GetInstance()->flow_stats_collector();
+    FlowStatsCollector *col = Agent::GetInstance()->
+        flow_stats_manager()->default_flow_stats_collector();
     FlowStatsRecordsResp *resp = new FlowStatsRecordsResp();
     it = col->flow_tree_.begin();
     while (it != col->flow_tree_.end()) {
@@ -1025,7 +1024,9 @@ void FlowStatsRecordsReq::HandleRequest() const {
 
 void FetchFlowStatsRecord::HandleRequest() const {
     FlowStatsCollector::FlowEntryTree::iterator it;
-    FlowStatsCollector *col = Agent::GetInstance()->flow_stats_collector();
+    FlowStatsCollector *col = 
+        Agent::GetInstance()->flow_stats_manager()->
+        default_flow_stats_collector();
     FlowStatsRecordResp *resp = new FlowStatsRecordResp();
     resp->set_context(context());
     boost::system::error_code ec;
