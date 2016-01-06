@@ -310,7 +310,9 @@ class VncApiServerBase(VncApiServer):
                     # CSP Logger?
                     pass
                 # don't log details of bottle.abort i.e handled error cases
-                if not isinstance(e, bottle.HTTPError):
+                if isinstance(e, cfgm_common.exceptions.HttpError):
+                    bottle.abort(e.status_code, e.content)
+                else:
                     string_buf = StringIO()
                     cgitb.Hook(
                         file=string_buf,
