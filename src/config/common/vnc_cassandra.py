@@ -247,9 +247,6 @@ class VncCassandraClient(object):
     # end _cassandra_init_conn_pools
 
 
-    def _get_xsd_class(self, xsd_type):
-        return getattr(vnc_api, xsd_type)
-    # end _get_xsd_class
 
     def object_create(self, res_type, obj_id, obj_dict):
         obj_type = res_type.replace('-', '_')

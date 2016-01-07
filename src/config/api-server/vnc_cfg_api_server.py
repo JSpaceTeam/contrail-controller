@@ -2117,6 +2117,10 @@ class VncApiServer(object):
         self._resource_classes[obj_type]  = resource_class
     # end set_resource_class
 
+    def get_resource_xsd_class(self, resource_type):
+        return cfgm_common.utils.str_to_class(resource_type, __name__)
+    # end get_resource_xsd_class
+
     def list_bulk_collection_http_post(self):
         """ List collection when requested ids don't fit in query params."""
 

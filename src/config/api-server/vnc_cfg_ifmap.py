@@ -70,9 +70,10 @@ from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from sandesh_common.vns.constants import USERAGENT_KEYSPACE_NAME
 from sandesh.traces.ttypes import DBRequestTrace, MessageBusNotifyTrace, \
     IfmapTrace
-
 import logging
 logger = logging.getLogger(__name__)
+
+
 
 @ignore_exceptions
 def get_trace_id():
@@ -1026,6 +1027,11 @@ class VncServerCassandraClient(VncCassandraClient):
 
     def _get_resource_class(self, obj_type):
         return self._db_client_mgr.get_resource_class(obj_type)
+
+
+    def _get_xsd_class(self, xsd_type):
+        return self._db_client_mgr.get_resource_xsd_class(xsd_type)
+
 
 # end class VncCassandraClient
 
@@ -2158,6 +2164,10 @@ class VncDbClient(object):
         return self._api_svr_mgr.get_resource_class(resource_type)
 
     # end get_resource_class
+
+    def get_resource_xsd_class(self, xsd_type):
+        return self._api_svr_mgr.get_resource_xsd_class(xsd_type)
+    # end get_resource_xsd_class
 
     def get_default_perms2(self, obj_type):
         return self._api_svr_mgr._get_default_perms2(obj_type)

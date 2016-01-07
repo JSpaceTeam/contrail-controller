@@ -2455,7 +2455,7 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
     def test_set_in_resource_body_rest_api(self):
         listen_ip = self._api_server_ip
         listen_port = self._api_server._args.listen_port
-        url = 'http://%s:%s/virtual-machine-interfaces' %(
+        url = 'http://%s:%s/virtual-machine-interface' %(
             listen_ip, listen_port)
         vmi_body = {
             'virtual-machine-interface': {
@@ -2519,7 +2519,7 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
     def _rest_vmi_create(self):
         listen_ip = self._api_server_ip
         listen_port = self._api_server._args.listen_port
-        url = 'http://%s:%s/virtual-machine-interfaces' %(
+        url = 'http://%s:%s/virtual-machine-interface' %(
             listen_ip, listen_port)
         vmi_body = {
             'virtual-machine-interface': {
