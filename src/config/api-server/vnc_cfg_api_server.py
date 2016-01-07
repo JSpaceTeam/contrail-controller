@@ -2760,9 +2760,7 @@ class VncApiServer(object):
         apiConfig.identifier_uuid = uuid
         apiConfig.operation = 'delete'
         self._set_api_audit_info(apiConfig)
-        log = VncApiConfigLog(api_log=apiConfig, sandesh=self._sandesh)
-        log.send(sandesh=self._sandesh)
-
+        self.vnc_api_config_log(apiConfig)
         # TODO check api + resource perms etc.
         if not self.is_multi_tenancy_set() or not parent_type:
             return (True, '')
