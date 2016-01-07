@@ -138,6 +138,10 @@ class VncApiServerBase(VncApiServer):
         self._delete_common = self._http_delete_common
         self._post_validate = self._http_post_validate
         self._post_common = self._http_post_common
+
+        self.get_resource_class('api-access-list').generate_default_instance = False
+
+
         for act_res in _ACTION_RESOURCES:
             link = LinkObject('action', self._base_url, act_res['uri'],
                               act_res['link_name'])
