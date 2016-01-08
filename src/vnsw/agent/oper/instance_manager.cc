@@ -141,6 +141,7 @@ InstanceManager::InstanceManager(Agent *agent)
           stale_timer_(TimerManager::CreateTimer(*(agent->event_manager()->io_service()),
                       "NameSpaceStaleTimer", TaskScheduler::GetInstance()->
                       GetTaskId("db::DBTable"), 0)), agent_(agent) {
+          work_queue_.set_name("Instance Manager");
 
 }
 
@@ -644,8 +645,8 @@ void InstanceManager::StopStaleNetNS(ServiceInstance::Properties &props) {
     cmd_str << " " << UuidToString(boost::uuids::nil_uuid());
     if (props.service_type == ServiceInstance::LoadBalancer) {
         cmd_str << " --cfg-file " << loadbalancer_config_path_default <<
-            props.pool_id << "/conf.json";
-        cmd_str << " --pool-id " << props.pool_id;
+            props.ToId() << "/conf.json";
+        cmd_str << props.IdToCmdLineStr();
     }
 
     InstanceTask *task = new InstanceTaskExecvp(cmd_str.str(), Stop,

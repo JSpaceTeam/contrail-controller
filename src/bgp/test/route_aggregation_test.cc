@@ -256,6 +256,32 @@ protected:
     }
 
     template<typename T>
+    bool IsContributingRoute(const string &instance, const string &table,
+                             const string &prefix) {
+        BgpRoute *rt = RouteLookup<T>(table, prefix);
+        if (rt) {
+            RoutingInstance *rti =
+              bgp_server_->routing_instance_mgr()->GetRoutingInstance(instance);
+            BgpTable *table = static_cast<BgpTable *>(rt->get_table());
+            return rti->IsContributingRoute(table, rt);
+        }
+        return false;
+    }
+
+    template<typename T>
+    bool IsAggregateRoute(const string &instance, const string &table,
+                             const string &prefix) {
+        BgpRoute *rt = RouteLookup<T>(table, prefix);
+        if (rt) {
+            RoutingInstance *rti =
+              bgp_server_->routing_instance_mgr()->GetRoutingInstance(instance);
+            BgpTable *table = static_cast<BgpTable *>(rt->get_table());
+            return rti->IsAggregateRoute(table, rt);
+        }
+        return false;
+    }
+
+    template<typename T>
     BgpRoute *RouteLookup(const string &table_name, const string &prefix) {
         typedef typename T::TableT TableT;
         typedef typename T::PrefixT PrefixT;
@@ -370,7 +396,123 @@ TEST_F(RouteAggregationTest, Basic) {
     TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
     TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
 
+    TASK_UTIL_EXPECT_TRUE(IsAggregateRoute<InetDefinition>("test",
+                                           "test.inet.0", "2.2.0.0/16"));
+    TASK_UTIL_EXPECT_FALSE(IsAggregateRoute<InetDefinition>("test",
+                                           "test.inet.0", "1.1.1.1/32"));
+    TASK_UTIL_EXPECT_TRUE(IsContributingRoute<InetDefinition>("test",
+                                            "test.inet.0", "2.2.1.1/32"));
+    TASK_UTIL_EXPECT_FALSE(IsContributingRoute<InetDefinition>("test",
+                                            "test.inet.0", "1.1.1.1/32"));
     DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "1.1.1.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32");
+    task_util::WaitForIdle();
+}
+
+//
+// The nexthop is also a more specific route
+// Verify that the aggregate route is not published when only nexthop route is
+// added to the bgp table.
+// Also verify the aggregate route is published when other more specific routes
+// are published
+//
+TEST_F(RouteAggregationTest, Basic_0) {
+    string content =
+        FileRead("controller/src/bgp/testdata/route_aggregate_0d.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.2.1/32", 100);
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(1, RouteCount("test.inet.0"));
+    BgpRoute *rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt == NULL);
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    TASK_UTIL_EXPECT_TRUE(IsAggregateRoute<InetDefinition>("test",
+                                           "test.inet.0", "2.2.0.0/16"));
+    TASK_UTIL_EXPECT_FALSE(IsAggregateRoute<InetDefinition>("test",
+                                           "test.inet.0", "2.2.2.1/32"));
+    TASK_UTIL_EXPECT_TRUE(IsContributingRoute<InetDefinition>("test",
+                                            "test.inet.0", "2.2.1.1/32"));
+    TASK_UTIL_EXPECT_FALSE(IsContributingRoute<InetDefinition>("test",
+                                            "test.inet.0", "2.2.2.1/32"));
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.2.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32");
+    task_util::WaitForIdle();
+}
+
+//
+// Aggregate route is not published when route with aggregate route prefix is
+// added to bgp table
+// Also verify the aggregate route is published when more specific routes
+// are added to bgp table
+//
+TEST_F(RouteAggregationTest, Basic_1) {
+    string content =
+        FileRead("controller/src/bgp/testdata/route_aggregate_0d.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    // Add nexthop route and aggregate prefix route
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.2.1/32", 100);
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.0.0/16", 100);
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(2, RouteCount("test.inet.0"));
+    BgpRoute *rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 1);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->GetSource() == BgpPath::BGP_XMPP);
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 3);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->GetSource() == BgpPath::ResolvedRoute);
+
+    TASK_UTIL_EXPECT_TRUE(IsAggregateRoute<InetDefinition>("test",
+                                           "test.inet.0", "2.2.0.0/16"));
+    TASK_UTIL_EXPECT_FALSE(IsAggregateRoute<InetDefinition>("test",
+                                           "test.inet.0", "2.2.1.1/32"));
+    TASK_UTIL_EXPECT_TRUE(IsContributingRoute<InetDefinition>("test",
+                                            "test.inet.0", "2.2.1.1/32"));
+    TASK_UTIL_EXPECT_FALSE(IsContributingRoute<InetDefinition>("test",
+                                            "test.inet.0", "2.2.2.1/32"));
+    // Delete the aggregate prefix route
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.0.0/16");
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    // Two paths in aggregate route. one for resolved and other for aggregation
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->GetSource() == BgpPath::ResolvedRoute);
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.2.1/32");
     DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32");
     task_util::WaitForIdle();
 }
@@ -740,6 +882,236 @@ TEST_F(RouteAggregationTest, ConfigUpdatePrefixLen) {
 }
 
 //
+// Update the config to add new route-aggregate config to routing instance
+//
+TEST_F(RouteAggregationTest, ConfigUpdate_AddNew) {
+    string content =
+        FileRead("controller/src/bgp/testdata/route_aggregate_3a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "1.1.1.1/32", 100);
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    BgpRoute *rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    content = FileRead("controller/src/bgp/testdata/route_aggregate_3.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "3.3.0.1/32", 100);
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "4.3.2.1/32", 100);
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(7, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "3.3.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+    rt = RouteLookup<InetDefinition>("test.inet.0", "4.0.0.0/8");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "4.3.2.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "3.3.0.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "1.1.1.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32");
+    task_util::WaitForIdle();
+}
+
+//
+// Update the config to update the prefix len of route-aggregate
+//
+TEST_F(RouteAggregationTest, DISABLED_ConfigUpdate_UpdateExisting) {
+    string content =
+        FileRead("controller/src/bgp/testdata/route_aggregate_3a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "1.1.1.1/32", 100);
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    BgpRoute *rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    content = FileRead("controller/src/bgp/testdata/route_aggregate_3b.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/17");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "3.3.0.1/32", 100);
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "4.3.2.1/32", 100);
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(7, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "3.3.0.0/17");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+    rt = RouteLookup<InetDefinition>("test.inet.0", "4.0.0.0/8");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "4.3.2.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "3.3.0.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "1.1.1.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32");
+    task_util::WaitForIdle();
+}
+
+//
+// Update the config to update the prefix len of route-aggregate
+// Higher prefix len to lower
+//
+TEST_F(RouteAggregationTest, DISABLED_ConfigUpdate_UpdateExisting_1) {
+    string content =
+        FileRead("controller/src/bgp/testdata/route_aggregate_3b.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "1.1.1.1/32", 100);
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    BgpRoute *rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/17");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    content = FileRead("controller/src/bgp/testdata/route_aggregate_3a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "3.3.0.1/32", 100);
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "4.3.2.1/32", 100);
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(7, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "3.3.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+    rt = RouteLookup<InetDefinition>("test.inet.0", "4.0.0.0/8");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "4.3.2.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "3.3.0.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "1.1.1.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.1.1/32");
+    task_util::WaitForIdle();
+}
+
+//
+// Update the config to delete existing route-aggregate config from
+// routing instance
+//
+TEST_F(RouteAggregationTest, ConfigUpdate_DeleteExisting) {
+    string content =
+        FileRead("controller/src/bgp/testdata/route_aggregate_3.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "1.1.1.1/32", 100);
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "4.3.2.1/32", 100);
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "3.3.2.1/32", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(5, RouteCount("test.inet.0"));
+    BgpRoute *rt = RouteLookup<InetDefinition>("test.inet.0", "4.0.0.0/8");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    rt = RouteLookup<InetDefinition>("test.inet.0", "3.3.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    ifmap_test_util::IFMapMsgUnlink(&config_db_, "routing-instance", "test",
+        "route-aggregate", "vn_subnet_1", "routing-instance-route-aggregate");
+    ifmap_test_util::IFMapMsgUnlink(&config_db_, "routing-instance", "test",
+        "route-aggregate", "vn_subnet_2", "routing-instance-route-aggregate");
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(3, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "4.0.0.0/8");
+    ASSERT_TRUE(rt == NULL);
+    rt = RouteLookup<InetDefinition>("test.inet.0", "3.3.0.0/16");
+    ASSERT_TRUE(rt == NULL);
+
+    AddRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.0.1/32", 100);
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(5, RouteCount("test.inet.0"));
+    rt = RouteLookup<InetDefinition>("test.inet.0", "2.2.0.0/16");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "4.3.2.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "3.3.2.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "1.1.1.1/32");
+    DeleteRoute<InetDefinition>(peers_[0], "test.inet.0", "2.2.0.1/32");
+    task_util::WaitForIdle();
+}
+//
 // With route-aggregate config referred by multiple routing instance, update the
 // route aggregate config to modify the prefix. Validate the new aggregate route
 // in both routing instances
@@ -984,6 +1356,143 @@ TEST_F(RouteAggregationTest, ConfigDelete_DelayedRouteProcessing_2) {
                           == NULL);
     TASK_UTIL_EXPECT_TRUE(
       bgp_server_->routing_instance_mgr()->GetRoutingInstance("test") == NULL);
+}
+
+//
+// Validate the route aggregation functionality with inet6
+// Add nexthop route and more specific route for aggregate prefix
+// Verify that aggregate route is published
+//
+TEST_F(RouteAggregationTest, BasicInet6) {
+    string content =
+        FileRead("controller/src/bgp/testdata/route_aggregate_1a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    AddRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                              "2001:db8:85a3::8a2e:370:7334/128", 100);
+    task_util::WaitForIdle();
+    AddRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                              "2002:db8:85a3::8a2e:370:7334/128", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet6.0"));
+    BgpRoute *rt = RouteLookup<Inet6Definition>("test.inet6.0",
+                                                "2001:db8:85a3::/64");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    DeleteRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                                 "2001:db8:85a3::8a2e:370:7334/128");
+    DeleteRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                                 "2002:db8:85a3::8a2e:370:7334/128");
+    task_util::WaitForIdle();
+}
+
+//
+// Validate the route aggregation functionality with inet6
+// Add nexthop route which is also a more specific route
+// Verify that aggregate route is not published with only nexthop route
+//
+TEST_F(RouteAggregationTest, BasicInet6_0) {
+    string content =
+        FileRead("controller/src/bgp/testdata/route_aggregate_1b.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    AddRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                              "2002:db8:85a3::8a2e:370:7334/128", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(1, RouteCount("test.inet6.0"));
+    BgpRoute *rt = RouteLookup<Inet6Definition>("test.inet6.0",
+                                                "2002:db8:85a3::/64");
+    ASSERT_TRUE(rt == NULL);
+
+    AddRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                              "2002:db8:85a3::8a2e:370:7335/128", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet6.0"));
+    rt = RouteLookup<Inet6Definition>("test.inet6.0",
+                                                "2002:db8:85a3::/64");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+    DeleteRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                                 "2002:db8:85a3::8a2e:370:7334/128");
+    DeleteRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                                 "2002:db8:85a3::8a2e:370:7335/128");
+    task_util::WaitForIdle();
+}
+
+//
+// Validate the route aggregation functionality with inet6
+// Add a route with aggregate prefix and verify that route aggregation is not
+// triggerred
+//
+TEST_F(RouteAggregationTest, BasicInet6_1) {
+    string content =
+        FileRead("controller/src/bgp/testdata/route_aggregate_1b.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    AddRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                              "2002:db8:85a3::/64", 100);
+    task_util::WaitForIdle();
+    AddRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                              "2002:db8:85a3::8a2e:370:7334/128", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(2, RouteCount("test.inet6.0"));
+    BgpRoute *rt = RouteLookup<Inet6Definition>("test.inet6.0",
+                                                "2002:db8:85a3::/64");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 1);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->GetSource() == BgpPath::BGP_XMPP);
+
+    // Now add more specific route
+    AddRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                              "2002:db8:85a3::8a2e:370:7335/128", 100);
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet6.0"));
+    rt = RouteLookup<Inet6Definition>("test.inet6.0",
+                                                "2002:db8:85a3::/64");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 3);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->GetSource() == BgpPath::ResolvedRoute);
+
+    DeleteRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                                 "2002:db8:85a3::/64");
+    task_util::WaitForIdle();
+    VERIFY_EQ(3, RouteCount("test.inet6.0"));
+    rt = RouteLookup<Inet6Definition>("test.inet6.0",
+                                                "2002:db8:85a3::/64");
+    ASSERT_TRUE(rt != NULL);
+    TASK_UTIL_EXPECT_EQ(rt->count(), 2);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+    TASK_UTIL_EXPECT_TRUE(rt->BestPath()->GetSource() == BgpPath::ResolvedRoute);
+    DeleteRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                                 "2002:db8:85a3::8a2e:370:7334/128");
+    DeleteRoute<Inet6Definition>(peers_[0], "test.inet6.0",
+                                 "2002:db8:85a3::8a2e:370:7335/128");
+    task_util::WaitForIdle();
 }
 
 class TestEnvironment : public ::testing::Environment {
