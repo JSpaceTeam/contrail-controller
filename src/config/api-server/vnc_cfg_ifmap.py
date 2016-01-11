@@ -2345,10 +2345,18 @@ class VncSearchDbClient(VncSearchItf):
         if not self._index_client.exists(index):
             result = self._index_client.create(index=index, body=mapping)
             if 'acknowledged' in result and result['acknowledged']:
-                logger.warn("Updated search index successfully")
+                logger.warn("Created search index successfully")
             else:
                 logger.error("Failed to update search index")
-        mapped_doc_types = [k for k, v in mapping['mappings'].iteritems()]
+        else:
+            #Upgrade
+            for doc, map_info in mapping['mappings'].iteritems():
+                result = self._index_client.put_mapping(doc_type=doc, body=map_info, index=index)
+                if 'acknowledged' in result and result['acknowledged']:
+                    logger.warn("Updated search index successfully")
+                else:
+                    logger.error("Failed to update search index")
+            mapped_doc_types = [k for k, v in mapping['mappings'].iteritems()]
         return index, mapped_doc_types
 
     # ____initialize_index_schema
@@ -2377,6 +2385,7 @@ class VncSearchDbClient(VncSearchItf):
 
     @search_db_trace(OP_CREATE)
     def search_create(self, obj_type, obj_ids, obj_dict):
+        obj_type = obj_type.replace('-', '_')
         if self.is_doc_type_mapped(obj_type):
             obj_dict_scrubbed = self._scrub_dict(obj_dict)
             self._es_client.index(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
@@ -2387,6 +2396,7 @@ class VncSearchDbClient(VncSearchItf):
 
     @search_db_trace(OP_UPDATE)
     def search_update(self, obj_type, obj_ids, new_obj_dict):
+        obj_type = obj_type.replace('-', '_')
         if self.is_doc_type_mapped(obj_type):
             obj_dict_scrubbed = {}
             obj_dict_scrubbed["doc"] = self._scrub_dict(new_obj_dict)
@@ -2399,6 +2409,7 @@ class VncSearchDbClient(VncSearchItf):
 
     @search_db_trace(OP_DELETE)
     def search_delete(self, obj_type, obj_ids, obj_dict=None):
+        obj_type = obj_type.replace('-', '_')
         if self.is_doc_type_mapped(obj_type):
             self._es_client.delete(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
                                    **self.__get_default_params())
@@ -2411,6 +2422,7 @@ class VncSearchDbClient(VncSearchItf):
     # end dbe_read
 
     def dbe_list(self, obj_type, body=None, params=None):
+        obj_type = obj_type.replace('-', '_')
         if params is None:
             params = {}
         elif params and 'filter' in params:
@@ -2431,6 +2443,7 @@ class VncSearchDbClient(VncSearchItf):
     # dbe_list
 
     def count(self, obj_type, body=None, params=None):
+        obj_type = obj_type.replace('-', '_')
         if params is None:
             params = {}
         elif params and 'filter' in params:
@@ -2443,6 +2456,7 @@ class VncSearchDbClient(VncSearchItf):
     # count
 
     def search(self, obj_type=None, body=None, params=None):
+        obj_type = obj_type.replace('-', '_')
         self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
         return self._es_client.search(index=self.index, doc_type=obj_type, body=body)
     # end search
