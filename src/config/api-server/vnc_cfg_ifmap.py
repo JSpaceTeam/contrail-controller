@@ -2356,7 +2356,7 @@ class VncSearchDbClient(VncSearchItf):
                     logger.warn("Updated search index successfully")
                 else:
                     logger.error("Failed to update search index")
-            mapped_doc_types = [k for k, v in mapping['mappings'].iteritems()]
+        mapped_doc_types = [k for k, v in mapping['mappings'].iteritems()]
         return index, mapped_doc_types
 
     # ____initialize_index_schema
