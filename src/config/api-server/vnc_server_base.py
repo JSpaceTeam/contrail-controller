@@ -63,6 +63,8 @@ class VncApiServerBase(VncApiServer):
         obj = super(VncApiServerBase, cls).__new__(cls, *args, **kwargs)
         cls._generate_rpc_methods(obj)
         cls._generate_rpc_uri(obj)
+        cls._generate_search_methods(obj)
+        cls._generate_search_uri(obj)
         return obj
 
     def __init__(self, args_str=None):
@@ -216,6 +218,46 @@ class VncApiServerBase(VncApiServer):
 
     # end get_rpc_input_type
 
+    @classmethod
+    def _generate_search_methods(cls, obj):
+        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+            obj_type = resource_type.replace('-', '_')
+
+            filter_method = functools.partial(obj._http_post_filter, resource_type)
+            functools.update_wrapper(filter_method, obj._http_post_filter)
+            setattr(obj, '%s_http_post_filter' % obj_type, filter_method)
+
+            search_method = functools.partial(obj._http_post_search, resource_type)
+            functools.update_wrapper(search_method, obj._http_post_search)
+            setattr(obj, '%s_http_post_search' % obj_type, search_method)
+
+            index_method = functools.partial(obj.http_resource_index, resource_type)
+            functools.update_wrapper(index_method, obj.http_resource_index)
+            setattr(obj, '%s_http_post_index' % obj_type, index_method)
+
+    # end _generate_search_methods
+
+    @classmethod
+    def _generate_search_uri(cls, obj):
+        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+            obj_type = resource_type.replace('-', '_')
+            obj.route('%s/%s/_filter'%(SERVICE_PATH, resource_type),
+                      'POST',
+                      getattr(obj, '%s_http_post_filter' % obj_type))
+            obj.route('%s/%s/_search'%(SERVICE_PATH, resource_type),
+                      'POST',
+                      getattr(obj, '%s_http_post_search' % obj_type))
+            obj.route('%s/%s/_index' % (SERVICE_PATH, resource_type),
+                      'POST',
+                      getattr(obj, '%s_http_post_index' % obj_type))
+        #Module level routes for search
+        obj.route('%s/_search'%(SERVICE_PATH),
+                      'POST',
+                      obj.search_execute)
+        obj.route('%s/_suggest'%(SERVICE_PATH),
+                      'POST',
+                      obj.suggest_execute)
+
     @abc.abstractmethod
     def get_pipeline(self):
         pass
@@ -287,6 +329,125 @@ class VncApiServerBase(VncApiServer):
 
         return rsp_body
     # end http_rpc_post
+
+    def _http_post_filter(self, resource_type):
+        db_conn = self._db_conn
+        if request.json is not None:
+            body = request.json
+        else:
+            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
+        (ok, result, total) = db_conn.dbe_list(resource_type, body=body)
+        if not ok:
+            self.config_object_error(None, None, resource_type, 'http_get_collection', result)
+            raise cfgm_common.exceptions.HttpError(404, 'invalid request, search body not found')
+        obj_type = resource_type.replace('-', '_')
+        obj_class = self.get_resource_class(obj_type)
+        fq_names_uuids = result
+        obj_dicts = []
+        obj_ids_list = [{'uuid': obj_uuid} for _, obj_uuid in fq_names_uuids]
+        obj_fields = [prop for prop in obj_class.prop_fields] + []
+        if 'fields' in request.query:
+            obj_fields.extend(request.query.fields.split(','))
+        (ok, result) = db_conn.dbe_read_multi(obj_type, obj_ids_list, obj_fields)
+
+        if not ok:
+            result = []
+        for obj_result in result:
+            obj_dict = {}
+            obj_dict['name'] = obj_result['fq_name'][-1]
+            obj_dict['href'] = self.generate_url(resource_type, obj_result['uuid'])
+            obj_dict.update(obj_result)
+            if (obj_dict['id_perms'].get('user_visible', True) or
+                    self.is_admin_request()):
+                obj_dicts.append(obj_dict)
+
+        return {'total': total, resource_type: obj_dicts}
+    #end _http_post_filter
+
+    def _http_post_search(self, resource_type):
+        db_conn = self._db_conn
+        if request.json is not None:
+            body = request.json
+        else:
+            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
+        result = db_conn.search(resource_type, body)
+        return result
+    #end _http_post_search
+
+    def suggest_execute(self):
+        db_conn = self._db_conn
+        if request.json is not None:
+            body = request.json
+        else:
+           raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
+        result = db_conn.suggest(body)
+        return result
+    #end suggest_execute
+
+    def search_execute(self):
+        db_conn = self._db_conn
+        if request.json is not None:
+            body = request.json
+        else:
+            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
+        result = db_conn.search(None, body)
+        return result
+    #end search_execute
+
+    def http_resource_index(self, resource_type):
+        obj_type = resource_type.replace('-', '_')
+
+        env = get_request().headers.environ
+        tenant_name = env.get(hdr_server_tenant(), 'default-project')
+        parent_uuids = None
+        back_ref_uuids = None
+        obj_uuids = None
+        if (('parent_fq_name_str' in get_request().query) and
+            ('parent_type' in get_request().query)):
+            parent_fq_name = get_request().query.parent_fq_name_str.split(':')
+            parent_type = get_request().query.parent_type
+            parent_uuids = [self._db_conn.fq_name_to_uuid(parent_type, parent_fq_name)]
+        elif 'parent_id' in get_request().query:
+            parent_ids = get_request().query.parent_id.split(',')
+            parent_uuids = [str(uuid.UUID(p_uuid)) for p_uuid in parent_ids]
+        if 'back_ref_id' in get_request().query:
+            back_ref_ids = get_request().query.back_ref_id.split(',')
+            back_ref_uuids = [str(uuid.UUID(b_uuid)) for b_uuid in back_ref_ids]
+        if 'obj_uuids' in get_request().query:
+            obj_uuids = get_request().query.obj_uuids.split(',')
+
+        if 'fields' in get_request().query:
+            req_fields = get_request().query.fields.split(',')
+        else:
+            req_fields = []
+        (ok, result, total) = self._db_conn.dbe_only_list(obj_type,
+                             parent_uuids, back_ref_uuids, obj_uuids,count=False,
+                             filters=None)
+        if not ok:
+            self.config_object_error(None, None, '%ss' %(obj_type),
+                                     'dbe_list', result)
+            raise cfgm_common.exceptions.HttpError(404, result)
+        obj_ids_list = [{'uuid': obj_uuid}
+                            for _, obj_uuid in result]
+
+        obj_class = self.get_resource_class(obj_type)
+        obj_fields = list(obj_class.prop_fields)
+        if req_fields:
+            obj_fields.extend(req_fields)
+        (ok, result) = self._db_conn.dbe_read_multi(
+                                obj_type, obj_ids_list, obj_fields)
+
+        if not ok:
+                raise cfgm_common.exceptions.HttpError(404, result)
+        for obj_result in result:
+                obj_dict = {}
+                obj_dict['name'] = obj_result['fq_name'][-1]
+                obj_dict.update(obj_result)
+                obj_ids = {'uuid': obj_dict['uuid']}
+                self._db_conn.dbe_search_update(obj_type, obj_ids, obj_dict)
+                gevent.sleep(0)
+        return bottle.HTTPResponse(status=200)
+
 
     # Override Route
     def route(self, uri, method, handler):

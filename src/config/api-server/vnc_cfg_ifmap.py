@@ -1981,12 +1981,16 @@ class VncDbClient(object):
         return (ok, cassandra_result)
     # end dbe_update
 
+    @ignore_exceptions
+    def dbe_search_update(self, obj_type, obj_ids, new_obj_dict):
+       self._search_db.search_update(obj_type, obj_ids, new_obj_dict)
+    # end dbe_search_update
+
     def dbe_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
                  obj_uuids=None, count=False, filters=None,
                  paginate_start=None, paginate_count=None,  body=None, params=None):
-        if obj_uuids or parent_uuids or back_ref_uuids or not self._search_db.enabled():
-            method_name = obj_type.replace('-', '_')
-            if count:    
+        if obj_uuids or parent_uuids or back_ref_uuids or not self._search_db.enabled(obj_type):
+            if count:
                 (ok, total) =self._cassandra_db.object_list( obj_type, parent_uuids=parent_uuids,
                                     back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
                                     count=count, filters=filters)
@@ -2009,6 +2013,15 @@ class VncDbClient(object):
                 children_fq_names_uuids.append((fq_name, obj_uuid))
             return (ok, children_fq_names_uuids, total)
     # end dbe_list
+
+    def dbe_only_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
+                 obj_uuids=None, count=False, filters=None,
+                 paginate_start=None, paginate_count=None):
+        (ok, cassandra_result) = self._cassandra_db.object_list(obj_type, parent_uuids=parent_uuids,
+                 back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
+                 count=count, filters=filters)
+        return (ok, cassandra_result, len(cassandra_result))
+    # end dbe_only_list
 
     @dbe_trace('delete')
     def dbe_delete(self, obj_type, obj_ids, obj_dict):
@@ -2239,7 +2252,7 @@ class VncSearchItf(object):
     def reconcile(self):
         return False
 
-    def enabled(self):
+    def enabled(self, obj_type=None):
         return False
 
 
@@ -2293,7 +2306,9 @@ class VncSearchDbClient(VncSearchItf):
         return True
     # end reconcile
 
-    def enabled(self):
+    def enabled(self, obj_type=None):
+        if obj_type is not None and not self.is_doc_type_mapped(obj_type):
+            return False
         return True
 
     # end enabled
@@ -2404,7 +2419,7 @@ class VncSearchDbClient(VncSearchItf):
                 self._es_client.update(index=self.index, doc_type=obj_type, id=obj_ids['uuid'],
                                    body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
             else:
-                self.search_create(obj_type, obj_ids, new_obj_dict, **self.__get_default_params())
+                self.search_create(obj_type, obj_ids, new_obj_dict)
     # end dbe_update
 
     @search_db_trace(OP_DELETE)
