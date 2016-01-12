@@ -107,7 +107,7 @@ from cfgm_common.uve.cfgm_cpuinfo.ttypes import NodeStatusUVE, \
 
 from sandesh.traces.ttypes import RestApiTrace
 from vnc_bottle import get_bottle_server
-
+from gen.vnc_api_server_gen import get_obj_type_to_db_type
 _WEB_HOST = '0.0.0.0'
 _WEB_PORT = 8082
 _ADMIN_PORT = 8095
@@ -137,7 +137,7 @@ _ACTION_RESOURCES = [
     {'uri': '/stop-profile', 'link_name': 'stop-profile',
      'method': 'POST', 'method_name': 'stop_profile'},
     {'uri': '/list-bulk-collection', 'link_name': 'list-bulk-collection',
-     'method': 'POST', 'method_name': 'list_bulk_collection_http_post'},
+     'method': 'POST', 'method_name': 'list_bulk_collection_http_post'}
 ]
 
 
@@ -2120,6 +2120,10 @@ class VncApiServer(object):
     def get_resource_xsd_class(self, resource_type):
         return cfgm_common.utils.str_to_class(resource_type, __name__)
     # end get_resource_xsd_class
+
+    def _get_obj_type_to_db_type(self, resource_type):
+        return get_obj_type_to_db_type(resource_type)
+    # end get_obj_type_to_db_type
 
     def list_bulk_collection_http_post(self):
         """ List collection when requested ids don't fit in query params."""

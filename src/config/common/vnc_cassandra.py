@@ -313,7 +313,7 @@ class VncCassandraClient(object):
         # Update fqname table
         fq_name_str = ':'.join(obj_dict['fq_name'])
         fq_name_cols = {utils.encode_string(fq_name_str) + ':' + obj_id: json.dumps(None)}
-        self._obj_fq_name_cf.insert(obj_type, fq_name_cols)
+        self._obj_fq_name_cf.insert(self._get_obj_type_to_db_type(obj_type), fq_name_cols)
 
         return (True, '')
     # end object_create
@@ -707,7 +707,7 @@ class VncCassandraClient(object):
             else: # grab all resources of this type
                 obj_fq_name_cf = self._obj_fq_name_cf
                 try:
-                    cols = obj_fq_name_cf.get('%s' %(obj_type),
+                    cols = obj_fq_name_cf.get(self._get_obj_type_to_db_type('%s' %(obj_type)),
                         column_count=self._MAX_COL)
                 except pycassa.NotFoundException:
                     if count:
@@ -778,7 +778,7 @@ class VncCassandraClient(object):
         # Update fqname table
         fq_name_str = ':'.join(fq_name)
         fq_name_col = utils.encode_string(fq_name_str) + ':' + obj_uuid
-        self._obj_fq_name_cf.remove(obj_type, columns = [fq_name_col])
+        self._obj_fq_name_cf.remove(self._get_obj_type_to_db_type(obj_type), columns = [fq_name_col])
 
         return (True, '')
     # end object_delete
@@ -865,7 +865,7 @@ class VncCassandraClient(object):
 
     def fq_name_to_uuid(self, obj_type, fq_name):
         method_name = obj_type.replace('-', '_')
-        db_name = method_name
+        db_name = self._get_obj_type_to_db_type(method_name)
         fq_name_str = ':'.join(fq_name)
         col_start = '%s:' % (utils.encode_string(fq_name_str))
         col_fin = '%s;' % (utils.encode_string(fq_name_str))

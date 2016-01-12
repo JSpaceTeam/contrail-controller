@@ -1030,6 +1030,8 @@ class VncServerCassandraClient(VncCassandraClient):
     def _get_xsd_class(self, xsd_type):
         return self._db_client_mgr.get_resource_xsd_class(xsd_type)
 
+    def _get_obj_type_to_db_type(self, obj_type):
+        return self._db_client_mgr.get_obj_type_to_db_type(obj_type)
 
 # end class VncCassandraClient
 
@@ -2180,6 +2182,9 @@ class VncDbClient(object):
         return self._api_svr_mgr.get_resource_xsd_class(xsd_type)
     # end get_resource_xsd_class
 
+    def get_obj_type_to_db_type(self, obj_type):
+        return self._api_svr_mgr._get_obj_type_to_db_type(obj_type)
+
     def get_default_perms2(self, obj_type):
         return self._api_svr_mgr._get_default_perms2(obj_type)
 
@@ -2230,6 +2235,8 @@ class VncDbClient(object):
     def suggest(self, body):
         return self._search_db.suggest(body)
     # suggest
+
+
 
 
 # end class VncDbClient
