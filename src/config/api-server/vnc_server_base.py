@@ -575,6 +575,7 @@ class VncApiServerBase(VncApiServer):
                 'vnc_cfg_api.resourceApi',
                 api_server_ip=self._args.listen_ip_addr,
                 api_server_port=self._args.listen_port,
+                propagate_map_exceptions=True,
                 conf_sections=conf_sections, sandesh=self._sandesh)
             self._extension_mgrs['rpcApi'] = ExtensionManager(
                 'vnc_cfg_api.rpcApi', api_server_ip=self._args.listen_ip_addr,

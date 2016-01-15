@@ -377,13 +377,33 @@ class ZookeeperClient(object):
             return None
     # end read_node
 
-    def get_children(self, path):
+    def get_children(self, path, propogate_error=False):
         try:
             retry = self._retry.copy()
             return retry(self._zk_client.get_children, path)
         except Exception:
+            if propogate_error:
+                raise
             return []
     # end read_node
+
+    def get_children_with_data(self, path):
+        try:
+            retry = self._retry.copy()
+            return retry(self._zk_client.get_children, path, include_data=True)
+        except Exception:
+            return []
+    # end read_node
+
+    def set_node(self, path, value, propogate_error=False):
+        try:
+            retry = self._retry.copy()
+            return retry(self._zk_client.set, path, value)
+        except Exception as e:
+            if propogate_error:
+                raise
+            return []
+    # end set_node
 
     def _sandesh_connection_info_update(self, status, message):
         from pysandesh.connection_info import ConnectionState
