@@ -332,7 +332,7 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
 
         (VncApiConfigLog, '__new__',FakeApiConfigLog),
         #(VncApiStatsLog, '__new__',FakeVncApiStatsLog)
-        (elasticsearch.Elasticsearch, '__new__', FakePyElasticSearch)
+        (elasticsearch.Elasticsearch, '__new__', FakePyElasticSearch),
         (client.IndicesClient, '__new__', FakeESIndicesClient)
     ]
 
