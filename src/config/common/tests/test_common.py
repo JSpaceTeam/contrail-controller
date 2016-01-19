@@ -15,7 +15,8 @@ from testtools import content, content_type
 from flexmock import flexmock, Mock
 from webtest import TestApp
 import contextlib
-
+import elasticsearch
+from elasticsearch import client
 from vnc_api.vnc_api import *
 import cfgm_common.vnc_cpu_info
 import cfgm_common.ifmap.client as ifmap_client
@@ -331,6 +332,8 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
 
         (VncApiConfigLog, '__new__',FakeApiConfigLog),
         #(VncApiStatsLog, '__new__',FakeVncApiStatsLog)
+        (elasticsearch.Elasticsearch, '__new__', FakePyElasticSearch)
+        (client.IndicesClient, '__new__', FakeESIndicesClient)
     ]
 
     def __init__(self, *args, **kwargs):

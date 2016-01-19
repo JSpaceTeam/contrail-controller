@@ -1311,3 +1311,114 @@ class FakeVncApiStatsLog(object):
             pprint(x)
             print "\n"
 # class FakeVncApiStatsLog
+
+
+class FakeESIndicesClient(object):
+
+    def __init__(self, client, *args, **kwargs):
+        self._client = args[0]
+        self._index = {}
+
+
+
+    def exists(self, index):
+        return self._client.index_exists(index)
+
+    def create(self, index, body):
+        return self._client.create(index, body)
+
+
+# end FakeESIndicesClient
+
+class FakePyElasticSearch(object):
+
+    def __init__(self, *args, **kwargs):
+         self._index = {}
+    # end __init__
+
+    def get_return_ids(self):
+        '''
+        Unit test cases can mock this and return ids that they want to send on the next get call
+        Returns:
+
+        '''
+        return None
+    # end get_return_ids
+
+    def create(self, index, body):
+        self._index[index] = {}
+        self._index[index]['mapping'] = body
+        self._index[index]['data'] = {}
+        return {'acknowledged': 'ok'}
+
+    def index_exists(self, index):
+        indexes = index.split(',')
+        for index in indexes:
+            if index not in self._index:
+                return False
+        return True
+    # end index_exists
+
+    def exists(self, index, doc_type, id):
+        if index not in self._index:
+            raise Exception("No index foound")
+        return id in self.__get_data_dict(index, doc_type)
+
+
+    def index(self, index=None, doc_type=None, id=None,
+              body=None, **kwargs):
+        doc_index = self.__get_data_dict(index, doc_type)
+        doc_index[id] = body
+    #end index
+
+    def update(self, index=None, doc_type=None, id=None,
+              body=None, **kwargs):
+        self.index(index, doc_type, id, body, **kwargs)
+
+    # end update
+
+    def delete(self, index=None, doc_type=None, id=None, **kwargs):
+        data_dict = self.__get_data_dict(index, doc_type)
+        del data_dict[id]
+
+    # end delete
+
+    def _list(self, index, doc_type):
+        '''
+        Return everything or something based on mocking
+        Args:
+            index:
+            doc_type:
+            obj_ids:
+
+        Returns:
+
+        '''
+        data_dict = self.__get_data_dict(index, doc_type)
+        ids = self.get_return_ids()
+        return [{'_id':k, '_source': v} for k,v in data_dict.iteritems() if not ids or k in ids]
+
+    # end _list
+
+    def count(self, index, obj_type, body=None, params=None, **kwrags):
+         data = self._list(index, obj_type)
+         return {'count': len(data)}
+
+    # end count
+
+    def search(self, index, doc_type, body, **kwargs):
+        data = self._list(index, doc_type)
+        count = len(data)
+        return {'hits': {'total': count, 'hits': data}}
+
+    # end search
+
+    def __get_data_dict(self, index, doc_type):
+        if index not in self._index:
+            raise Exception("No index found")
+        my_index = self._index[index]
+        if doc_type not in my_index['data']:
+            my_index['data'][doc_type] = {}
+        return my_index['data'][doc_type]
+
+# end FakePyElasticSearch
