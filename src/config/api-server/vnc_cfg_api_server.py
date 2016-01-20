@@ -363,6 +363,8 @@ class VncApiServer(object):
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
+        except HttpError:
+            raise
         except Exception as e:
             err_msg = 'In pre_%s_create an extension had error for %s' \
                       %(obj_type, obj_dict)
@@ -627,6 +629,8 @@ class VncApiServer(object):
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
+        except HttpError:
+            raise
         except Exception as e:
             err_msg = 'In pre_%s_update an extension had error for %s' \
                       %(obj_type, obj_dict)
@@ -761,6 +765,8 @@ class VncApiServer(object):
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
+        except HttpError:
+            raise
         except Exception as e:
             err_msg = 'In pre_%s_delete an extension had error for %s' \
                       %(obj_type, id)
