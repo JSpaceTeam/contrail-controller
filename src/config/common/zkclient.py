@@ -221,7 +221,9 @@ class IndexAllocator(object):
 
 class ZookeeperClient(object):
 
-    def __init__(self, module, server_list, logging_fn=None):
+    def __init__(self, module, server_list, logging_fn=None,
+                 client_handler=kazoo.handlers.gevent.SequentialGeventHandler(),
+                 sleep_func=gevent.sleep, timeout_exception_cls=gevent.event.Timeout):
         # logging
         logger = logging.getLogger(module)
         logger.setLevel(logging.DEBUG)
@@ -240,14 +242,14 @@ class ZookeeperClient(object):
             self.log = logging_fn
         else:
             self.log = self.syslog
-
+        self.timeout_ex = timeout_exception_cls
         # KazooRetry to retry keeper CRUD operations
         self._retry = KazooRetry(max_tries=None, max_delay=300,
-                                 sleep_func=gevent.sleep)
+                                 sleep_func=sleep_func)
         self._zk_client = kazoo.client.KazooClient(
                 server_list,
                 timeout=400,
-                handler=kazoo.handlers.gevent.SequentialGeventHandler(),
+                handler=client_handler,
                 logger=logger,
                 connection_retry=self._retry,
                 command_retry=self._retry)
@@ -256,11 +258,9 @@ class ZookeeperClient(object):
         self._logger = logger
         self._election = None
         self._server_list = server_list
-
         self._conn_state = None
         self._sandesh_connection_info_update(status='INIT', message='')
         self._lost_cb = None
-
         self.connect()
     # end __init__
 
@@ -270,18 +270,18 @@ class ZookeeperClient(object):
             try:
                 self._zk_client.start()
                 break
-            except gevent.event.Timeout as e:
-                # Update connection info
+            except self.timeout_ex  as e:
+                #Update connection info
                 self._sandesh_connection_info_update(status='DOWN',
                                                      message=str(e))
                 gevent.sleep(1)
             # Zookeeper is also throwing exception due to delay in master election
             except Exception as e:
-                # Update connection info
+                #Update connection info
                 self._sandesh_connection_info_update(status='DOWN',
-                                                     message=str(e))
+                                                    message=str(e))
                 gevent.sleep(1)
-        # Update connection info
+        #Update connection info
         self._sandesh_connection_info_update(status='UP', message='')
 
     # end
