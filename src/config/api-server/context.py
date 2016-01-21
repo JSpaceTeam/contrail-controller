@@ -73,6 +73,8 @@ class ApiContext(object):
     # end invoke_undo
 # end class ApiContext
 
+
+
 def get_request():
     return gevent.getcurrent().api_context.request
 
@@ -81,3 +83,90 @@ def get_context():
 
 def set_context(api_ctx):
     gevent.getcurrent().api_context = api_ctx
+
+
+
+
+class RequestContext(object):
+    '''
+     This hold request context that can be propgated to RPC calls
+    '''
+    def __init__(self, auth_token=None, username=None, password=None,
+                 tenant=None, tenant_id=None, auth_url=None, roles=None, is_admin=None,
+                 request_id=None, **kwargs):
+        self.auth_token = auth_token
+        self.user = username
+        self.tenant = tenant
+        self.is_admin = is_admin
+        self.request_id = request_id
+        self.username = username
+        self.password = password
+        self.tenant_id = tenant_id
+        self.auth_url = auth_url
+        # One of Invalid, Confirmed, None
+        self.auth_status = kwargs['auth_status']
+        # Domain to which the tenant belongs; today derived from user
+        self.domain = kwargs['domain']
+        # Domain_id as uuid except for default domain
+        self.domain_id = kwargs['domain_id']
+        # user is passing a domain-scoped token, i.e domain owner
+        self.is_domain_scoped = kwargs['is_domain_scoped']
+        self.roles = roles or []
+
+    def to_dict(self):
+        return {'auth_token': self.auth_token,
+                'username': self.username,
+                'password': self.password,
+                'tenant': self.tenant,
+                'tenant_id': self.tenant_id,
+                'auth_url': self.auth_url,
+                'auth_status': self.auth_status,
+                'domain': self.domain,
+                'domain_id': self.domain_id,
+                'is_domain_scoped': self.is_domain_scoped,
+                'roles': self.roles,
+                'is_admin': self.is_admin,
+                'user': self.user,
+                'request_id': self.request_id}
+
+    @classmethod
+    def from_dict(cls, values):
+        return cls(**values)
+# end RequestContext
+
+def create_request_context(context):
+    if context:
+        request = context.request
+        username = request.get_header('X-User-Name')
+        token = request.get_header('X-Auth-Token')
+        auth_status = request.get_header('X-Identity-Status')
+        auth_url = request.get_header('X-Auth-Url')
+        tenant = request.get_header('X-Project-Name')
+        domain = request.get_header('X-User-Domain-Name')
+        is_domain_scoped = False
+        if request.get_header('X-Domain-Id') is not None:
+            is_domain_scoped = True
+        domain_id = request.get_header('X-User-Domain-Id')
+        tenant_id = request.get_header('X-Tenant-Id')
+
+        if not domain_id:
+            domain_id = "00000000000000000000000000000000"
+        if not tenant_id:
+            tenant_id = "00000000000000000000000000000000"
+
+        roles = request.get_header('X-Roles')
+        if roles is not None:
+            roles = roles.split(',')
+
+        return RequestContext(auth_token=token,
+            tenant=tenant,
+            tenant_id=tenant_id,
+            domain=domain,
+            domain_id=domain_id,
+            auth_status=auth_status,
+            username=username,
+            auth_url=auth_url,
+            roles=roles,
+            is_domain_scoped=is_domain_scoped)
+    return None
+# end create_request_context
