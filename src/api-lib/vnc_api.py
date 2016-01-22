@@ -485,11 +485,11 @@ class VncApi(object):
     @check_homepage
     def _objects_list(self, res_type, parent_id=None, parent_fq_name=None,
                      obj_uuids=None, back_ref_id=None, fields=None,
-                     detail=False, count=False, filters=None, paging_context=None):
+                     detail=False, count=False, filters=None, paging_context=None, search_body=None):
         return self.resource_list(res_type, parent_id=parent_id,
             parent_fq_name=parent_fq_name, back_ref_id=back_ref_id,
             obj_uuids=obj_uuids, fields=fields, detail=detail, count=count,
-            filters=filters, paging_ctx=paging_context)
+            filters=filters, paging_ctx=paging_context, search_body=search_body)
     # end _objects_list
 
     @check_homepage
@@ -1035,7 +1035,7 @@ class VncApi(object):
     @check_homepage
     def resource_list(self, obj_type, parent_id=None, parent_fq_name=None,
                       back_ref_id=None, obj_uuids=None, fields=None,
-                      detail=False, count=False, filters=None, paging_ctx = None):
+                      detail=False, count=False, filters=None, paging_ctx = None, search_body =None):
         if not obj_type:
             raise ResourceTypeUnknownError(obj_type)
 
@@ -1085,6 +1085,10 @@ class VncApi(object):
 
         if paging_ctx and isinstance(paging_ctx, PagingContext):
             query_params.update(paging_ctx.to_dict())
+
+        if search_body:
+            query_params.update(search_body)
+            do_post_for_list = True
 
         if do_post_for_list:
             uri = self._action_uri.get('list-bulk-collection')

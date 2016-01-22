@@ -1991,29 +1991,32 @@ class VncDbClient(object):
     def dbe_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
                  obj_uuids=None, count=False, filters=None,
                  paginate_start=None, paginate_count=None,  body=None, params=None):
-        if obj_uuids or parent_uuids or back_ref_uuids or not self._search_db.enabled(obj_type):
-            if count:
+        if count:
+            if obj_uuids or parent_uuids or back_ref_uuids or filters or not self._search_db.enabled(obj_type):
                 (ok, total) =self._cassandra_db.object_list( obj_type, parent_uuids=parent_uuids,
                                     back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
                                     count=count, filters=filters)
                 return (ok, None, total)
-
-            (ok, cassandra_result) = self._cassandra_db.object_list(
+            else:
+                (ok, result) = self._search_db.count(obj_type=obj_type, body=body, params=params)
+                return (ok, None, total)
+        else:
+            if obj_uuids or parent_uuids or back_ref_uuids or filters or not self._search_db.enabled(obj_type):
+                (ok, cassandra_result) = self._cassandra_db.object_list(
                                                                 obj_type, parent_uuids=parent_uuids,
                                                                 back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
                                                                 count=count, filters=filters)
-
-            return (ok, cassandra_result, len(cassandra_result))
-        else:
-            (ok, uuids, total) = self._search_db.dbe_list(obj_type=obj_type, params=params, body=body)
-            children_fq_names_uuids = []
-            for obj_uuid in uuids:
-                try:
-                    fq_name = self.uuid_to_fq_name(obj_uuid)
-                except cfgm_common.exceptions.NoIdError:
-                    continue
-                children_fq_names_uuids.append((fq_name, obj_uuid))
-            return (ok, children_fq_names_uuids, total)
+                return (ok, cassandra_result, len(cassandra_result))
+            else:
+                (ok, uuids, total) = self._search_db.dbe_list(obj_type=obj_type, params=params, body=body)
+                children_fq_names_uuids = []
+                for obj_uuid in uuids:
+                    try:
+                        fq_name = self.uuid_to_fq_name(obj_uuid)
+                    except cfgm_common.exceptions.NoIdError:
+                        continue
+                    children_fq_names_uuids.append((fq_name, obj_uuid))
+                return (ok, children_fq_names_uuids, total)
     # end dbe_list
 
     def dbe_only_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
@@ -2046,7 +2049,7 @@ class VncDbClient(object):
 
     # end dbe_release
 
-    
+
     def dbe_oper_publish_pending(self):
         return self._msgbus.dbe_oper_publish_pending()
 
@@ -2478,7 +2481,8 @@ class VncSearchDbClient(VncSearchItf):
     # count
 
     def search(self, obj_type=None, body=None, params=None):
-        obj_type = obj_type.replace('-', '_')
+        if obj_type is not None:
+            obj_type = obj_type.replace('-', '_')
         self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
         return self._es_client.search(index=self.index, doc_type=obj_type, body=body)
     # end search
@@ -2518,9 +2522,7 @@ class SearchUtil:
     def convert_to_es_query_dsl(self, params):
         body = {}
         if 'filter' in params:
-            body['query'] = {}
-            body['query']['filtered'] = {}
-            body['query']['filtered']['filter'] = self._parser_filter(params['filter'])
+            body['query'] = self._parser_filter(params['filter'])
         else:
             body['query'] = {'match_all': {}}
         return body
@@ -2541,6 +2543,11 @@ class SearchUtil:
                     json_obj.append({'regexp': {word[0] + '._raw': '.*' + word[2] + '.*'}})
                 else:
                     json_obj['regexp'] = {word[0] + '._raw': '.*' + word[2] + '.*'}
+            elif word[1] == 'match':
+                if (json_obj_type is list):
+                    json_obj.append({'match': {word[0]: word[2]}})
+                else:
+                    json_obj['match'] = {word[0]: word[2]}
             elif word[1] in ('>=', '>', '<', '<=', 'gte', 'gt', 'lt', 'lte'):
                 if word[1] == '>=':
                     op = 'gte'
@@ -2552,16 +2559,19 @@ class SearchUtil:
                     op = 'lte'
                 else:
                     op = word[1]
-
                 if (json_obj_type is list):
                     json_obj.append({'range': {word[0]: {op: word[2]}}})
                 else:
                     json_obj['range'] = {word[0]: {op: word[2]}}
+            elif word[1] in ('<>','!=','not'):
+                if (json_obj_type is list):
+                    json_obj.append({'bool':{'must_not':{'term':{word[0]:word[2]}}}})
+                else:
+                    json_obj['must_not']={'term':{word[0]:word[2]}}
         else:
             json_obj.append(word)
 
     # end _convert_expression
-
     @classmethod
     def _convert(self, words):
         if len(words) > 2:
@@ -2570,29 +2580,104 @@ class SearchUtil:
                 word = words[operator_index]
                 value1 = words[operator_index - 2]
                 value2 = words[operator_index - 1]
-                list = []
-                json_obj = {}
-                if word in ('&&', 'and'):
-                    json_obj['and'] = list
-                elif word in ('||', 'or'):
-                    json_obj['or'] = list
-                self._convert_expression(value1, list)
-                self._convert_expression(value2, list)
+                json_obj=None
+                if type(value1) is dict and type(value2) is dict:
+                    if word in ('||','or'):
+                        json_obj={}
+                        json_obj['should']=[{'bool':value1},{'bool':value2}]
+                    else:
+                        json_obj={}
+                        must=json_obj['must']=[]
+                        if 'should' in value1 and 'should' in value2:
+                            must.append({'bool':{'should':value1['should']}})
+                            must.append({'bool':{'should':value2['should']}})
+                        elif 'should' in value1:
+                            json_obj['should']=value1['should']
+                        elif 'should' in value2:
+                            json_obj['should']=value2['should']
+                        if 'must' in value1:
+                            must.extend(value1['must'])
+                        if 'must' in value2:
+                            must.extend(value2['must'])
+                elif type(value1) is dict and 'must' in value1 :
+                    if word in ('&&', 'and'):
+                        json_obj=value1
+                        self._convert_expression(value2, json_obj['must'])
+                    else:
+                        list=[]
+                        json_obj={}
+                        json_obj['should']=list
+                        must={}
+                        must['bool']=value1
+                        list.append(must)
+                        self._convert_expression(value2, list)
+                elif type(value1) is dict and 'should' in value1  :
+                    if  word in ('||', 'or'):
+                        json_obj=value1
+                        self._convert_expression(value2, json_obj['should'])
+                    else:
+                        list=[]
+                        json_obj={}
+                        json_obj['must']=list
+                        should={}
+                        should['bool']=value1
+                        list.append(should)
+                        self._convert_expression(value2, list)
+                elif type(value2) is dict and 'must' in value2:
+                    if word in ('&&', 'and'):
+                        json_obj=value2
+                        self._convert_expression(value1, json_obj['must'])
+                    else:
+                        list=[]
+                        json_obj={}
+                        json_obj['should']=list
+                        must={}
+                        must['bool']=value2
+                        list.append(must)
+                        self._convert_expression(value1, list)
+                elif type(value2) is dict and 'should' in value2 :
+                    if  word in ('||', 'or'):
+                        json_obj=value2
+                        self._convert_expression(value1, json_obj['should'])
+                    else:
+                        list=[]
+                        json_obj={}
+                        json_obj['must']=list
+                        should={}
+                        should['bool']=value2
+                        list.append(should)
+                        self._convert_expression(value1, list)
+                else:
+                    list = []
+                    json_obj = {}
+                    if word in ('&&', 'and'):
+                        json_obj['must'] = list
+                    elif word in ('||', 'or'):
+                        json_obj['should'] = list
+                    self._convert_expression(value1, list)
+                    self._convert_expression(value2, list)
+
                 del words[operator_index]
                 del words[operator_index - 1]
                 del words[operator_index - 2]
                 words.insert(operator_index - 2, json_obj)
-            return words[0]
+            query=None
+            if 'bool' not in words[0]:
+                query= {'bool':words[0]}
+            else:
+                query=words[0]
+            query['bool']['minimum_should_match']=1
+            return query
         else:
             query = {}
             self._convert_expression(words[0], query)
-            return query
+            return {'bool':{'must':[query]}}
 
     # end _convert
 
     @classmethod
     def _parser_filter(self, filter_str):
-        words = self._reorder(filter_str)
+        words = self._reorder(filter_str.strip())
         filter = self._convert(words)
         return filter
 
@@ -2604,7 +2689,7 @@ class SearchUtil:
         curr_index = 2
         while (found == False and curr_index < len(words) - 1):
             word = words[curr_index]
-            if type(word) is not tuple:
+            if type(word) in (str,unicode):
                 found = True
             else:
                 curr_index = curr_index + 1
@@ -2709,6 +2794,7 @@ class SearchUtil:
     @classmethod
     def _trim_left(self, str):
         offset = 0
+        str.strip()
         length = len(str)
         while offset < length and (str[offset] in (' ', '\t') or '\r\n'.find(str[offset]) >= 0):
             offset = offset + 1

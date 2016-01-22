@@ -981,9 +981,10 @@ class VncApiServer(object):
         else:
             filters = None
 
+        params=get_request().query
         return self._list_collection(resource_type,
             parent_uuids, back_ref_uuids, obj_uuids, is_count, is_detail,
-            filters, req_fields)
+            filters=filters, params=params, req_fields=req_fields)
     # end http_resource_list
 
     # internal_request_<oper> - handlers of internally generated requests
@@ -2133,32 +2134,41 @@ class VncApiServer(object):
 
     def list_bulk_collection_http_post(self):
         """ List collection when requested ids don't fit in query params."""
-
-        res_type = get_request().json.get('type') # e.g. virtual-network
-        if not res_type:
+        resource_type = get_request().json.get('type') # e.g. virtual-network
+        if not resource_type:
             raise cfgm_common.exceptions.HttpError(
                 400, "Bad Request, no 'type' in POST body")
 
-        obj_class = self.get_resource_class(res_type)
+        return self._http_post_filter(resource_type)
+    #end list_bulk_collection_http_post
+
+    def _http_post_filter(self, resource_type):
+        """ List collection when requested ids don't fit in query params."""
+
+        obj_class = self.get_resource_class(resource_type)
         if not obj_class:
             raise cfgm_common.exceptions.HttpError(400,
-                   "Bad Request, Unknown type %s in POST body" %(res_type))
+                   "Bad Request, Unknown type %s in POST body" %(resource_type))
 
+        body = get_request().json
         try:
             parent_ids = get_request().json['parent_id'].split(',')
             parent_uuids = [str(uuid.UUID(p_uuid)) for p_uuid in parent_ids]
+            del body['parent_id']
         except KeyError:
             parent_uuids = None
 
         try:
             back_ref_ids = get_request().json['back_ref_id'].split(',')
             back_ref_uuids = [str(uuid.UUID(b_uuid)) for b_uuid in back_ref_ids]
+            del body['back_ref_id']
         except KeyError:
             back_ref_uuids = None
 
         try:
             obj_ids = get_request().json['obj_uuids'].split(',')
             obj_uuids = [str(uuid.UUID(b_uuid)) for b_uuid in obj_ids]
+            del body['obj_uuids']
         except KeyError:
             obj_uuids = None
 
@@ -2182,10 +2192,21 @@ class VncApiServer(object):
         if req_fields:
             req_fields = req_fields.split(',')
 
-        return self._list_collection(res_type, parent_uuids, back_ref_uuids,
-                                     obj_uuids, is_count, is_detail, filters,
-                                     req_fields)
-    # end list_bulk_collection_http_post
+        if 'count' in body:
+            del body['count']
+        if 'detail' in body:
+            del body['detail']
+        if 'fields' in body:
+            del body['fields']
+        if 'filters' in body:
+            del body['filters']
+        if 'type' in body:
+            del body['type']
+
+        return self._list_collection(resource_type, parent_uuids, back_ref_uuids,
+                                     obj_uuids, is_count, is_detail, filters=filters,
+                                     body=body, req_fields=req_fields)
+    #end _http_post_filter
 
     # Private Methods
     def _parse_args(self, args_str):
@@ -2504,12 +2525,12 @@ class VncApiServer(object):
     def _list_collection(self, resource_type, parent_uuids=None,
                          back_ref_uuids=None, obj_uuids=None,
                          is_count=False, is_detail=False, filters=None,
-                         req_fields=None):
+                         req_fields=None, body=None, params=None):
         obj_type = resource_type.replace('-', '_') # e.g. virtual_network
 
         (ok, result, total) = self._db_conn.dbe_list(obj_type,
                              parent_uuids, back_ref_uuids, obj_uuids, is_count,
-                             filters)
+                             filters=filters, body=body, params=params)
         if not ok:
             self.config_object_error(None, None, '%ss' %(obj_type),
                                      'dbe_list', result)

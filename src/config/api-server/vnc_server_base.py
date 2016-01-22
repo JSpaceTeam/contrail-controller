@@ -330,40 +330,6 @@ class VncApiServerBase(VncApiServer):
         return rsp_body
     # end http_rpc_post
 
-    def _http_post_filter(self, resource_type):
-        db_conn = self._db_conn
-        if request.json is not None:
-            body = request.json
-        else:
-            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
-        (ok, result, total) = db_conn.dbe_list(resource_type, body=body)
-        if not ok:
-            self.config_object_error(None, None, resource_type, 'http_get_collection', result)
-            raise cfgm_common.exceptions.HttpError(404, 'invalid request, search body not found')
-        obj_type = resource_type.replace('-', '_')
-        obj_class = self.get_resource_class(obj_type)
-        fq_names_uuids = result
-        obj_dicts = []
-        obj_ids_list = [{'uuid': obj_uuid} for _, obj_uuid in fq_names_uuids]
-        obj_fields = [prop for prop in obj_class.prop_fields] + []
-        if 'fields' in request.query:
-            obj_fields.extend(request.query.fields.split(','))
-        (ok, result) = db_conn.dbe_read_multi(obj_type, obj_ids_list, obj_fields)
-
-        if not ok:
-            result = []
-        for obj_result in result:
-            obj_dict = {}
-            obj_dict['name'] = obj_result['fq_name'][-1]
-            obj_dict['href'] = self.generate_url(resource_type, obj_result['uuid'])
-            obj_dict.update(obj_result)
-            if (obj_dict['id_perms'].get('user_visible', True) or
-                    self.is_admin_request()):
-                obj_dicts.append(obj_dict)
-
-        return {'total': total, resource_type: obj_dicts}
-    #end _http_post_filter
-
     def _http_post_search(self, resource_type):
         db_conn = self._db_conn
         if request.json is not None:
