@@ -315,17 +315,20 @@ class VncApiServerBase(VncApiServer):
             rsp_body = self._extension_mgrs['rpcApi'].map_method('%s_execute' % method_name, obj_dict)
         except KeyError as e:
             ok = False
-            result = 'RPC not implemented'
+            result = HttpError(404, "RPC not available")
 
         except Exception as e:
             ok = False
-            result = str(e)
-
+            result = e
         if not ok:
             for fail_cleanup_callable, cleanup_args in cleanup_on_failure:
                 fail_cleanup_callable(*cleanup_args)
-            self.config_object_error(None, resource_type, '%s_execute' % resource_type, 'http_post', result)
-            bottle.abort(404, result)
+            self.config_object_error(None, resource_type, '%s_execute' % resource_type, 'http_post', str(result))
+            if isinstance(result, cfgm_common.exceptions.HttpError):
+                raise result
+            if hasattr(result, 'status_code') and hasattr(result, 'content'):
+                raise HttpError(getattr(result, 'status_code'), getattr(result, 'content'))
+            raise result
 
         return rsp_body
     # end http_rpc_post
