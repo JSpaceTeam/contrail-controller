@@ -226,7 +226,7 @@ class ZookeeperClient(object):
                  sleep_func=gevent.sleep, timeout_exception_cls=gevent.event.Timeout):
         # logging
         logger = logging.getLogger(module)
-        logger.setLevel(logging.DEBUG)
+        #logger.setLevel(logging.DEBUG)
         try:
             handler = logging.handlers.RotatingFileHandler(
                 LOG_DIR + module + '-zk.log', maxBytes=10*1024*1024, backupCount=5)
