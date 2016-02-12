@@ -241,3 +241,6 @@ class GeneratedsSuper(object):
     def populate_int(name):
         return 21
 
+    @staticmethod
+    def populate_short(name):
+        return 1
