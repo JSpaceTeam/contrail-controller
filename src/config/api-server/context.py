@@ -2,6 +2,7 @@ import gevent
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 import cfgm_common
 
+
 class ApiInternalRequest(object):
     def __init__(self, url, urlparts, environ, headers, json_as_dict, query):
         self.url = url
@@ -10,7 +11,9 @@ class ApiInternalRequest(object):
         self.headers = headers
         self.json = json_as_dict
         self.query = query
-    # end __init__
+        # end __init__
+
+
 # end class ApiInternalRequest
 
 class ApiContext(object):
@@ -39,6 +42,7 @@ class ApiContext(object):
         self.internal_req = internal_req
         self.proc_state = self.states['INIT']
         self.undo_callables_with_args = []
+
     # end __init__
 
     @property
@@ -46,21 +50,25 @@ class ApiContext(object):
         if self.internal_req:
             return self.internal_req
         return self.external_req
+
     # end request
 
     def set_state(self, state):
         # set to enumerated or if no mapping, user-passed state-str
         self.proc_state = self.states.get(state, state)
+
     # end state
 
     def get_state(self):
         # return enumerated or if no-mapping actual state val
         return self.states.get(self.proc_state, self.proc_state)
+
     # end get_state
 
     def push_undo(self, undo_callable, *args, **kwargs):
         self.undo_callables_with_args.append(
             (undo_callable, (args, kwargs)))
+
     # end push_undo
 
     def invoke_undo(self, failure_code, failure_msg, logger):
@@ -70,7 +78,9 @@ class ApiContext(object):
             except Exception as e:
                 err_msg = cfgm_common.utils.detailed_traceback()
                 logger(err_msg, level=SandeshLevel.SYS_ERR)
-    # end invoke_undo
+                # end invoke_undo
+
+
 # end class ApiContext
 
 
@@ -78,19 +88,20 @@ class ApiContext(object):
 def get_request():
     return gevent.getcurrent().api_context.request
 
+
 def get_context():
     return gevent.getcurrent().api_context
 
+
 def set_context(api_ctx):
     gevent.getcurrent().api_context = api_ctx
-
-
 
 
 class RequestContext(object):
     '''
      This hold request context that can be propgated to RPC calls
     '''
+
     def __init__(self, auth_token=None, username=None, password=None,
                  tenant=None, tenant_id=None, auth_url=None, roles=None, is_admin=None,
                  request_id=None, **kwargs):
@@ -127,11 +138,13 @@ class RequestContext(object):
                 'roles': self.roles,
                 'is_admin': self.is_admin,
                 'user': self.user,
-                'request_id': self.request_id}
+                'x_request_id': self.request_id}
 
     @classmethod
     def from_dict(cls, values):
         return cls(**values)
+
+
 # end RequestContext
 
 def create_request_context(context):
@@ -143,6 +156,7 @@ def create_request_context(context):
         auth_url = request.get_header('X-Auth-Url')
         tenant = request.get_header('X-Project-Name')
         domain = request.get_header('X-User-Domain-Name')
+        request_id = request.get_header('X-Request-Id')
         is_domain_scoped = False
         if request.get_header('X-Domain-Id') is not None:
             is_domain_scoped = True
@@ -159,14 +173,15 @@ def create_request_context(context):
             roles = roles.split(',')
 
         return RequestContext(auth_token=token,
-            tenant=tenant,
-            tenant_id=tenant_id,
-            domain=domain,
-            domain_id=domain_id,
-            auth_status=auth_status,
-            username=username,
-            auth_url=auth_url,
-            roles=roles,
-            is_domain_scoped=is_domain_scoped)
+                              tenant=tenant,
+                              tenant_id=tenant_id,
+                              domain=domain,
+                              domain_id=domain_id,
+                              auth_status=auth_status,
+                              username=username,
+                              auth_url=auth_url,
+                              roles=roles,
+                              is_domain_scoped=is_domain_scoped,
+                              request_id=request_id)
     return None
-# end create_request_context
+    # end create_request_context
