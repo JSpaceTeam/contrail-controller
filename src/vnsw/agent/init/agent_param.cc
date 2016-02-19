@@ -16,6 +16,7 @@
 #include <net/if_arp.h>
 #include <unistd.h>
 #include <iostream>
+#include <string>
 
 #include <boost/property_tree/ini_parser.hpp>
 #include <boost/algorithm/string.hpp>
@@ -393,11 +394,6 @@ void AgentParam::ParseDefaultSection() {
         flow_cache_timeout_ = Agent::kDefaultFlowCacheTimeout;
     }
 
-    if (!GetValueFromTree<uint16_t>(flow_thread_count_,
-                                    "DEFAULT.flow_thread_count")) {
-        flow_thread_count_ = Agent::kDefaultFlowThreadCount;
-    }
-   
     if (!GetValueFromTree<string>(log_level_, "DEFAULT.log_level")) {
         log_level_ = "SYS_DEBUG";
     }
@@ -489,6 +485,10 @@ void AgentParam::ParseTaskSection() {
     GetValueFromTree<uint32_t>(tbb_exec_delay_, "TASK.log_exec_threshold");
     GetValueFromTree<uint32_t>(tbb_schedule_delay_,
                                "TASK.log_schedule_threshold");
+    if (!GetValueFromTree<uint32_t>(tbb_keepawake_timeout_,
+                                    "TASK.tbb_keepawake_timeout")) {
+        tbb_keepawake_timeout_ = Agent::kDefaultTbbKeepawakeTimeout;
+    }
 }
 
 void AgentParam::ParseMetadataProxy() {
@@ -497,6 +497,11 @@ void AgentParam::ParseMetadataProxy() {
 }
 
 void AgentParam::ParseFlows() {
+    if (!GetValueFromTree<uint16_t>(flow_thread_count_,
+                                    "FLOWS.thread_count")) {
+        flow_thread_count_ = Agent::kDefaultFlowThreadCount;
+    }
+
     if (!GetValueFromTree<float>(max_vm_flows_, "FLOWS.max_vm_flows")) {
         max_vm_flows_ = (float) 100;
     }
@@ -575,6 +580,11 @@ void AgentParam::ParseNexthopServer() {
         ss << nexthop_server_endpoint_ << "." << getpid();
         nexthop_server_endpoint_ = ss.str();
     }
+}
+
+void AgentParam::ParseBgpAsAServicePortRange() {
+    GetValueFromTree<string>(bgp_as_a_service_port_range_,
+                             "SERVICES.bgp_as_a_service_port_range");
 }
 
 void AgentParam::ParseCollectorArguments
@@ -663,8 +673,6 @@ void AgentParam::ParseDefaultSectionArguments
 
     GetOptValue<uint16_t>(var_map, flow_cache_timeout_,
                           "DEFAULT.flow_cache_timeout");
-    GetOptValue<uint16_t>(var_map, flow_thread_count_,
-                          "DEFAULT.flow_thread_count");
     GetOptValue<string>(var_map, host_name_, "DEFAULT.hostname");
     GetOptValue<string>(var_map, agent_name_, "DEFAULT.agent_name");
     GetOptValue<uint16_t>(var_map, http_server_port_,
@@ -710,6 +718,8 @@ void AgentParam::ParseTaskSectionArguments
                           "TASK.log_exec_threshold");
     GetOptValue<uint32_t>(var_map, tbb_schedule_delay_,
                           "TASK.log_schedule_threshold");
+    GetOptValue<uint32_t>(var_map, tbb_keepawake_timeout_,
+                          "TASK.tbb_keepawake_timeout");
 }
 
 void AgentParam::ParseMetadataProxyArguments
@@ -720,7 +730,13 @@ void AgentParam::ParseMetadataProxyArguments
 
 void AgentParam::ParseFlowArguments
     (const boost::program_options::variables_map &var_map) {
-    GetOptValue<float>(var_map, max_vm_flows_, "FLOWS.max_vm_flows");
+    GetOptValue<uint16_t>(var_map, flow_thread_count_,
+                          "FLOWS.thread_count");
+    uint16_t val = 0;
+    if (GetOptValue<uint16_t>(var_map, val, "FLOWS.max_vm_flows")) {
+        max_vm_flows_ = (float)val;
+    }
+
     GetOptValue<uint16_t>(var_map, linklocal_system_flows_,
                           "FLOWS.max_system_linklocal_flows");
     GetOptValue<uint16_t>(var_map, linklocal_vm_flows_,
@@ -792,6 +808,12 @@ void AgentParam::ParsePlatformArguments
     }
 }
 
+void AgentParam::ParseBgpAsAServicePortRangeArguments
+    (const boost::program_options::variables_map &v) {
+    GetOptValue<string>(v, bgp_as_a_service_port_range_,
+                        "SERVICES.bgp_as_a_service_port_range");
+}
+
 // Initialize hypervisor mode based on system information
 // If "/proc/xen" exists it means we are running in Xen dom0
 void AgentParam::InitFromSystem() {
@@ -840,6 +862,7 @@ void AgentParam::InitFromConfig() {
     ParseAgentInfo();
     ParseNexthopServer();
     ParsePlatform();
+    ParseBgpAsAServicePortRange();
     cout << "Config file <" << config_file_ << "> parsing completed.\n";
     return;
 }
@@ -856,6 +879,7 @@ void AgentParam::InitFromArguments() {
     ParseHypervisorArguments(var_map_);
     ParseDefaultSectionArguments(var_map_);
     ParseTaskSectionArguments(var_map_);
+    ParseFlowArguments(var_map_);
     ParseMetadataProxyArguments(var_map_);
     ParseHeadlessModeArguments(var_map_);
     ParseDhcpRelayModeArguments(var_map_);
@@ -863,6 +887,7 @@ void AgentParam::InitFromArguments() {
     ParseAgentInfoArguments(var_map_);
     ParseNexthopServerArguments(var_map_);
     ParsePlatformArguments(var_map_);
+    ParseBgpAsAServicePortRangeArguments(var_map_);
     return;
 }
 
@@ -1085,6 +1110,7 @@ void AgentParam::LogConfig() const {
     LOG(DEBUG, "Service instance workers    : " << si_netns_workers_);
     LOG(DEBUG, "Service instance timeout    : " << si_netns_timeout_);
     LOG(DEBUG, "Service instance lb ssl     : " << si_lb_ssl_cert_path_);
+    LOG(DEBUG, "Bgp as a service port range : " << bgp_as_a_service_port_range_);
     if (hypervisor_mode_ == MODE_KVM) {
     LOG(DEBUG, "Hypervisor mode             : kvm");
         return;
@@ -1187,7 +1213,8 @@ AgentParam::AgentParam(bool enable_flow_options,
         subnet_hosts_resolvable_(true),
         tbb_thread_count_(Agent::kMaxTbbThreads),
         tbb_exec_delay_(0),
-        tbb_schedule_delay_(0) {
+        tbb_schedule_delay_(0),
+        tbb_keepawake_timeout_(Agent::kDefaultTbbKeepawakeTimeout) {
     // Set common command line arguments supported
     boost::program_options::options_description generic("Generic options");
     generic.add_options()
@@ -1207,9 +1234,6 @@ AgentParam::AgentParam(bool enable_flow_options,
         ("DEFAULT.flow_cache_timeout",
          opt::value<uint16_t>()->default_value(Agent::kDefaultFlowCacheTimeout),
          "Flow aging time in seconds")
-        ("DEFAULT.flow_thread_count",
-         opt::value<uint16_t>()->default_value(Agent::kDefaultFlowThreadCount),
-         "Number of threads for flow setup")
         ("DEFAULT.hostname", opt::value<string>(),
          "Hostname of compute-node")
         ("DEFAULT.headless_mode", opt::value<bool>(),
@@ -1290,8 +1314,11 @@ AgentParam::AgentParam(bool enable_flow_options,
     if (enable_flow_options_) {
         opt::options_description flow("Flow options");
         flow.add_options()
+            ("FLOWS.thread_count", opt::value<uint16_t>(),
+             "Number of threads for flow setup")
             ("FLOWS.max_vm_flows", opt::value<uint16_t>(),
-             "Maximum flows allowed per VM - given as \% of maximum system flows")
+             "Maximum flows allowed per VM - given as \% (in integer) of "
+             "maximum system flows")
             ("FLOWS.max_system_linklocal_flows", opt::value<uint16_t>(),
              "Maximum number of link-local flows allowed across all VMs")
             ("FLOWS.max_vm_linklocal_flows", opt::value<uint16_t>(),
@@ -1361,6 +1388,8 @@ AgentParam::AgentParam(bool enable_flow_options,
          "Log message if task takes more than threshold (msec) to execute")
         ("TASK.log_schedule_threshold", opt::value<uint32_t>(),
          "Log message if task takes more than threshold (msec) to schedule")
+        ("TASK.tbb_keepawake_timeout", opt::value<uint32_t>(),
+         "Timeout for the TBB keepawake timer")
         ;
     options_.add(tbb);
 }

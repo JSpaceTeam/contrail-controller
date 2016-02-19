@@ -13,6 +13,7 @@ class FlowKState : public Task {
     virtual void SendResponse(KFlowResp *resp) const;
     
     virtual bool Run();
+    std::string Description() const { return "FlowKState"; }
     void SetFlowData(std::vector<KFlowInfo> &list, const vr_flow_entry *k_flow,
                      int index) const;
 protected:
@@ -21,8 +22,10 @@ protected:
     uint32_t flow_iteration_key_;
 private:
     Agent *agent_;
-    void UpdateFlagStr(std::string &str, bool &set, unsigned sflag, 
+    void UpdateFlagStr(std::string &str, bool &set, bool tcp, unsigned sflag,
                        unsigned cflag) const;
     const std::string FlagToStr(unsigned int flag) const;
+    const std::string TcpFlagToStr(unsigned int flag) const;
+    const std::string DropCodeToStr(uint8_t drop_code) const;
 };
 #endif

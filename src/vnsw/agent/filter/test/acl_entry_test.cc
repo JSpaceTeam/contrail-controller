@@ -9,6 +9,7 @@
 #include "filter/acl_entry_spec.h"
 #include "filter/packet_header.h"
 #include "filter/traffic_action.h"
+#include "filter/acl.h"
 #include "oper/mirror_table.h"
 
 #include "net/address.h"
@@ -50,13 +51,14 @@ TEST_F(AclEntryTest, Basic) {
     packet1->dst_port = 99;
 
     AclEntry::ActionList al;
-    al = entry1->PacketMatch(*packet1);
+    FlowPolicyInfo info("");
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(0U, al.size());
 
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 10;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(1U, al.size());
     AclEntry::ActionList::iterator ial;
     ial = al.begin();
@@ -66,7 +68,7 @@ TEST_F(AclEntryTest, Basic) {
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 11;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
 
@@ -74,24 +76,77 @@ TEST_F(AclEntryTest, Basic) {
     packet1->protocol = 10;
     //Destination port would be ignored, since protocol is neither TCP or UDP
     packet1->dst_port = 101;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(1U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
 
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 9;
     packet1->dst_port = 101;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
 
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 9;
     packet1->dst_port = 100;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
 
+    delete packet1;
+    delete entry1;
+}
+
+TEST_F(AclEntryTest, Ipv6_address_match) {
+    boost::system::error_code ec;
+    AclEntrySpec ae_spec1;
+    ae_spec1.id = 1;
+    ae_spec1.BuildAddressInfo("fd11::3", 128, &ae_spec1.src_ip_list);
+    ae_spec1.src_addr_type = AddressMatch::IP_ADDR;
+    RangeSpec protocol;
+    protocol.min = 10;
+    protocol.max = 10;
+    ae_spec1.protocol.push_back(protocol);
+    RangeSpec port;
+    port.min = 10;
+    port.max = 100;
+    ae_spec1.dst_port.push_back(port);
+    ActionSpec action;
+    action.ta_type = TrafficAction::SIMPLE_ACTION;
+    action.simple_action = TrafficAction::PASS;
+    ae_spec1.action_l.push_back(action);
+
+    AclEntry *entry1 = new AclEntry();
+    entry1->PopulateAclEntry(ae_spec1);
+
+    PacketHeader *packet1 = new PacketHeader();
+    packet1->src_ip = Ip6Address::from_string("fd11::4", ec);
+    packet1->dst_ip = Ip6Address::from_string("fd11::10", ec);
+    packet1->protocol = 10;
+    packet1->dst_port = 99;
+
+    AclEntry::ActionList al;
+    FlowPolicyInfo info("");
+    al = entry1->PacketMatch(*packet1, &info);
+    //Verify that source address match fails when src address in the packet is
+    //different
+    EXPECT_EQ(0U, al.size());
+
+    packet1->src_ip = Ip6Address::from_string("fd11::3", ec);
+    packet1->protocol = 10;
+    packet1->dst_port = 99;
+    al = entry1->PacketMatch(*packet1, &info);
+
+    //Verify that source address match fails when src address in the packet is
+    //same
+    EXPECT_EQ(1U, al.size());
+    AclEntry::ActionList::iterator ial;
+    ial = al.begin();
+    EXPECT_EQ(SimpleAction::PASS,
+              static_cast<SimpleAction *>(*ial.operator->())->action());
+
+    //cleanup
     delete packet1;
     delete entry1;
 }
@@ -122,7 +177,8 @@ TEST_F(AclEntryTest, SubnetAddress) {
     packet1->dst_port = 99;
     entry1->PopulateAclEntry(ae_spec1);
     AclEntry::ActionList al;
-    al = entry1->PacketMatch(*packet1);
+    FlowPolicyInfo info("");
+    al = entry1->PacketMatch(*packet1, &info);
     AclEntry::ActionList::iterator ial;
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
@@ -132,7 +188,7 @@ TEST_F(AclEntryTest, SubnetAddress) {
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 10;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
     EXPECT_EQ(SimpleAction::PASS, static_cast<SimpleAction *>(*ial.operator->())->action());
@@ -141,7 +197,7 @@ TEST_F(AclEntryTest, SubnetAddress) {
     packet1->src_ip = Ip4Address(0x01010110);
     packet1->protocol = 10;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(1U, al.size());
     EXPECT_EQ(SimpleAction::PASS, static_cast<SimpleAction *>(*ial.operator->())->action());    
     //EXPECT_TRUE(entry1->Match(packet1));
@@ -149,7 +205,7 @@ TEST_F(AclEntryTest, SubnetAddress) {
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 11;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
 
@@ -157,21 +213,21 @@ TEST_F(AclEntryTest, SubnetAddress) {
     packet1->protocol = 10;
     //Destination port would be ignored, since protocol is neither TCP or UDP
     packet1->dst_port = 101;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(1U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
 
     packet1->src_ip = Ip4Address(0x01010103);
     packet1->protocol = 9;
     packet1->dst_port = 101;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
 
     packet1->src_ip = Ip4Address(0x01010104);
     packet1->protocol = 9;
     packet1->dst_port = 100;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
 
@@ -210,7 +266,8 @@ TEST_F(AclEntryTest, BasicAccept) {
     entry1->PopulateAclEntry(ae_spec1);
 
     AclEntry::ActionList al;
-    al = entry1->PacketMatch(*packet1);
+    FlowPolicyInfo info("");
+    al = entry1->PacketMatch(*packet1, &info);
     AclEntry::ActionList::iterator ial;
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
@@ -221,7 +278,7 @@ TEST_F(AclEntryTest, BasicAccept) {
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 10;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
     EXPECT_EQ(SimpleAction::PASS, static_cast<SimpleAction *>(*ial.operator->())->action());
@@ -232,7 +289,7 @@ TEST_F(AclEntryTest, BasicAccept) {
     packet1->src_ip = Ip4Address(0x01010110);
     packet1->protocol = 10;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
     EXPECT_EQ(SimpleAction::PASS, static_cast<SimpleAction *>(*ial.operator->())->action());
@@ -241,7 +298,7 @@ TEST_F(AclEntryTest, BasicAccept) {
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 11;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
@@ -250,7 +307,7 @@ TEST_F(AclEntryTest, BasicAccept) {
     packet1->protocol = 10;
     //Destination port would be ignored, since protocol is neither TCP or UDP
     packet1->dst_port = 101;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
@@ -258,7 +315,7 @@ TEST_F(AclEntryTest, BasicAccept) {
     packet1->src_ip = Ip4Address(0x01010103);
     packet1->protocol = 9;
     packet1->dst_port = 101;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
@@ -266,7 +323,7 @@ TEST_F(AclEntryTest, BasicAccept) {
     packet1->src_ip = Ip4Address(0x01010104);
     packet1->protocol = 9;
     packet1->dst_port = 100;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
@@ -306,7 +363,8 @@ TEST_F(AclEntryTest, BasicDeny) {
     packet1->dst_port = 99;
     entry1->PopulateAclEntry(ae_spec1);
     AclEntry::ActionList al;
-    al = entry1->PacketMatch(*packet1);
+    FlowPolicyInfo info("");
+    al = entry1->PacketMatch(*packet1, &info);
     AclEntry::ActionList::iterator ial;
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
@@ -318,7 +376,7 @@ TEST_F(AclEntryTest, BasicDeny) {
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 10;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
     EXPECT_EQ(SimpleAction::DENY, static_cast<SimpleAction *>(*ial.operator->())->action());
@@ -329,7 +387,7 @@ TEST_F(AclEntryTest, BasicDeny) {
     packet1->src_ip = Ip4Address(0x01010110);
     packet1->protocol = 10;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
     EXPECT_EQ(SimpleAction::DENY, static_cast<SimpleAction *>(*ial.operator->())->action());
@@ -340,7 +398,7 @@ TEST_F(AclEntryTest, BasicDeny) {
     packet1->src_ip = Ip4Address(0x01010101);
     packet1->protocol = 11;
     packet1->dst_port = 99;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
@@ -349,7 +407,7 @@ TEST_F(AclEntryTest, BasicDeny) {
     packet1->protocol = 10;
     //Port would be ignored since protocol is not TCP or UDP
     packet1->dst_port = 101;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
@@ -357,7 +415,7 @@ TEST_F(AclEntryTest, BasicDeny) {
     packet1->src_ip = Ip4Address(0x01010103);
     packet1->protocol = 9;
     packet1->dst_port = 101;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
@@ -365,7 +423,7 @@ TEST_F(AclEntryTest, BasicDeny) {
     packet1->src_ip = Ip4Address(0x01010104);
     packet1->protocol = 9;
     packet1->dst_port = 100;
-    al = entry1->PacketMatch(*packet1);
+    al = entry1->PacketMatch(*packet1, &info);
     ial = al.begin();
     EXPECT_EQ(0U, al.size());
     //EXPECT_FALSE(entry1->Match(packet1));
@@ -400,7 +458,8 @@ TEST_F(AclEntryTest, BasicIntrospecIpAclEntry) {
     packet1.dst_port = 99;
     entry1.PopulateAclEntry(ae_spec1);
     AclEntry::ActionList al;
-    al = entry1.PacketMatch(packet1);
+    FlowPolicyInfo info("");
+    al = entry1.PacketMatch(packet1, &info);
     AclEntry::ActionList::iterator ial;
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
@@ -444,16 +503,19 @@ TEST_F(AclEntryTest, BasicIntrospecNetworkAclEntry) {
 
     AclEntry entry1;
     PacketHeader packet1;
-    std::string src_network("network1");
-    std::string dst_network("network2");
-    packet1.src_policy_id = &src_network;
-    packet1.dst_policy_id = &dst_network;
+    VnListType src_networks;
+    src_networks.insert("network1");
+    VnListType dst_networks;
+    dst_networks.insert("network2");
+    packet1.src_policy_id = &src_networks;
+    packet1.dst_policy_id = &dst_networks;
     packet1.protocol = 10;
     packet1.dst_port = 99;
     packet1.src_port  = 101;
     entry1.PopulateAclEntry(ae_spec1);
     AclEntry::ActionList al;
-    al = entry1.PacketMatch(packet1);
+    FlowPolicyInfo info("");
+    al = entry1.PacketMatch(packet1, &info);
     AclEntry::ActionList::iterator ial;
     ial = al.begin();
     EXPECT_EQ(1U, al.size());
@@ -514,7 +576,8 @@ TEST_F(AclEntryTest, BasicIntrospecSgAclEntry) {
     packet1.src_port  = 101;
     entry1.PopulateAclEntry(ae_spec1);
     AclEntry::ActionList al;
-    al = entry1.PacketMatch(packet1);
+    FlowPolicyInfo info("");
+    al = entry1.PacketMatch(packet1, &info);
     AclEntry::ActionList::iterator ial;
     ial = al.begin();
     EXPECT_EQ(1U, al.size());

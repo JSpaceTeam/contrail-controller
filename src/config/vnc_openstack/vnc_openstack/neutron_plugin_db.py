@@ -20,7 +20,7 @@ from neutron.common import constants
 
 from cfgm_common import exceptions as vnc_exc
 from vnc_api.vnc_api import *
-from vnc_api.common import SG_NO_RULE_FQ_NAME, SG_NO_RULE_NAME
+from cfgm_common import SG_NO_RULE_FQ_NAME, SG_NO_RULE_NAME
 import vnc_openstack
 
 _DEFAULT_HEADERS = {
@@ -1812,34 +1812,20 @@ class DBInterface(object):
         if 'device_owner' in port_q:
             port_obj.set_virtual_machine_interface_device_owner(port_q.get('device_owner'))
 
-        host_id_modify = profile_modify = vnic_type_modify = False
-        bindings = port_obj.get_virtual_machine_interface_bindings()
-        kvps = []
-        if bindings:
-            kvps = bindings.get_key_value_pair()
-            for kvp in kvps:
-                if kvp.key == 'host_id':
-                    kvp.value = port_q.get('binding:host_id', kvp.value)
-                    host_id_modify = True
-
-                if kvp.key == 'profile':
-                    kvp.value = port_q.get('binding:profile', kvp.value)
-                    profile_modify = True
-
-                if kvp.key == 'vnic_type':
-                    kvp.value = port_q.get('binding:vnic_type', kvp.value)
-                    vnic_type_modify = True
-
-        if ('binding:vnic_type' in port_q) and (not vnic_type_modify):
-            kvps.append(KeyValuePair('vnic_type', port_q['binding:vnic_type']))
-
-        if ('binding:host_id' in port_q) and (not host_id_modify):
-            kvps.append(KeyValuePair('host_id', port_q['binding:host_id']))
-
-        if ('binding:profile' in port_q) and (not profile_modify):
-            kvps.append(KeyValuePair('profile', port_q['binding:profile']))
-
-        port_obj.set_virtual_machine_interface_bindings(KeyValuePairs(kvps))
+        # pick binding keys from neutron repr and persist as kvp elements.
+        # it is assumed allowing/denying oper*key is done at neutron-server.
+        if oper == CREATE:
+            vmi_binding_kvps = dict((k.replace('binding:',''), v)
+                for k,v in port_q.items() if k.startswith('binding:'))
+            port_obj.set_virtual_machine_interface_bindings(
+                KeyValuePairs([KeyValuePair(k,v)
+                              for k,v in vmi_binding_kvps.items()]))
+        elif oper == UPDATE:
+            vmi_binding_kvps = dict((k.replace('binding:',''), v)
+                for k,v in port_q.items() if k.startswith('binding:'))
+            for k,v in vmi_binding_kvps.items():
+                port_obj.add_virtual_machine_interface_bindings(
+                    KeyValuePair(key=k, value=v))
 
         if 'security_groups' in port_q:
             port_obj.set_security_group_list([])
@@ -2019,6 +2005,16 @@ class DBInterface(object):
             kvps = bindings.get_key_value_pair()
             for kvp in kvps:
                 port_q_dict['binding:'+kvp.key] = kvp.value
+
+        # 1. upgrade case, port created before bindings prop was
+        #    defined on vmi OR
+        # 2. defaults for keys needed by neutron
+        if 'binding:vif_details' not in port_q_dict:
+            port_q_dict['binding:vif_details'] = {'port_filter': True}
+        if 'binding:vif_type' not in port_q_dict:
+            port_q_dict['binding:vif_type'] = 'vrouter'
+        if 'binding:vnic_type' not in port_q_dict:
+            port_q_dict['binding:vnic_type'] = 'normal'
 
         dhcp_options_list = port_obj.get_virtual_machine_interface_dhcp_option_list()
         if dhcp_options_list and dhcp_options_list.dhcp_option:
@@ -2289,6 +2285,16 @@ class DBInterface(object):
                     self._vnc_lib.interface_route_table_delete(id=rt_ref['uuid'])
                 except (NoIdError, RefsExistError) as e:
                     pass
+
+    def _virtual_router_to_neutron(self, virtual_router):
+        # TODO(md): Only dpdk enabled flag supported currently. Add more.
+        dpdk_enabled = virtual_router.get_virtual_router_dpdk_enabled()
+
+        # The .get_<resource>() method of VirtualRouter object seems to return
+        # None in case a boolean is not set. Therefore the 'or False'
+        # expression below to assure True or False values
+        vr = {'dpdk_enabled': dpdk_enabled or False}
+        return vr
 
     def wait_for_api_server_connection(func):
         def wrapper(self, *args, **kwargs):
@@ -2787,7 +2793,7 @@ class DBInterface(object):
                                 continue
                             if not self._filters_is_present(filters,
                                                             'tenant_id',
-                                                            sn_proj_id):
+                                                            str(uuid.UUID(sn_proj_id))):
                                 continue
                             if not self._filters_is_present(filters,
                                                             'network_id',
@@ -4169,5 +4175,17 @@ class DBInterface(object):
 
         return ret_list
     #end svc_instance_list
+
+    @wait_for_api_server_connection
+    def virtual_router_read(self, vrouter_id):
+        try:
+            vrouter_obj = self._vnc_lib.virtual_router_read(fq_name=vrouter_id)
+        except NoIdError:
+            # TODO add VirtualRouter specific exception
+            self._raise_contrail_exception('VirtualRouterNotFound',
+                                           vrouter_id=vrouter_id)
+
+        return self._virtual_router_to_neutron(vrouter_obj)
+    #end virtual_router_read
 
 #end class DBInterface

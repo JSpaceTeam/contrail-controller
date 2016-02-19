@@ -161,12 +161,13 @@ void FlowTableKSyncEntry::SetPcapData(FlowEntryPtr fe,
     data.push_back((action) & 0xFF);
     
     data.push_back(FlowEntry::PCAP_SOURCE_VN);
-    data.push_back(fe->data().source_vn.size());
-    data.insert(data.end(), fe->data().source_vn.begin(), 
-                fe->data().source_vn.end());
+    data.push_back(fe->data().source_vn_match.size());
+    data.insert(data.end(), fe->data().source_vn_match.begin(),
+                fe->data().source_vn_match.end());
     data.push_back(FlowEntry::PCAP_DEST_VN);
-    data.push_back(fe->data().dest_vn.size());
-    data.insert(data.end(), fe->data().dest_vn.begin(), fe->data().dest_vn.end());
+    data.push_back(fe->data().dest_vn_match.size());
+    data.insert(data.end(), fe->data().dest_vn_match.begin(),
+                fe->data().dest_vn_match.end());
     data.push_back(FlowEntry::PCAP_TLV_END);
     data.push_back(0x0);
 }
@@ -299,7 +300,9 @@ int FlowTableKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
                     flags |= VR_FLOW_FLAG_DPAT;
                 }
             }
-            if (nat_flow->is_flags_set(FlowEntry::LinkLocalBindLocalSrcPort)) {
+            //TODO Seperate flags for BgpRouterService??
+            if (nat_flow->is_flags_set(FlowEntry::LinkLocalBindLocalSrcPort) ||
+                nat_flow->is_flags_set(FlowEntry::BgpRouterService)) {
                 flags |= VR_FLOW_FLAG_LINK_LOCAL;
             }
 
@@ -514,12 +517,30 @@ bool FlowTableKSyncEntry::IsLess(const KSyncEntry &rhs) const {
 void FlowTableKSyncEntry::ErrorHandler(int err, uint32_t seq_no) const {
     if (err == ENOSPC || err == EBADF) {
         KSYNC_ERROR(VRouterError, "VRouter operation failed. Error <", err,
-                    ":", strerror(err), ">. Object <", ToString(),
+                    ":", VrouterError(err), ">. Object <", ToString(),
                     ">. Operation <", OperationString(), ">. Message number :",
                     seq_no);
         return;
     }
+    if (err == EINVAL && IgnoreVrouterError()) {
+        return;
+    }
     KSyncEntry::ErrorHandler(err, seq_no);
+}
+
+bool FlowTableKSyncEntry::IgnoreVrouterError() const {
+    if (flow_entry_->deleted())
+        return true;
+
+    return false;
+}
+
+std::string FlowTableKSyncEntry::VrouterError(uint32_t error) const {
+    if (error == EBADF)
+        return "Flow Key Mismatch";
+    else if (error == ENOSPC)
+        return "Flow Table bucket full";
+    else return KSyncEntry::VrouterError(error);
 }
 
 FlowTableKSyncObject::FlowTableKSyncObject(KSync *ksync) : 
@@ -607,6 +628,8 @@ void KSyncFlowEntryFreeList::Grow() {
 }
 
 FlowTableKSyncEntry *KSyncFlowEntryFreeList::Allocate(const KSyncEntry *key) {
+    object_->flow_table()->ConcurrencyCheck();
+
     const FlowTableKSyncEntry *flow_key  =
         static_cast<const FlowTableKSyncEntry *>(key);
     FlowTableKSyncEntry *flow = NULL;
@@ -632,12 +655,24 @@ FlowTableKSyncEntry *KSyncFlowEntryFreeList::Allocate(const KSyncEntry *key) {
 }
 
 void KSyncFlowEntryFreeList::Free(FlowTableKSyncEntry *flow) {
+    object_->flow_table()->ConcurrencyCheck();
     total_free_++;
     flow->Reset();
     free_list_.push_back(*flow);
-    // TODO : Free entry if beyound threshold
+    // TODO : Free entry if beyond threshold
 }
 
 void FlowTableKSyncObject::GrowFreeList() {
     free_list_.Grow();
+}
+
+void FlowTableKSyncObject::NetlinkAck(KSyncEntry *entry,
+                                      KSyncEntry::KSyncEvent event) {
+    FlowProto *proto = ksync()->agent()->pkt()->get_flow_proto();
+    proto->KSyncEventRequest(entry, event);
+}
+
+void FlowTableKSyncObject::GenerateKSyncEvent(FlowTableKSyncEntry *entry,
+                                              KSyncEntry::KSyncEvent event) {
+    KSyncObject::NetlinkAck(entry, event);
 }

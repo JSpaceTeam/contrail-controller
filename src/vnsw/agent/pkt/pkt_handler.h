@@ -36,7 +36,6 @@
 #define IPv4_ALEN           4
 #define ARP_TX_BUFF_LEN     128
 #define IPC_HDR_LEN        (sizeof(struct ether_header) + sizeof(struct agent_hdr))
-#define IP_PROTOCOL        ETHERTYPE_IP
 #define VLAN_PROTOCOL      0x8100
 #define DEFAULT_IP_TTL     64
 #define DEFAULT_IP_ID      0
@@ -48,6 +47,7 @@ struct PktInfo;
 struct agent_hdr;
 class PacketBuffer;
 class Proto;
+class EcmpLoadBalance;
 typedef boost::shared_ptr<PktInfo> PktInfoPtr;
 
 struct InterTaskMsg {
@@ -133,16 +133,19 @@ struct AgentHdr {
 
     AgentHdr() :
         ifindex(-1), vrf(-1), cmd(-1), cmd_param(-1), cmd_param_1(-1),
+        cmd_param_2(0), cmd_param_3(0), cmd_param_4(0),
         nh(-1), flow_index(-1), mtu(0) {}
 
     AgentHdr(uint32_t ifindex_p, uint32_t vrf_p, uint16_t cmd_p) :
         ifindex(ifindex_p), vrf(vrf_p), cmd(cmd_p), cmd_param(-1),
-        cmd_param_1(-1), nh(-1), flow_index(-1), mtu(0) {}
+        cmd_param_1(-1), cmd_param_2(0), cmd_param_3(0), cmd_param_4(0),
+        nh(-1), flow_index(-1), mtu(0) {}
 
     AgentHdr(uint32_t ifindex_p, uint32_t vrf_p, uint16_t cmd_p,
              uint32_t param1, uint32_t param2) :
         ifindex(ifindex_p), vrf(vrf_p), cmd(cmd_p), cmd_param(param1),
-        cmd_param_1(param2), nh(-1), flow_index(-1), mtu(0) {}
+        cmd_param_1(param2), cmd_param_2(0), cmd_param_3(0), cmd_param_4(0),
+        nh(-1), flow_index(-1), mtu(0) {}
 
     ~AgentHdr() {}
 
@@ -152,6 +155,9 @@ struct AgentHdr {
     uint16_t            cmd;
     uint32_t            cmd_param;
     uint32_t            cmd_param_1;
+    uint32_t            cmd_param_2;
+    uint32_t            cmd_param_3;
+    uint32_t            cmd_param_4;
     uint32_t            nh;
     uint32_t            flow_index;
     uint16_t            mtu;
@@ -199,6 +205,7 @@ public:
         ICMPV6,
         DIAG,
         ICMP_ERROR,
+        ICMPV6_ERROR,
         RX_PACKET,
         MAX_MODULES
     };
@@ -345,7 +352,7 @@ struct PktInfo {
 
     const AgentHdr &GetAgentHdr() const;
     void UpdateHeaderPtr();
-    std::size_t hash() const;
+    std::size_t hash(const EcmpLoadBalance &ecmp_has_fields_to_use) const;
 
     PacketBuffer *packet_buffer() const { return packet_buffer_.get(); }
     PacketBufferPtr packet_buffer_ptr() const { return packet_buffer_; }

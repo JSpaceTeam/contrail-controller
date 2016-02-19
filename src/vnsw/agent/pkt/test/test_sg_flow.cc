@@ -260,7 +260,7 @@ static void AddSgEntry(const char *sg_name, const char *name, int id,
 
             strncpy(acl_name, name, max_len);
             strncat(acl_name, "ingress-access-control-list", max_len);
-            AddAclEntry(name, id, proto, action, INGRESS);
+            AddAclEntry(name, id+1, proto, action, INGRESS);
             AddLink("security-group", sg_name, "access-control-list", acl_name);
             break;
     }
@@ -292,7 +292,7 @@ static void AddSgEntry(const char *sg_name, const char *name, int id,
             AddLink("security-group", sg_name, "access-control-list", acl_name);
 
             strncpy(acl_name, name, max_len);
-            AddSgIdAcl(name, id, proto, sg_id, dest_sg_id, action, INGRESS);
+            AddSgIdAcl(name, id+1, proto, sg_id, dest_sg_id, action, INGRESS);
             strncat(acl_name, "ingress-access-control-list", max_len);
             AddLink("security-group", sg_name, "access-control-list", acl_name);
             break;
@@ -554,9 +554,11 @@ TEST_F(SgTest, Fwd_Sg_Change_2) {
     Ip4Address vm_ip = Ip4Address::from_string("1.1.1.1");
     const VmInterface *vm_intf = static_cast<const VmInterface *>
         (VmPortGet(1));
+    VnListType vn_list;
+    vn_list.insert("vn1");
     Agent::GetInstance()->fabric_inet4_unicast_table()->
         AddLocalVmRouteReq(bgp_peer_, "vrf1", vm_ip, 32,
-                vm_intf->GetUuid(), "vn1", vm_intf->label(),
+                vm_intf->GetUuid(), vn_list, vm_intf->label(),
                 sg_list, CommunityList(), false, PathPreference(), Ip4Address(0));
     client->WaitForIdle();
 
@@ -573,7 +575,7 @@ TEST_F(SgTest, Fwd_Sg_Change_2) {
     client->WaitForIdle();
     Agent::GetInstance()->fabric_inet4_unicast_table()->
         AddLocalVmRouteReq(bgp_peer_, "vrf1", vm_ip, 32,
-                vm_intf->GetUuid(), "vn1", vm_intf->label(),
+                vm_intf->GetUuid(), vn_list, vm_intf->label(),
                 SecurityGroupList(), CommunityList(), false, PathPreference(),
                 Ip4Address(0));
     client->WaitForIdle();

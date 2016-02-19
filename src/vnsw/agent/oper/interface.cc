@@ -295,9 +295,10 @@ bool InterfaceTable::L2VmInterfaceWalk(DBTablePartBase *partition,
         return true;
 
     VmInterfaceGlobalVrouterData data(vn->bridging(),
-                                      vn->layer3_forwarding(),
-                                      vn->GetVxLanId());
-    return vm_intf->Resync(this, &data);
+                                 vn->layer3_forwarding(),
+                                 vn->GetVxLanId());
+    vm_intf->Resync(this, &data);
+    return true;
 }
 
 void InterfaceTable::VmInterfaceWalkDone(DBTableBase *partition) {
@@ -324,10 +325,10 @@ Interface::Interface(Type type, const uuid &uuid, const string &name,
     type_(type), uuid_(uuid), name_(name),
     vrf_(vrf, this), label_(MplsTable::kInvalidLabel),
     l2_label_(MplsTable::kInvalidLabel), ipv4_active_(true),
-    ipv6_active_(false), l2_active_(true), id_(kInvalidIndex),
-    dhcp_enabled_(true), dns_enabled_(true), mac_(), os_index_(kInvalidIndex),
-    os_oper_state_(true), admin_state_(true), test_oper_state_(true),
-    transport_(TRANSPORT_INVALID) {
+    ipv6_active_(false), is_hc_active_(true), metadata_ip_active_(true),
+    l2_active_(true), id_(kInvalidIndex), dhcp_enabled_(true),
+    dns_enabled_(true), mac_(), os_index_(kInvalidIndex), os_oper_state_(true),
+    admin_state_(true), test_oper_state_(true), transport_(TRANSPORT_INVALID) {
 }
 
 Interface::~Interface() {
@@ -646,6 +647,8 @@ static string VmiTypeToString(VmInterface::VmiType type) {
         return "Baremetal";
     } else if (type == VmInterface::GATEWAY) {
         return "Gateway";
+    } else if (type == VmInterface::SRIOV) {
+        return "Sriov";
     }
     return "Invalid";
 }
@@ -670,6 +673,18 @@ void Interface::SetItfSandeshData(ItfSandeshData &data) const {
         data.set_ipv4_active("Active");
     } else {
         data.set_ipv4_active("Inactive");
+    }
+
+    if (is_hc_active_) {
+        data.set_health_check_active("Active");
+    } else {
+        data.set_health_check_active("Inactive");
+    }
+
+    if (metadata_ip_active_) {
+        data.set_metadata_ip_active("Active");
+    } else {
+        data.set_metadata_ip_active("Inactive");
     }
 
     if (ipv6_active_) {
@@ -896,6 +911,7 @@ void Interface::SetItfSandeshData(ItfSandeshData &data) const {
             entry.set_vrf_name(rt.vrf_);
             entry.set_ip_addr(rt.addr_.to_string());
             entry.set_prefix(rt.plen_);
+            entry.set_communities(rt.communities_);
             static_rt_it++;
             static_route_list.push_back(entry);
         }
@@ -937,6 +953,17 @@ void Interface::SetItfSandeshData(ItfSandeshData &data) const {
             fixed_ip6_list.push_back(rt.ip_.to_string());
         }
         data.set_fixed_ip6_list(fixed_ip6_list);
+
+        std::vector<std::string> fat_flow_list;
+        VmInterface::FatFlowEntrySet::iterator fat_flow_it =
+            vintf->fat_flow_list().list_.begin();
+        while (fat_flow_it != vintf->fat_flow_list().list_.end()) {
+            ostringstream str;
+            str << (int)fat_flow_it->protocol << ":" << (int)fat_flow_it->port<<"";
+            fat_flow_list.push_back(str.str());
+            fat_flow_it++;
+        }
+        data.set_fat_flow_list(fat_flow_list);
 
         if (vintf->fabric_port()) {
             data.set_fabric_port("FabricPort");

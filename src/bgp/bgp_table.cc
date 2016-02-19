@@ -9,7 +9,10 @@
 #include "base/task_annotations.h"
 #include "bgp/bgp_log.h"
 #include "bgp/bgp_ribout_updates.h"
+#include "bgp/bgp_route.h"
+#include "bgp/bgp_server.h"
 #include "bgp/bgp_update_queue.h"
+#include "bgp/routing-instance/iroute_aggregator.h"
 #include "bgp/routing-instance/path_resolver.h"
 #include "bgp/routing-instance/routing_instance.h"
 #include "bgp/routing-instance/rtarget_group_mgr.h"
@@ -73,6 +76,9 @@ void BgpTable::set_routing_instance(RoutingInstance *rtinstance) {
     deleter_.reset(new DeleteActor(this));
     instance_delete_ref_.Reset(rtinstance->deleter());
     path_resolver_ = CreatePathResolver();
+    if (IsRouteAggregationSupported())
+        rtinstance->route_aggregator(family())->Initialize();
+
 }
 
 BgpServer *BgpTable::server() {
@@ -128,6 +134,10 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
 
     // Don't advertise infeasible paths.
     if (!path->IsFeasible())
+        return NULL;
+
+    // Check whether the route is contributing route
+    if (IsRouteAggregationSupported() && IsContributingRoute(route))
         return NULL;
 
     // Needs to be outside the if block so it's not destroyed prematurely.
@@ -190,7 +200,7 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
             // Don't advertise any routes from non-master instances.
             // The ribout can only be for bgpaas-clients since that's
             // the only case with bgp peers in non-master instance.
-            if (!rtinstance_->IsDefaultRoutingInstance())
+            if (!rtinstance_->IsMasterRoutingInstance())
                 return NULL;
 
             // Sender side AS path loop check.
@@ -297,8 +307,12 @@ void BgpTable::InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
             new_path->SetStale();
         }
 
-        if (new_path->NeedsResolution())
-            path_resolver_->StartPathResolution(root->index(), new_path, rt);
+        if (new_path->NeedsResolution()) {
+            Address::Family family = new_path->GetAttr()->nexthop_family();
+            BgpTable *table = rtinstance_->GetTable(family);
+            path_resolver_->StartPathResolution(root->index(), new_path, rt,
+                table);
+        }
         rt->InsertPath(new_path);
         root->Notify(rt);
         break;
@@ -351,12 +365,19 @@ void BgpTable::Input(DBTablePartition *root, DBClient *client,
 
     // Create rt if it is not already there for adds/updates.
     if (!rt) {
-        if (req->oper == DBRequest::DB_ENTRY_DELETE) return;
+        if ((req->oper == DBRequest::DB_ENTRY_DELETE) ||
+            (req->oper == DBRequest::DB_ENTRY_NOTIFY))
+            return;
 
         rt = static_cast<BgpRoute *>(Add(req));
         static_cast<DBTablePartition *>(root)->Add(rt);
         BGP_LOG_ROUTE(this, const_cast<IPeer *>(peer), rt,
                       "Insert new BGP path");
+    }
+
+    if (req->oper == DBRequest::DB_ENTRY_NOTIFY) {
+        root->Notify(rt);
+        return;
     }
 
     // Use a map to mark and sweep deleted paths, update the rest.
@@ -526,4 +547,14 @@ void BgpTable::UpdatePathCount(const BgpPath *path, int count) {
     if (!path->IsFeasible()) {
         infeasible_path_count_ += count;
     }
+}
+
+// Check whether the route is aggregate route
+bool BgpTable::IsAggregateRoute(const BgpRoute *route) const {
+    return routing_instance()->IsAggregateRoute(this, route);
+}
+
+// Check whether the route is contributing route to aggregate route
+bool BgpTable::IsContributingRoute(const BgpRoute *route) const {
+    return routing_instance()->IsContributingRoute(this, route);
 }

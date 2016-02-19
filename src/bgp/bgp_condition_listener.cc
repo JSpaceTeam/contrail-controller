@@ -4,10 +4,16 @@
 
 #include "bgp/bgp_condition_listener.h"
 
+#include <boost/bind.hpp>
 
 #include <utility>
 
 #include "base/task_annotations.h"
+#include "base/task_trigger.h"
+#include "bgp/bgp_route.h"
+#include "bgp/bgp_server.h"
+#include "bgp/bgp_table.h"
+#include "db/db_table_partition.h"
 
 using std::make_pair;
 using std::map;
@@ -350,7 +356,8 @@ bool BgpConditionListener::BgpRouteNotify(BgpServer *server,
                                           DBEntryBase *entry) {
     BgpTable *bgptable = static_cast<BgpTable *>(root->parent());
     BgpRoute *rt = static_cast<BgpRoute *> (entry);
-    bool del_rt = rt->IsDeleted();
+    // Either the route is deleted or no valid path exists
+    bool del_rt = !rt->IsUsable();
 
     TableMap::iterator loc = map_.find(bgptable);
     assert(loc != map_.end());
@@ -433,6 +440,14 @@ void BgpConditionListener::UnregisterMatchCondition(BgpTable *bgptable,
         map_.erase(bgptable);
         delete ts;
     }
+}
+
+void BgpConditionListener::DisableTableWalkProcessing() {
+    walk_trigger_->set_disable();
+}
+
+void BgpConditionListener::EnableTableWalkProcessing() {
+    walk_trigger_->set_enable();
 }
 
 ConditionMatchTableState::ConditionMatchTableState(BgpTable *table,

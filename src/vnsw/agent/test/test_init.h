@@ -52,6 +52,7 @@
 #include <oper/route_common.h>
 #include <oper/vrf_assign.h>
 #include <oper/sg.h>
+#include <oper/ecmp_load_balance.h>
 #include <uve/stats_collector.h>
 #include <uve/agent_uve.h>
 #include <vrouter/flow_stats/flow_stats_collector.h>
@@ -132,6 +133,7 @@ public:
         Agent::GetInstance()->pkt()->get_flow_proto()->FlushFlows();
         return true;
     }
+    std::string Description() const { return "FlowFlush"; }
 };
 
 class FlowAge : public Task {
@@ -143,6 +145,7 @@ public:
             default_flow_stats_collector()->Run();
         return true;
     }
+    std::string Description() const { return "FlowAge"; }
 };
 
 struct IpamInfo {

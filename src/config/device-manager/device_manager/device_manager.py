@@ -10,7 +10,6 @@ This file contains implementation of managing physical router configuration
 from cfgm_common.zkclient import ZookeeperClient
 from gevent import monkey
 monkey.patch_all()
-from cfgm_common.vnc_cassandra import VncCassandraClient
 from cfgm_common.vnc_kombu import VncKombuClient
 import cgitb
 import sys
@@ -25,24 +24,24 @@ from pysandesh.sandesh_base import *
 from pysandesh.sandesh_logger import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from cfgm_common.uve.virtual_network.ttypes import *
-from sandesh_common.vns.ttypes import Module, NodeType
+from sandesh_common.vns.ttypes import Module
 from sandesh_common.vns.constants import ModuleNames, Module2NodeType, \
     NodeTypeNames, INSTANCE_ID_DEFAULT
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.process_info.ttypes import ConnectionType as ConnType
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
 import discoveryclient.client as client
-from vnc_api.common.exceptions import ResourceExhaustionError
+from cfgm_common.exceptions import ResourceExhaustionError
 from vnc_api.vnc_api import VncApi
 from cfgm_common.uve.cfgm_cpuinfo.ttypes import NodeStatusUVE, \
     NodeStatus
 from db import DBBaseDM, BgpRouterDM, PhysicalRouterDM, PhysicalInterfaceDM,\
     ServiceInstanceDM, LogicalInterfaceDM, VirtualMachineInterfaceDM, \
     VirtualNetworkDM, RoutingInstanceDM, GlobalSystemConfigDM, \
-    GlobalVRouterConfigDM, FloatingIpDM, InstanceIpDM, DMCassandraDB
+    GlobalVRouterConfigDM, FloatingIpDM, InstanceIpDM, DMCassandraDB, PortTupleDM
 from physical_router_config import PushConfigState
 from cfgm_common.dependency_tracker import DependencyTracker
-from sandesh.dm_introspect import ttypes as sandesh
+from cfgm_common.utils import cgitb_hook
 
 
 class DeviceManager(object):
@@ -90,17 +89,22 @@ class DeviceManager(object):
                      'virtual_network',
                      'floating_ip',
                      'instance_ip',
-                     'service_instance'],
+                     'port_tuple'],
             'logical_interface': ['virtual_network'],
             'virtual_network': ['logical_interface'],
             'floating_ip': ['virtual_network'],
             'instance_ip': ['virtual_network'],
-            'routing_instance': ['physical_interface'],
-            'service_instance': ['physical_interface']
+            'routing_instance': ['port_tuple','physical_interface'],
+            'port_tuple': ['physical_interface']
         },
         'service_instance': {
-            'self': ['virtual_machine_interface'],
-            'virtual_machine_interface': []
+            'self': ['port_tuple'],
+            'port_tuple':[],
+        },
+        'port_tuple':{
+            'self':['virtual_machine_interface','service_instance'],
+            'service_instance':['virtual_machine_interface'],
+            'virtual_machine_interface':['service_instance']
         },
         'virtual_network': {
             'self': ['physical_router',
@@ -230,6 +234,9 @@ class DeviceManager(object):
         pr_uuid_set = set([pr_obj['uuid'] for pr_obj in pr_obj_list])
         self._cassandra.handle_pr_deletes(pr_uuid_set)
 
+        for obj in PortTupleDM.list_obj():
+            PortTupleDM.locate(obj['uuid'],obj)
+
         for obj in pr_obj_list:
             pr = PhysicalRouterDM.locate(obj['uuid'], obj)
             li_set = pr.logical_interfaces
@@ -343,7 +350,7 @@ class DeviceManager(object):
 
         except Exception:
             string_buf = cStringIO.StringIO()
-            cgitb.Hook(file=string_buf, format="text").handle(sys.exc_info())
+            cgitb_hook(file=string_buf, format="text")
             self.config_log(string_buf.getvalue(), level=SandeshLevel.SYS_ERR)
 
         if not dependency_tracker:

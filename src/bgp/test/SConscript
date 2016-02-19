@@ -185,6 +185,14 @@ bgp_ip_test = env.UnitTest('bgp_ip_test',
                            ['bgp_ip_test.cc'])
 env.Alias('src/bgp:bgp_ip_test', bgp_ip_test)
 
+bgp_ip_test1 = env.UnitTest('bgp_ip_test1',
+                            ['bgp_ip_test1.cc'])
+env.Alias('src/bgp:bgp_ip_test1', bgp_ip_test1)
+
+bgp_ip_test2 = env.UnitTest('bgp_ip_test2',
+                            ['bgp_ip_test2.cc'])
+env.Alias('src/bgp:bgp_ip_test2', bgp_ip_test2)
+
 bgp_msg_builder_test = env.UnitTest('bgp_msg_builder_test',
                                    ['bgp_msg_builder_test.cc'])
 env.Alias('src/bgp:bgp_msg_builder_test', bgp_msg_builder_test)
@@ -325,6 +333,14 @@ path_resolver_test = env.UnitTest('path_resolver_test',
                                   ['path_resolver_test.cc'])
 env.Alias('src/bgp:path_resolver_test', path_resolver_test)
 
+path_resolver_test1 = env.UnitTest('path_resolver_test1',
+                                   ['path_resolver_test1.cc'])
+env.Alias('src/bgp:path_resolver_test1', path_resolver_test1)
+
+path_resolver_test2 = env.UnitTest('path_resolver_test2',
+                                   ['path_resolver_test2.cc'])
+env.Alias('src/bgp:path_resolver_test2', path_resolver_test2)
+
 ribout_attributes_test = env.UnitTest('ribout_attributes_test',
                               ['ribout_attributes_test.cc'])
 env.Alias('src/bgp:ribout_attributes_test', ribout_attributes_test)
@@ -349,9 +365,9 @@ routing_policy_test = env.UnitTest('routing_policy_test',
                               ['routing_policy_test.cc'])
 env.Alias('src/bgp:routing_policy_test', routing_policy_test)
 
-route_aggregation_test = env.UnitTest('route_aggregation_test',
-                              ['route_aggregation_test.cc'])
-env.Alias('src/bgp:route_aggregation_test', route_aggregation_test)
+route_aggregator_test = env.UnitTest('route_aggregator_test',
+                                     ['route_aggregator_test.cc'])
+env.Alias('src/bgp:route_aggregator_test', route_aggregator_test)
 
 rt_network_attr_test = env.UnitTest('rt_network_attr_test',
                                     ['rt_network_attr_test.cc'])
@@ -520,7 +536,8 @@ test_suite = [
     bgp_export_rstate_test,
     bgp_export_rtupdate_test,
     bgp_export_uplist_test,
-    bgp_ip_test,
+    bgp_ip_test1,
+    bgp_ip_test2,
     bgp_msg_builder_test,
     bgp_multicast_test,
     bgp_peer_close_test,
@@ -555,8 +572,10 @@ test_suite = [
     bgp_xmpp_rtarget_test,
     bgp_xmpp_test,
     bgp_xmpp_wready_test,
+    path_resolver_test1,
+    path_resolver_test2,
     ribout_attributes_test,
-    route_aggregation_test,
+    route_aggregator_test,
     routepath_replicator_random_test,
     routepath_replicator_test,
     routing_instance_mgr_test,

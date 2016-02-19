@@ -5,6 +5,7 @@
 #include "base/os.h"
 #include "test/test_cmn_util.h"
 #include "ksync/ksync_sock_user.h"
+#include "oper/ecmp_load_balance.h"
 
 #define MAX_VNET 4
 
@@ -124,11 +125,13 @@ public:
     void CreateLocalRoute(const char *vrf, const char *ip,
                           VmInterface *intf, int label) {
         Ip4Address addr = Ip4Address::from_string(ip);
+        VnListType vn_list;
+        vn_list.insert(intf->vn()->GetName());
         Agent::GetInstance()->fabric_inet4_unicast_table()->
             AddLocalVmRouteReq(NULL, vrf, addr, 32, intf->GetUuid(),
-                               intf->vn()->GetName(), label,
+                               vn_list, label,
                                SecurityGroupList(), CommunityList(), false, PathPreference(),
-                               Ip4Address(0));
+                               Ip4Address(0), EcmpLoadBalance());
         client->WaitForIdle();
         EXPECT_TRUE(RouteFind(vrf, addr, 32));
     }
@@ -400,7 +403,7 @@ protected:
 
 class SetupTask : public Task {
     public:
-        SetupTask(FlowTableTest *test) : Task((TaskScheduler::GetInstance()->GetTaskId(kTaskFlowEvent)), -1), test_(test) {
+        SetupTask(FlowTableTest *test) : Task((TaskScheduler::GetInstance()->GetTaskId(kTaskFlowEvent)), 0), test_(test) {
         }
         virtual bool Run() {
             FlowProto *proto = test_->get_flow_proto();
@@ -434,6 +437,7 @@ class SetupTask : public Task {
             FlowAdd(test_->flow2, test_->flow2_r);
             return true;
         }
+        std::string Description() const { return "SetupTask"; }
     private:
         FlowTableTest *test_;
 };

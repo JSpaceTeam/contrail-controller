@@ -49,7 +49,6 @@
 class FlowStatsCollector;
 class PktSandeshFlow;
 class FetchFlowRecord;
-struct VmFlowInfo;
 class FlowEntry;
 class FlowTable;
 class FlowTableKSyncEntry;
@@ -133,8 +132,6 @@ public:
 
     typedef std::map<FlowKey, FlowEntry *, Inet4FlowKeyCmp> FlowEntryMap;
     typedef std::pair<FlowKey, FlowEntry *> FlowEntryMapPair;
-    typedef std::map<const VmEntry *, VmFlowInfo *> VmFlowTree;
-    typedef std::pair<const VmEntry *, VmFlowInfo *> VmFlowPair;
     typedef boost::function<bool(FlowEntry *flow)> FlowEntryCb;
     typedef std::vector<FlowEntryPtr> FlowIndexTree;
 
@@ -174,15 +171,10 @@ public:
     bool ValidFlowMove(const FlowEntry *new_flow,
                        const FlowEntry *old_flow) const;
 
-    // VM/VN flow info routines
-    uint32_t VmFlowCount(const VmEntry *vm);
-    uint32_t VmLinkLocalFlowCount(const VmEntry *vm);
-
     // Accessor routines
     Agent *agent() const { return agent_; }
     uint16_t table_index() const { return table_index_; }
     size_t Size() { return flow_entry_map_.size(); }
-    uint32_t linklocal_flow_count() const { return linklocal_flow_count_; }
     FlowTable::FlowEntryMap::iterator begin() {
         return flow_entry_map_.begin();
     }
@@ -207,6 +199,7 @@ public:
    
     void RevaluateFlow(FlowEntry *flow);
     void DeleteMessage(FlowEntry *flow);
+    void EvictFlow(FlowEntry *flow);
 
     void RevaluateInterface(FlowEntry *flow);
     void RevaluateVn(FlowEntry *flow);
@@ -239,6 +232,10 @@ public:
     void GrowFreeList();
     FlowEntryFreeList *free_list() { return &free_list_; }
 
+    // Concurrency check to ensure all flow-table and free-list manipulations
+    // are done from FlowEvent task context only
+    void ConcurrencyCheck();
+
     friend class FlowStatsCollector;
     friend class PktSandeshFlow;
     friend class PktSandeshFlowStats;
@@ -246,18 +243,13 @@ public:
     friend class PktFlowInfo;
     friend void intrusive_ptr_release(FlowEntry *fe);
 private:
+    bool IsEvictedFlow(const FlowKey &key);
 
     void DeleteInternal(FlowEntryMap::iterator &it, uint64_t t);
     void ResyncAFlow(FlowEntry *fe);
     void DeleteFlowInfo(FlowEntry *fe);
-    void DeleteVmFlowInfo(FlowEntry *fe);
-    void DeleteVmFlowInfo(FlowEntry *fe, const VmEntry *vm);
-    void DeleteVmFlows(const VmEntry *vm);
 
     void AddFlowInfo(FlowEntry *fe);
-    void AddVmFlowInfo(FlowEntry *fe);
-    void AddVmFlowInfo(FlowEntry *fe, const VmEntry *vm);
-
     void UpdateReverseFlow(FlowEntry *flow, FlowEntry *rflow);
 
     void AddInternal(FlowEntry *flow, FlowEntry *new_flow, FlowEntry *rflow,
@@ -271,13 +263,12 @@ private:
     FlowTableKSyncObject *ksync_object_;
     FlowEntryMap flow_entry_map_;
 
-    VmFlowTree vm_flow_tree_;
-    uint32_t linklocal_flow_count_;  // total linklocal flows in the agent
     FlowIndexTree flow_index_tree_;
     // maintain the linklocal flow info against allocated fd, debug purpose only
     LinkLocalFlowInfoMap linklocal_flow_info_map_;
     FlowEntryFreeList free_list_;
     tbb::mutex mutex_;
+    int flow_task_id_;
     DISALLOW_COPY_AND_ASSIGN(FlowTable);
 };
 
@@ -291,15 +282,6 @@ struct FlowEntryCmp {
 };
 
 typedef std::set<FlowEntryPtr, FlowEntryCmp> FlowEntryTree;
-struct VmFlowInfo {
-    VmFlowInfo() : linklocal_flow_count() {}
-    ~VmFlowInfo() {}
-
-    VmEntryConstRef vm_entry;
-    FlowEntryTree fet;
-    uint32_t linklocal_flow_count;
-};
-
 extern SandeshTraceBufferPtr FlowTraceBuf;
 extern void SetActionStr(const FlowAction &, std::vector<ActionStr> &);
 

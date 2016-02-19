@@ -485,8 +485,21 @@ int InterfaceKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
         return 0;
     }
 
+    // No need to add VLAN sub-interface if there is no parent
+    if (vmi_device_type_ == VmInterface::VM_VLAN_ON_VMI && !parent_.get()) {
+        return 0;
+    }
+
     uint32_t flags = 0;
     encoder.set_h_op(op);
+    if (op == sandesh_op::DELETE) {
+        encoder.set_vifr_idx(interface_id_);
+        int error = 0;
+        encode_len = encoder.WriteBinary((uint8_t *)buf, buf_len, &error);
+        assert(error == 0);
+        assert(encode_len <= buf_len);
+        return encode_len;
+    }
 
     switch (type_) {
     case Interface::VM_INTERFACE: {
@@ -534,6 +547,16 @@ int InterfaceKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
             encoder.set_vifr_src_mac(std::vector<int8_t>
                                      ((const int8_t *)smac(),
                                       (const int8_t *)smac() + smac().size()));
+        }
+
+        if (fat_flow_list_.list_.size() != 0) {
+            std::vector<int32_t> fat_flow_list;
+            for (VmInterface::FatFlowEntrySet::const_iterator it =
+                 fat_flow_list_.list_.begin(); it != fat_flow_list_.list_.end();
+                 it++) {
+                fat_flow_list.push_back(it->protocol << 16 | it->port);
+            }
+            encoder.set_vifr_fat_flow_protocol_port(fat_flow_list);
         }
         break;
     }

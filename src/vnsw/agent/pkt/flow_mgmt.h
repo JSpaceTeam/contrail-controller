@@ -4,6 +4,7 @@
 #ifndef __AGENT_FLOW_TABLE_MGMT_H__
 #define __AGENT_FLOW_TABLE_MGMT_H__
 
+#include <boost/scoped_ptr.hpp>
 #include "pkt/flow_table.h"
 #include "pkt/flow_mgmt_request.h"
 #include "pkt/flow_event.h"
@@ -235,6 +236,10 @@ class FlowMgmtDbClient;
 //                            for the VRF. But is used to ensure VRF entry is
 //                            not deleted till all route-entries are freed and
 //                            DELETE event for VRF is processed
+// - BgpAsAServiceFlowMgmtTree : FlowMgmtTree per control-node. This is
+//                               maintained per control node because VMI can
+//                               establish a bgp peer session with each control
+//                               node.
 ////////////////////////////////////////////////////////////////////////////
 class FlowMgmtKey {
 public:
@@ -250,6 +255,7 @@ public:
         BRIDGE,
         NH,
         VRF,
+        BGPASASERVICE,
         END
     };
 
@@ -338,6 +344,10 @@ public:
     // Handle Delete event for DBEntry
     virtual bool OperEntryDelete(FlowMgmtManager *mgr,
                                  const FlowMgmtRequest *req, FlowMgmtKey *key);
+    // Handle Delete event for Non-DBEntry
+    virtual bool NonOperEntryDelete(FlowMgmtManager *mgr,
+                                    const FlowMgmtRequest *req,
+                                    FlowMgmtKey *key) { return true; }
     // Can the entry be deleted?
     virtual bool CanDelete() const;
 
@@ -389,7 +399,7 @@ public:
 
     FlowMgmtEntry *Locate(FlowMgmtKey *key);
     FlowMgmtEntry *Find(FlowMgmtKey *key);
-    FlowMgmtKey *UpperBound(FlowMgmtKey *key);
+    FlowMgmtKey *LowerBound(FlowMgmtKey *key);
     Tree &tree() { return tree_; }
     FlowMgmtManager *mgr() const { return mgr_; }
     static bool AddFlowMgmtKey(FlowMgmtKeyTree *tree, FlowMgmtKey *key);
@@ -908,6 +918,65 @@ private:
     DISALLOW_COPY_AND_ASSIGN(VrfFlowMgmtTree);
 };
 
+////////////////////////////////////////////////////////////////////////////
+// Flow Management tree for bgp as a service.
+////////////////////////////////////////////////////////////////////////////
+class BgpAsAServiceFlowMgmtKey : public FlowMgmtKey {
+public:
+    BgpAsAServiceFlowMgmtKey(const boost::uuids::uuid &uuid,
+                             uint32_t source_port) :
+        FlowMgmtKey(FlowMgmtKey::BGPASASERVICE, NULL), uuid_(uuid),
+        source_port_(source_port) { }
+    virtual ~BgpAsAServiceFlowMgmtKey() { }
+    virtual FlowMgmtKey *Clone() {
+        return new BgpAsAServiceFlowMgmtKey(uuid_, source_port_);
+    }
+    virtual bool UseDBEntry() const { return false; }
+    virtual bool Compare(const FlowMgmtKey *rhs) const {
+        const BgpAsAServiceFlowMgmtKey *rhs_key =
+            static_cast<const BgpAsAServiceFlowMgmtKey *>(rhs);
+        if (uuid_ != rhs_key->uuid_)
+            return uuid_ < rhs_key->uuid_;
+        return source_port_ < rhs_key->source_port_;
+    }
+    const boost::uuids::uuid &uuid() const { return uuid_; }
+    uint32_t source_port() const { return source_port_; }
+
+private:
+    boost::uuids::uuid uuid_;
+    uint32_t source_port_;
+    DISALLOW_COPY_AND_ASSIGN(BgpAsAServiceFlowMgmtKey);
+};
+
+class BgpAsAServiceFlowMgmtEntry : public FlowMgmtEntry {
+public:
+    BgpAsAServiceFlowMgmtEntry() : FlowMgmtEntry() { }
+    virtual ~BgpAsAServiceFlowMgmtEntry() { }
+    virtual bool NonOperEntryDelete(FlowMgmtManager *mgr,
+                                    const FlowMgmtRequest *req,
+                                    FlowMgmtKey *key);
+
+private:
+    DISALLOW_COPY_AND_ASSIGN(BgpAsAServiceFlowMgmtEntry);
+};
+
+class BgpAsAServiceFlowMgmtTree : public FlowMgmtTree {
+public:
+    BgpAsAServiceFlowMgmtTree(FlowMgmtManager *mgr) : FlowMgmtTree(mgr) {}
+    virtual ~BgpAsAServiceFlowMgmtTree() {}
+
+    void ExtractKeys(FlowEntry *flow, FlowMgmtKeyTree *tree);
+    FlowMgmtEntry *Allocate(const FlowMgmtKey *key);
+    bool BgpAsAServiceDelete(BgpAsAServiceFlowMgmtKey &key,
+                             const FlowMgmtRequest *req);
+    void DeleteAll();
+    // Called just before entry is deleted. Used to implement cleanup operations
+    virtual void FreeNotify(FlowMgmtKey *key, uint32_t gen_id);
+private:
+    DISALLOW_COPY_AND_ASSIGN(BgpAsAServiceFlowMgmtTree);
+};
+
+
 class FlowMgmtManager {
 public:
     static const std::string kFlowMgmtTask;
@@ -945,14 +1014,16 @@ public:
 
     bool DBEntryRequestHandler(FlowMgmtRequest *req, const DBEntry *entry);
     bool RequestHandler(boost::shared_ptr<FlowMgmtRequest> req);
-
+    bool BgpAsAServiceRequestHandler(FlowMgmtRequest *req);
     bool DbClientHandler(const DBEntry *entry);
-    void EnqueueFlowEvent(const FlowEvent &event);
+    void EnqueueFlowEvent(FlowEvent *event);
 
     Agent *agent() const { return agent_; }
     void AddEvent(FlowEntry *low);
     void DeleteEvent(FlowEntry *flow);
     void FlowIndexUpdateEvent(FlowEntry *flow);
+    void FlowStatsUpdateEvent(FlowEntry *flow, uint32_t bytes, uint32_t packets,
+                              uint32_t oflow_bytes);
     void AddEvent(const DBEntry *entry, uint32_t gen_id);
     void ChangeEvent(const DBEntry *entry, uint32_t gen_id);
     void DeleteEvent(const DBEntry *entry, uint32_t gen_id);
@@ -969,12 +1040,16 @@ public:
     }
 
     void DisableWorkQueue(bool disable) { request_queue_.set_disable(disable); }
+    void BgpAsAServiceNotify(const boost::uuids::uuid &vm_uuid,
+                             uint32_t source_port);
 private:
     // Handle Add/Change of a flow. Builds FlowMgmtKeyTree for all objects
     void AddFlow(FlowEntryPtr &flow);
     // Handle Delete of a flow. Updates FlowMgmtKeyTree for all objects
     void DeleteFlow(FlowEntryPtr &flow);
     void UpdateFlowIndex(FlowEntryPtr &flow);
+    void UpdateFlowStats(FlowEntryPtr &flow, uint32_t bytes, uint32_t packets,
+                         uint32_t oflow_bytes);
 
     // Add a FlowMgmtKey into the FlowMgmtKeyTree for an object
     // The FlowMgmtKeyTree for object is passed as argument
@@ -993,6 +1068,7 @@ private:
                            int ace_id);
     void SetAclFlowSandeshData(const AclDBEntry *acl, AclFlowResp &data,
                                const int last_count);
+    void ControllerNotify(uint8_t index);
 
     Agent *agent_;
     AclFlowMgmtTree acl_flow_mgmt_tree_;
@@ -1004,6 +1080,7 @@ private:
     VrfFlowMgmtTree vrf_flow_mgmt_tree_;
     NhFlowMgmtTree nh_flow_mgmt_tree_;
     FlowEntryTree flow_tree_;
+    boost::scoped_ptr<BgpAsAServiceFlowMgmtTree> bgp_as_a_service_flow_mgmt_tree_[MAX_XMPP_SERVERS];
     std::auto_ptr<FlowMgmtDbClient> flow_mgmt_dbclient_;
     WorkQueue<boost::shared_ptr<FlowMgmtRequest> > request_queue_;
     DISALLOW_COPY_AND_ASSIGN(FlowMgmtManager);

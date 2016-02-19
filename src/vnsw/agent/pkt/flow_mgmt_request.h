@@ -20,12 +20,21 @@ public:
         CHANGE_DBENTRY,
         DELETE_DBENTRY,
         RETRY_DELETE_VRF,
-        UPDATE_FLOW_INDEX
-
+        UPDATE_FLOW_INDEX,
+        DELETE_BGP_AAS_FLOWS,
+        UPDATE_FLOW_STATS
     };
 
     FlowMgmtRequest(Event event, FlowEntryPtr &flow) :
         event_(event), flow_(flow), db_entry_(NULL), vrf_id_(0) {
+            if (event == RETRY_DELETE_VRF)
+                assert(vrf_id_);
+        }
+
+    FlowMgmtRequest(Event event, FlowEntryPtr &flow, uint32_t bytes,
+                    uint32_t packets, uint32_t oflow_bytes) :
+        event_(event), flow_(flow), db_entry_(NULL), vrf_id_(0),
+        bytes_(bytes), packets_(packets), oflow_bytes_(oflow_bytes) {
             if (event == RETRY_DELETE_VRF)
                 assert(vrf_id_);
         }
@@ -47,6 +56,9 @@ public:
     // response. Returns INVALID if no message to be enqueued
     FlowEvent::Event GetResponseEvent() const {
         FlowEvent::Event resp_event = FlowEvent::INVALID;
+        if (event_ == DELETE_BGP_AAS_FLOWS)
+            return FlowEvent::DELETE_FLOW;
+
         if (db_entry_ == NULL)
             return resp_event;
 
@@ -74,10 +86,14 @@ public:
 
     Event event() const { return event_; }
     FlowEntryPtr &flow() { return flow_; }
+    void set_flow(FlowEntry *flow) { flow_.reset(flow); }
     const DBEntry *db_entry() const { return db_entry_; }
     void set_db_entry(const DBEntry *db_entry) { db_entry_ = db_entry; }
     uint32_t vrf_id() const { return vrf_id_; }
     uint32_t gen_id() const { return gen_id_; }
+    uint32_t bytes() const { return bytes_;}
+    uint32_t packets() const { return packets_;}
+    uint32_t oflow_bytes() const { return oflow_bytes_;}
 
 private:
     Event event_;
@@ -88,8 +104,40 @@ private:
     const DBEntry *db_entry_;
     uint32_t vrf_id_;
     uint32_t gen_id_;
+    uint32_t bytes_;
+    uint32_t packets_;
+    uint32_t oflow_bytes_;
 
     DISALLOW_COPY_AND_ASSIGN(FlowMgmtRequest);
 };
 
+class BgpAsAServiceFlowMgmtRequest : public FlowMgmtRequest {
+public:
+    enum Type {
+        VMI,
+        CONTROLLER
+    };
+
+    BgpAsAServiceFlowMgmtRequest(uint8_t index) :
+        FlowMgmtRequest(FlowMgmtRequest::DELETE_BGP_AAS_FLOWS, NULL, 0),
+        type_(BgpAsAServiceFlowMgmtRequest::CONTROLLER), vm_uuid_(),
+        source_port_(), index_(index) { }
+    BgpAsAServiceFlowMgmtRequest(boost::uuids::uuid vm_uuid,
+                                 uint32_t source_port) :
+        FlowMgmtRequest(FlowMgmtRequest::DELETE_BGP_AAS_FLOWS, NULL, 0),
+        type_(BgpAsAServiceFlowMgmtRequest::VMI), vm_uuid_(vm_uuid),
+        source_port_(source_port), index_() { }
+    virtual ~BgpAsAServiceFlowMgmtRequest() { }
+    BgpAsAServiceFlowMgmtRequest::Type type() const { return type_; }
+    const boost::uuids::uuid &vm_uuid() const { return vm_uuid_; }
+    uint32_t source_port() const { return source_port_; }
+    uint8_t index() const { return index_; }
+
+private:
+    BgpAsAServiceFlowMgmtRequest::Type type_;
+    boost::uuids::uuid vm_uuid_;
+    uint32_t source_port_;
+    uint8_t index_;
+    DISALLOW_COPY_AND_ASSIGN(BgpAsAServiceFlowMgmtRequest);
+};
 #endif //  __AGENT_FLOW_MGMT_REQUEST_H__

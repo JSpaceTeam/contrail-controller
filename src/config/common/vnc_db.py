@@ -5,7 +5,7 @@
 """
 This file contains implementation of database model for contrail config daemons
 """
-from vnc_api.common.exceptions import NoIdError
+from exceptions import NoIdError
 from vnc_api.gen.resource_client import *
 from utils import obj_type_to_vnc_class
 
@@ -197,13 +197,16 @@ class DBBase(object):
     # end update_single_ref
 
     def set_children(self, ref_type, obj):
-        refs = obj.get(ref_type+'s')
+        if isinstance(obj, dict):
+            refs = obj.get(ref_type+'s')
+        else:
+            refs = getattr(obj, ref_type+'s', None)
         new_refs = set()
         for ref in refs or []:
             new_key = self._get_ref_key(ref, ref_type)
             new_refs.add(new_key)
         setattr(self, ref_type+'s', new_refs)
-    # end
+    # end set_children
 
     def update_multiple_refs(self, ref_type, obj):
         if isinstance(obj, dict):

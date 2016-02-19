@@ -13,6 +13,7 @@
 #include <base/intrusive_ptr_back_ref.h>
 #include <cmn/agent_cmn.h>
 #include <base/connection_info.h>
+#include <base/timer.h>
 #include "net/mac_address.h"
 
 class Agent;
@@ -35,6 +36,7 @@ class AgentInit;
 class AgentStatsCollector;
 class FlowStatsCollector;
 class FlowStatsManager;
+class MetaDataIpAllocator;
 namespace OVSDB {
 class OvsdbClient;
 };
@@ -125,12 +127,20 @@ typedef boost::intrusive_ptr<const PhysicalDeviceVn> PhysicalDeviceVnConstRef;
 void intrusive_ptr_release(const PhysicalDeviceVn *p);
 void intrusive_ptr_add_ref(const PhysicalDeviceVn *p);
 
+class HealthCheckService;
+typedef boost::intrusive_ptr<HealthCheckService> HealthCheckServiceRef;
+void intrusive_ptr_release(const HealthCheckService* p);
+void intrusive_ptr_add_ref(const HealthCheckService* p);
+
 //class SecurityGroup;
 typedef std::vector<int> SecurityGroupList;
 typedef std::vector<std::string> CommunityList;
 
+typedef std::set<std::string> VnListType;
+
 class AgentDBTable;
 class InterfaceTable;
+class HealthCheckTable;
 class NextHopTable;
 class VmTable;
 class VnTable;
@@ -208,6 +218,21 @@ extern void RouterIdDepInit(Agent *agent);
 #define kTaskFlowEvent "Agent::FlowEvent"
 #define kTaskFlowAudit "KSync::FlowAudit"
 
+#define kTaskHealthCheck "Agent::HealthCheck"
+
+#define kInterfaceDbTablePrefix "db.interface"
+#define kVnDbTablePrefix  "db.vn"
+#define kVmDbTablePrefix  "db.vm"
+#define kVrfDbTablePrefix "db.vrf.0"
+#define kLoadBalnceDbTablePrefix "db.loadbalancer.0"
+#define kMplsDbTablePrefix "db.mpls"
+#define kAclDbTablePrefix  "db.acl"
+#define kV4UnicastRouteDbTableSuffix "uc.route.0"
+#define kV6UnicastRouteDbTableSuffix "uc.route6.0"
+#define kL2RouteDbTableSuffix  "l2.route.0"
+#define kMcastRouteDbTableSuffix "mc.route.0"
+#define kEvpnRouteDbTableSuffix  "evpn.route.0"
+
 class Agent {
 public:
     static const uint32_t kDefaultMaxLinkLocalOpenFds = 2048;
@@ -219,6 +244,7 @@ public:
     static const uint32_t kDefaultFlowThreadCount = 1;
     // Max number of threads
     static const uint32_t kMaxTbbThreads = 8;
+    static const uint32_t kDefaultTbbKeepawakeTimeout = (20); //time-millisecs
 
     enum ForwardingMode {
         NONE,
@@ -248,12 +274,13 @@ public:
 
     Agent();
     virtual ~Agent();
-    void Shutdown() { }
+    void Shutdown();
 
     static Agent *GetInstance() {return singleton_;}
-    static const std::string &NullString() {return null_string_;};
+    static const std::string &NullString() {return null_string_;}
+    static const std::set<std::string> &NullStringList() {return null_string_list_;}
     static const MacAddress &vrrp_mac() {return vrrp_mac_;}
-    static const std::string &BcastMac() {return bcast_mac_;};
+    static const std::string &BcastMac() {return bcast_mac_;}
     static const std::string &xmpp_dns_server_prefix() {
         return xmpp_dns_server_connection_name_prefix_;
     }
@@ -266,6 +293,7 @@ public:
     const std::string &log_file() const {return log_file_;}
 
     // DB Table accessor methods
+    IpAddress GetMirrorSourceIp(const IpAddress &dest);
     InterfaceTable *interface_table() const {return intf_table_;}
     void set_interface_table(InterfaceTable *table) {
          intf_table_ = table;
@@ -747,6 +775,12 @@ public:
     FlowStatsManager *flow_stats_manager() const;
     void set_flow_stats_manager(FlowStatsManager *fsc);
 
+    HealthCheckTable *health_check_table() const;
+    void set_health_check_table(HealthCheckTable *table);
+
+    MetaDataIpAllocator *metadata_ip_allocator() const;
+    void set_metadata_ip_allocator(MetaDataIpAllocator *allocator);
+
     PktModule *pkt() const;
     void set_pkt(PktModule *pkt);
 
@@ -956,6 +990,7 @@ public:
                    const char *description, uint32_t delay);
 
     static uint16_t ProtocolStringToInt(const std::string &str);
+    bool TbbKeepAwake();
 private:
 
     AgentParam *params_;
@@ -1002,6 +1037,8 @@ private:
     AgentInit *agent_init_;
     VrfEntry *fabric_vrf_;
     InterfaceTable *intf_table_;
+    HealthCheckTable *health_check_table_;
+    std::auto_ptr<MetaDataIpAllocator> metadata_ip_allocator_;
     NextHopTable *nh_table_;
     InetUnicastAgentRouteTable *uc_rt_table_;
     Inet4MulticastAgentRouteTable *mc_rt_table_;
@@ -1133,11 +1170,15 @@ private:
     std::string vrouter_build_info_;
     FlowStatsReqHandler flow_stats_req_handler_;
 
+    uint32_t tbb_keepawake_timeout_;
+    Timer *tbb_awake_timer_;
+    uint64_t tbb_awake_count_;
     // Constants
 public:
     static const std::string config_file_;
     static const std::string log_file_;
     static const std::string null_string_;
+    static const std::set<std::string> null_string_list_;
     static std::string fabric_vrf_name_;
     static const std::string fabric_vn_name_;
     static const std::string link_local_vrf_name_;

@@ -18,6 +18,7 @@ public:
     virtual void UpdateStaticRouteConfig() = 0;
     virtual void FlushStaticRouteConfig() = 0;
     virtual void NotifyAllRoutes() = 0;
+    virtual void UpdateAllRoutes() = 0;
     virtual uint32_t GetRouteCount() const = 0;
     virtual uint32_t GetDownRouteCount() const = 0;
     virtual bool FillStaticRouteInfo(RoutingInstance *rtinstance,
@@ -25,6 +26,9 @@ public:
 
 private:
     template <typename U> friend class StaticRouteTest;
+
+    virtual void DisableResolveTrigger() = 0;
+    virtual void EnableResolveTrigger() = 0;
 
     virtual void DisableQueue() = 0;
     virtual void EnableQueue() = 0;

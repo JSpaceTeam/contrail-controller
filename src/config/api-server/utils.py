@@ -304,11 +304,12 @@ def parse_args(args_str):
             args_obj.cassandra_server_list.split()
     if type(args_obj.collectors) is str:
         args_obj.collectors = args_obj.collectors.split()
-    config_args = []
-    config_args.append("--config-dir")
-    cfg_dir = str(args.conf_file[0]).rsplit("/", 1)[0]
-    config_args.append(cfg_dir)
-    cfg.CONF(args=config_args, default_config_files = args.conf_file)
+    if args.conf_file and '/etc/contrail' not in args.conf_file[0]:
+	config_args = []
+   	config_args.append("--config-dir")
+    	cfg_dir = str(args.conf_file[0]).rsplit("/", 1)[0]
+    	config_args.append(cfg_dir)
+    	cfg.CONF(args=config_args, default_config_files = args.conf_file)
     return args_obj, remaining_argv
 # end parse_args
 

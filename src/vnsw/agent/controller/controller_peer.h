@@ -24,6 +24,7 @@ class VrfEntry;
 class XmlPugi;
 class PathPreference;
 class AgentPath;
+class EcmpLoadBalance;
 
 class AgentXmppChannel {
 public:
@@ -67,13 +68,14 @@ public:
     static bool ControllerSendRouteAdd(AgentXmppChannel *peer,
                                        AgentRoute *route,
                                        const Ip4Address *nexthop_ip,
-                                       std::string vn,
+                                       const VnListType &vn_list,
                                        uint32_t label,
                                        uint32_t tunnel_bmap,
                                        const SecurityGroupList *sg_list,
                                        const CommunityList *communities,
                                        Agent::RouteTableType type,
-                                       const PathPreference &path_preference);
+                                       const PathPreference &path_preference,
+                                       const EcmpLoadBalance &ecmp_load_balance);
     static bool ControllerSendEvpnRouteAdd(AgentXmppChannel *peer,
                                            AgentRoute *route,
                                            const Ip4Address *nexthop_ip,
@@ -90,7 +92,7 @@ public:
     //Deletes to control node
     static bool ControllerSendRouteDelete(AgentXmppChannel *peer,
                                           AgentRoute *route,
-                                          std::string vn,
+                                          const VnListType &vn_list,
                                           uint32_t label,
                                           uint32_t tunnel_bmap,
                                           const SecurityGroupList *sg_list,
@@ -175,19 +177,22 @@ private:
     void AddEvpnRoute(const std::string &vrf_name, std::string mac_addr,
                       autogen::EnetItemType *item);
     void AddRemoteRoute(std::string vrf_name, IpAddress ip, uint32_t plen,
-                        autogen::ItemType *item);
+                        autogen::ItemType *item,
+                        const VnListType &vn_list);
     void AddEcmpRoute(std::string vrf_name, IpAddress ip, uint32_t plen,
-                      autogen::ItemType *item);
+                      autogen::ItemType *item,
+                      const VnListType &vn_list);
     //Common helpers
     bool ControllerSendV4V6UnicastRouteCommon(AgentRoute *route,
-                                            const std::string &vn,
+                                            const VnListType &vn_list,
                                             const SecurityGroupList *sg_list,
                                             const CommunityList *communities,
                                             uint32_t mpls_label,
                                             uint32_t tunnel_bmap,
                                             const PathPreference &path_preference,
                                             bool associate,
-                                            Agent::RouteTableType type);
+                                            Agent::RouteTableType type,
+                                            const EcmpLoadBalance &ecmp_load_balance);
     bool BuildTorMulticastMessage(autogen::EnetItemType &item,
                                   std::stringstream &node_id,
                                   AgentRoute *route,
@@ -215,6 +220,9 @@ private:
                              std::stringstream &ss_node,
                              const AgentRoute *route,
                              bool associate);
+    bool IsEcmp(const std::vector<autogen::NextHopType> &nexthops);
+    void GetVnList(const std::vector<autogen::NextHopType> &nexthops,
+                   VnListType *vn_list);
 
     XmppChannel *channel_;
     std::string xmpp_server_;

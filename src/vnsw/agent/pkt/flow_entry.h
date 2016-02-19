@@ -39,6 +39,39 @@ struct FlowExportInfo;
 class KSyncFlowIndexEntry;
 class FlowStatsCollector;
 
+////////////////////////////////////////////////////////////////////////////
+// Helper class to manage following,
+// 1. VM referred by the flow
+// 2. Per VM flow counters to apply per-vm flow limits
+//    - Number of flows for a VM
+//    - Number of linklocal flows for a VM
+// 3. socket opened for linklocal flows
+////////////////////////////////////////////////////////////////////////////
+class VmFlowRef {
+public:
+    static const int kInvalidFd=-1;
+    VmFlowRef();
+    VmFlowRef(const VmFlowRef &rhs);
+    ~VmFlowRef();
+
+    void operator=(const VmFlowRef &rhs);
+    void Reset();
+    void FreeRef();
+    void FreeFd();
+    void SetVm(const VmEntry *vm);
+    bool AllocateFd(Agent *agent, FlowEntry *flow, uint8_t l3_proto);
+
+    int fd() const { return fd_; }
+    uint16_t port() const { return port_; }
+    const VmEntry *vm() const { return vm_.get(); }
+private:
+    // IMPORTANT: Keep this structure assignable. Assignment operator is used in
+    // FlowEntry::Copy() on this structure
+    VmEntryConstRef vm_;
+    int fd_;
+    uint16_t port_;
+};
+
 typedef boost::intrusive_ptr<FlowEntry> FlowEntryPtr;
 
 struct FlowKey {
@@ -187,11 +220,15 @@ struct FlowData {
     ~FlowData();
 
     void Reset();
+    std::vector<std::string> SourceVnList() const;
+    std::vector<std::string> DestinationVnList() const;
 
     MacAddress smac;
     MacAddress dmac;
-    std::string source_vn;
-    std::string dest_vn;
+    std::string source_vn_match;
+    std::string dest_vn_match;
+    VnListType source_vn_list;
+    VnListType dest_vn_list;
     SecurityGroupList source_sg_id_l;
     SecurityGroupList dest_sg_id_l;
     uint32_t flow_source_vrf;
@@ -200,13 +237,14 @@ struct FlowData {
     MatchPolicy match_p;
     VnEntryConstRef vn_entry;
     InterfaceConstRef intf_entry;
-    VmEntryConstRef in_vm_entry;
-    VmEntryConstRef out_vm_entry;
+    VmFlowRef  in_vm_entry;
+    VmFlowRef  out_vm_entry;
     NextHopConstRef nh;
     uint32_t vrf;
     uint32_t mirror_vrf;
     uint32_t dest_vrf;
     uint32_t component_nh_idx;
+    uint32_t bgp_as_a_service_port;
 
     // Stats
     uint8_t source_plen;
@@ -270,6 +308,7 @@ class FlowEntry {
         DEFAULT_GW_ICMP_OR_DNS, /* DNS/ICMP pkt to/from default gateway */
         LINKLOCAL_FLOW, /* No policy applied for linklocal flow */
         MULTICAST_FLOW, /* No policy applied for multicast flow */
+        BGPROUTERSERVICE_FLOW, /* No policy applied for bgp router service flow */
         NON_IP_FLOW,    /* Flow due to bridging */
     };
 
@@ -300,7 +339,8 @@ class FlowEntry {
         // a local port bind is done (used as as src port for linklocal nat)
         LinkLocalBindLocalSrcPort = 1 << 9,
         TcpAckFlow      = 1 << 10,
-        UnknownUnicastFlood = 1 << 11
+        UnknownUnicastFlood = 1 << 11,
+        BgpRouterService   = 1 << 12,
     };
 
     FlowEntry(FlowTable *flow_table);
@@ -358,8 +398,8 @@ class FlowEntry {
     void set_dest_sg_id_l(const SecurityGroupList &sg_l) {
         data_.dest_sg_id_l = sg_l;
     }
-    int linklocal_src_port() const { return linklocal_src_port_; }
-    int linklocal_src_port_fd() const { return linklocal_src_port_fd_; }
+    int linklocal_src_port() const { return data_.in_vm_entry.port(); }
+    int linklocal_src_port_fd() const { return data_.in_vm_entry.fd(); }
     const std::string& acl_assigned_vrf() const;
     uint32_t acl_assigned_vrf_index() const;
     uint32_t fip() const { return fip_; }
@@ -382,9 +422,15 @@ class FlowEntry {
 
     const Interface *intf_entry() const { return data_.intf_entry.get(); }
     const VnEntry *vn_entry() const { return data_.vn_entry.get(); }
-    const VmEntry *in_vm_entry() const { return data_.in_vm_entry.get(); }
-    const VmEntry *out_vm_entry() const { return data_.out_vm_entry.get(); }
+    VmFlowRef *in_vm_flow_ref() { return &(data_.in_vm_entry); }
+    const VmEntry *in_vm_entry() const { return data_.in_vm_entry.vm(); }
+    const VmEntry *out_vm_entry() const { return data_.out_vm_entry.vm(); }
     const NextHop *nh() const { return data_.nh.get(); }
+    const uint32_t bgp_as_a_service_port() const {
+        if (is_flags_set(FlowEntry::BgpRouterService))
+            return data_.bgp_as_a_service_port;
+        return 0;
+    }
     const MatchPolicy &match_p() const { return data_.match_p; }
 
     bool ImplicitDenyFlow() const { 
@@ -393,7 +439,7 @@ class FlowEntry {
     }
     bool deleted() { return deleted_; }
 
-    bool IsShortFlow() { return (flags_ & (1 << ShortFlow)); }
+    bool IsShortFlow() { return is_flags_set(FlowEntry::ShortFlow); }
     // Flow action routines
     void ResyncFlow();
     bool ActionRecompute();
@@ -463,10 +509,6 @@ private:
     bool deleted_;
     uint32_t flags_;
     uint16_t short_flow_reason_;
-    // linklocal port - used as nat src port, agent locally binds to this port
-    uint16_t linklocal_src_port_;
-    // fd of the socket used to locally bind in case of linklocal
-    int linklocal_src_port_fd_;
     std::string sg_rule_uuid_;
     std::string nw_ace_uuid_;
     //IP address of the src vrouter for egress flows and dst vrouter for
@@ -486,10 +528,8 @@ private:
     tbb::mutex mutex_;
     boost::intrusive::list_member_hook<> free_list_node_;
     FlowStatsCollector *fsc_;
+    // IMPORTANT: Remember to update Reset() routine if new fields are added
     // IMPORTANT: Remember to update Copy() routine if new fields are added
-
-    static InetUnicastRouteEntry inet4_route_key_;
-    static InetUnicastRouteEntry inet6_route_key_;
     static SecurityGroupList default_sg_list_;
 };
  

@@ -29,6 +29,7 @@ private:
     public:
         HoldTask(TestTaskHold *hold_entry);
         bool Run();
+        std::string Description() const { return "TestHoldTask"; }
     private:
         TestTaskHold *hold_entry_;
     };
@@ -222,6 +223,7 @@ void DelVn(const char *name);
 void AddPortWithMac(const char *name, int id, const char *mac,
                     const char *attr);
 void AddPort(const char *name, int id, const char *attr = NULL);
+void AddSriovPort(const char *name, int id);
 void AddPortByStatus(const char *name, int id, bool admin_status);
 void DelPort(const char *name);
 void AddAcl(const char *name, int id);
@@ -347,7 +349,8 @@ bool VrfStatsMatchPrev(int vrf_id, const vr_vrf_stats_req &req);
 bool RouterIdMatch(Ip4Address rid2);
 bool ResolvRouteFind(const string &vrf_name, const Ip4Address &addr, int plen);
 bool VhostRecvRouteFind(const string &vrf_name, const Ip4Address &addr, int plen);
-void AddVmPortVrf(const char *name, const string &ip, uint16_t tag);
+void AddVmPortVrf(const char *name, const string &ip, uint16_t tag,
+                  const string &v6_ip = "");
 void DelVmPortVrf(const char *name);
 uint32_t PathCount(const string vrf_name, const Ip4Address &addr, int plen);
 bool VlanNhFind(int id, uint16_t tag);
@@ -401,6 +404,8 @@ public:
     std::string FromString() const  { return string("fake-from"); }
     const XmppConnection *connection() const { return NULL; }
 
+    virtual void RegisterRxMessageTraceCallback(RxMessageTraceCb cb) {
+    }
     virtual std::string LastStateName() const {
         return "";
     }
@@ -480,4 +485,5 @@ bool Inet6TunnelRouteAdd(const Peer *peer, const string &vm_vrf, const Ip6Addres
 void AddPhysicalDeviceVn(Agent *agent, int dev_id, int vn_id, bool validate);
 void DelPhysicalDeviceVn(Agent *agent, int dev_id, int vn_id, bool validate);
 void AddStaticPreference(std::string intf_name, int intf_id, uint32_t value);
+bool VnMatch(VnListType &vn_list, std::string &vn);
 #endif // vnsw_agent_test_cmn_util_h

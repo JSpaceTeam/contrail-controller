@@ -70,6 +70,14 @@ request sandesh ShowRtGroupPeerReqIterate {
     1: string iterate_info;
 }
 
+request sandesh ShowPathResolverSummaryReqIterate {
+    1: string iterate_info;
+}
+
+request sandesh ShowPathResolverReqIterate {
+    1: string iterate_info;
+}
+
 request sandesh ShowEvpnTableReqIterate {
     1: string iterate_info;
 }
@@ -99,5 +107,9 @@ request sandesh ShowBgpPeeringConfigReqIterate {
 }
 
 request sandesh ShowBgpNeighborConfigReqIterate {
+    1: string iterate_info;
+}
+
+request sandesh ShowBgpRoutingPolicyConfigReqIterate {
     1: string iterate_info;
 }

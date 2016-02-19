@@ -379,7 +379,7 @@ bool AgentUtXmlVmInterface::ToXml(xml_node *parent) {
 
     if (add_nova_) {
         boost::system::error_code ec;
-        IpAddress ip = Ip4Address::from_string(ip_, ec);
+        Ip4Address ip = Ip4Address::from_string(ip_, ec);
         NovaIntfAdd(op_delete(), id(), ip, vm_uuid_, vm_uuid_, name(), mac_,
                     vm_name_);
     }
@@ -855,7 +855,7 @@ string AgentUtXmlNova::NodeType() {
 
 bool AgentUtXmlNova::Run() {
     boost::system::error_code ec;
-    IpAddress ip = Ip4Address::from_string(ip_, ec);
+    Ip4Address ip = Ip4Address::from_string(ip_, ec);
     NovaIntfAdd(op_delete(), id(), ip, vm_uuid_, vn_uuid_, name(), mac_,
                 vm_name_);
     return true;
@@ -1344,10 +1344,10 @@ bool AgentUtXmlFlowValidate::Validate() {
     if (flow == NULL)
         return false;
 
-    if (svn_ != "" && svn_ != flow->data().source_vn)
+    if (svn_ != "" && !VnMatch(flow->data().source_vn_list, svn_))
         return false;
 
-    if (dvn_ != "" && dvn_ != flow->data().dest_vn)
+    if (dvn_ != "" && !VnMatch(flow->data().dest_vn_list, dvn_))
         return false;
 
     if (MatchFlowAction(flow, action_) == false) {
@@ -1455,13 +1455,16 @@ bool AgentUtXmlL2Route::Run() {
                             Ip4Address::from_string(ip_), vxlan_id_,
                             (new ControllerVmRoute(bgp_peer_)));
     } else {
+        VnListType vn_list;
+        vn_list.insert(vn_);
         ControllerVmRoute *data =
             ControllerVmRoute::MakeControllerVmRoute(bgp_peer_,
                                                      agent->fabric_vrf_name(),
                                                      agent->router_id(), vrf_,
                                                      Ip4Address::from_string(tunnel_dest_),
-                                                     bmap, label_, vn_, sg_list,
-                                                     PathPreference(), false);
+                                                     bmap, label_, vn_list, sg_list,
+                                                     PathPreference(), false,
+                                                     EcmpLoadBalance());
         rt_table->AddRemoteVmRouteReq(bgp_peer_, vrf_,
                                       MacAddress::FromString(mac_),
                                       Ip4Address::from_string(ip_),
@@ -1605,13 +1608,16 @@ bool AgentUtXmlL3Route::Run() {
                             Ip4Address::from_string(src_ip_), plen_,
                             (new ControllerVmRoute(bgp_peer_)));
     } else {
+        VnListType vn_list;
+        vn_list.insert(vn_);
         ControllerVmRoute *data =
             ControllerVmRoute::MakeControllerVmRoute(bgp_peer_,
                                                      agent->fabric_vrf_name(),
                                                      agent->router_id(), vrf_,
                                                      Ip4Address::from_string(tunnel_dest_),
-                                                     bmap, label_, vn_, sg_list,
-                                                     PathPreference(), false);
+                                                     bmap, label_, vn_list, sg_list,
+                                                     PathPreference(), false,
+                                                     EcmpLoadBalance());
         rt_table->AddRemoteVmRouteReq(bgp_peer_, vrf_,
                                       Ip4Address::from_string(src_ip_), plen_,
                                       data);

@@ -14,14 +14,14 @@
 #include <set>
 #include <string>
 
+#include "base/lifetime.h"
 #include "base/util.h"
-#include "bgp/bgp_table.h"
-#include "bgp/community.h"
-#include "bgp/rtarget/rtarget_address.h"
+#include "bgp/bgp_path.h"
 #include "db/db_table_walker.h"
 
 class BgpRoute;
 class BgpServer;
+class BgpTable;
 class RtGroup;
 class RoutePathReplicator;
 class RouteTarget;
@@ -70,9 +70,7 @@ public:
         listener_id_ = listener_id;
     }
 
-    uint32_t route_count() const {
-        return table_->GetDBStateCount(listener_id());
-    }
+    uint32_t route_count() const;
 
     RoutePathReplicator *replicator() {
         return replicator_;
@@ -194,6 +192,7 @@ public:
 
     const ReplicatedRtPathList &GetList() const { return replicate_list_; }
     ReplicatedRtPathList *GetMutableList() { return &replicate_list_; }
+    std::vector<std::string> GetTableNameList(const BgpPath *path) const;
 
 private:
     RoutePathReplicator *replicator_;
@@ -269,6 +268,9 @@ public:
 
     const RtReplicated *GetReplicationState(BgpTable *table,
                                             BgpRoute *rt) const;
+    std::vector<std::string> GetReplicatedTableNameList(const BgpTable *table,
+        const BgpRoute *route, const BgpPath *path) const;
+
     SandeshTraceBufferPtr trace_buffer() const { return trace_buf_; }
 
 private:
@@ -290,7 +292,7 @@ private:
     void DeleteTableState(BgpTable *table);
     void UnregisterTableState(BgpTable *table);
     TableState *FindTableState(BgpTable *table);
-    const TableState *FindTableState(BgpTable *table) const;
+    const TableState *FindTableState(const BgpTable *table) const;
 
     void JoinVpnTable(RtGroup *group);
     void LeaveVpnTable(RtGroup *group);
@@ -320,6 +322,8 @@ private:
     BgpTable *vpn_table_;
     boost::scoped_ptr<TaskTrigger> walk_trigger_;
     SandeshTraceBufferPtr trace_buf_;
+
+    DISALLOW_COPY_AND_ASSIGN(RoutePathReplicator);
 };
 
 #endif  // SRC_BGP_ROUTING_INSTANCE_ROUTEPATH_REPLICATOR_H_

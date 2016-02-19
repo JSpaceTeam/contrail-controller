@@ -253,32 +253,61 @@ static void Setup() {
         ret = false;
     }
 
-    // Configure Floating-IP
-    AddFloatingIpPool("fip-pool1", 1);
+    // Configure Floating-IP-1
+    AddInstanceIp("instance_fixed_ip", 8, "1.1.1.10");
+    client->WaitForIdle();
+
+    AddLink("virtual-machine-interface", "vnet1", "instance-ip",
+            "instance_fixed_ip");
+    client->WaitForIdle();
+
+    AddLink("virtual-machine-interface", "vnet1", "floating-ip", "fip1");
+    client->WaitForIdle();
+
     AddFloatingIp("fip1", 1, "2.1.1.100");
+    client->WaitForIdle();
+
+    AddFloatingIpPool("fip-pool1", 1);
+    client->WaitForIdle();
+
     AddLink("floating-ip", "fip1", "floating-ip-pool", "fip-pool1");
-    AddFloatingIp("fip_2", 2, "2.1.1.99");
-    AddLink("floating-ip", "fip_2", "floating-ip-pool", "fip-pool1");
+    client->WaitForIdle();
+
     AddLink("floating-ip-pool", "fip-pool1", "virtual-network",
             "default-project:vn2");
-    AddLink("virtual-machine-interface", "vnet1", "floating-ip", "fip1");
+    client->WaitForIdle();
+
+    // Configure Floating-IP-2
+    AddLink("virtual-machine-interface", "vnet1", "floating-ip",
+            "fip_fixed_ip");
+    client->WaitForIdle();
+
+    AddFloatingIp("fip_2", 2, "2.1.1.99");
+    client->WaitForIdle();
+
     AddFloatingIpPool("fip-pool2", 2);
+    client->WaitForIdle();
+
+    AddLink("floating-ip", "fip_2", "floating-ip-pool", "fip-pool1");
+    client->WaitForIdle();
+
     AddFloatingIp("fip_3", 3, "3.1.1.100");
+    client->WaitForIdle();
+
     AddLink("floating-ip", "fip_3", "floating-ip-pool", "fip-pool2");
+    client->WaitForIdle();
+
     AddLink("floating-ip-pool", "fip-pool2", "virtual-network",
             "default-project:vn3");
     client->WaitForIdle();
 
+
     AddInstanceIp("instance_fixed_ip", 8, "1.1.1.10");
-    AddLink("virtual-machine-interface", "vnet1", "instance-ip",
-            "instance_fixed_ip");
+    client->WaitForIdle();
     AddFloatingIp("fip_fixed_ip", 4, "2.1.1.101", "1.1.1.10");
     AddLink("floating-ip", "fip_fixed_ip", "floating-ip-pool", "fip-pool1");
     AddLink("floating-ip-pool", "fip-pool1", "virtual-network",
             "default-project:vn2");
-    AddLink("virtual-machine-interface", "vnet1", "floating-ip",
-            "fip_fixed_ip");
-    client->WaitForIdle();
 
     EXPECT_TRUE(vnet[1]->HasFloatingIp(Address::INET));
     if (vnet[1]->HasFloatingIp(Address::INET) == false) {
@@ -312,13 +341,16 @@ static void Setup() {
 
     /* Add Local VM route in vrf1 from default-project:vn2:vn2 */
     addr = Ip4Address::from_string("2.1.1.10");
+    VnListType vn_list;
+    vn_list.insert(vnet[3]->vn()->GetName());
     vnet_table[2]->AddLocalVmRouteReq(agent_->local_peer(),
                                       "default-project:vn2:vn2", addr, 32,
                                       vnet[3]->GetUuid(),
-                                      vnet[3]->vn()->GetName(),
+                                      vn_list,
                                       vnet[3]->label(),
                                       SecurityGroupList(), CommunityList(), 0,
-                                      PathPreference(), Ip4Address(0));
+                                      PathPreference(), Ip4Address(0),
+                                      EcmpLoadBalance());
     client->WaitForIdle();
     EXPECT_TRUE(RouteFind("default-project:vn2:vn2", addr, 32));
 
@@ -362,13 +394,13 @@ void Teardown() {
     Ip4Address addr;
 
     // Delete routes
-    DeleteRoute("vrf1", "2.1.1.11", 32);
+    DeleteRoute("vrf1", "2.1.1.11", 32, bgp_peer_);
 
-    DeleteRoute("default-project:vn2:vn2", "20.1.1.0", 24);
+    DeleteRoute("default-project:vn2:vn2", "20.1.1.0", 24, bgp_peer_);
 
     DeleteRoute("default-project:vn2:vn2", "2.1.1.10", 32, agent_->local_peer());
 
-    DeleteRoute("vrf1", "1.1.1.10", 32);
+    DeleteRoute("vrf1", "1.1.1.10", 32, bgp_peer_);
     client->WaitForIdle();
 
     DelLink("virtual-machine-interface", "vnet1", "instance-ip",
@@ -805,8 +837,9 @@ TEST_F(FlowTest, FlowValidateDestVn_1) {
     if (flow == NULL)
         return;
 
-    EXPECT_STREQ(flow->data().source_vn.c_str(), "default-project:vn2");
-    EXPECT_STREQ(flow->data().dest_vn.c_str(), "default-project:vn2");
+    std::string vn("default-project:vn2");
+    EXPECT_TRUE(VnMatch(flow->data().source_vn_list, vn));
+    EXPECT_TRUE(VnMatch(flow->data().dest_vn_list, vn));
 }
 
 // FloatingIP test for traffic from VM to local VM
@@ -1290,13 +1323,16 @@ TEST_F(FlowTest, FlowCleanup_on_intf_del_2) {
 //which was leaked due to policy
 TEST_F(FlowTest, FIP_traffic_to_leaked_routes) {
     //Leak a route from default-project:vn3:vn3 to default-project:vn2:vn2
+    VnListType vn_list;
+    vn_list.insert(vnet[5]->vn()->GetName());
     vnet_table[2]->AddLocalVmRouteReq(agent_->local_peer(), "default-project:vn2:vn2",
                                       vnet[5]->primary_ip_addr(), 32,
                                       vnet[5]->GetUuid(), 
-                                      vnet[5]->vn()->GetName(),
+                                      vn_list,
                                       vnet[5]->label(), SecurityGroupList(),
                                       CommunityList(), 0,
-                                      PathPreference(), Ip4Address(0));
+                                      PathPreference(), Ip4Address(0),
+                                      EcmpLoadBalance());
     client->WaitForIdle();
 
   // HTTP packet from VM to Server
@@ -1668,7 +1704,8 @@ TEST_F(FlowTest, fixed_ip_fip_dnat) {
 }
 
 TEST_F(FlowTest, fip_fixed_ip_change_1) {
-    agent_->flow_stats_collector()->UpdateFlowAgeTime(100000 * AGE_TIME);
+    agent_->flow_stats_manager()->\
+        default_flow_stats_collector()->UpdateFlowAgeTime(100000 * AGE_TIME);
     TxIpPacket(vnet[1]->id(), "1.1.1.10", vnet_addr[3], 1);
     client->WaitForIdle();
     EXPECT_TRUE(FlowGet(vnet[1]->flow_key_nh()->id(), "1.1.1.10",
@@ -1688,12 +1725,14 @@ TEST_F(FlowTest, fip_fixed_ip_change_1) {
     DelInstanceIp("instance_fixed_ip2");
     AddFloatingIp("fip_fixed_ip", 4, "2.1.1.101", "1.1.1.10");
     client->WaitForIdle();
-    agent_->flow_stats_collector()->UpdateFlowAgeTime(AGE_TIME);
+    agent_->flow_stats_manager()->\
+        default_flow_stats_collector()->UpdateFlowAgeTime(AGE_TIME);
 }
 
 TEST_F(FlowTest, fip_fixed_ip_change_2) {
 
-    agent_->flow_stats_collector()->UpdateFlowAgeTime(100000 * AGE_TIME);
+    agent_->flow_stats_manager()->\
+        default_flow_stats_collector()->UpdateFlowAgeTime(100000 * AGE_TIME);
     TxIpPacket(vnet[3]->id(), vnet_addr[3], "2.1.1.101", 1);
     client->WaitForIdle();
     EXPECT_TRUE(FlowGet(vnet[1]->flow_key_nh()->id(), "1.1.1.10",
@@ -1714,7 +1753,26 @@ TEST_F(FlowTest, fip_fixed_ip_change_2) {
     DelInstanceIp("instance_fixed_ip2");
     AddFloatingIp("fip_fixed_ip", 4, "2.1.1.101", "1.1.1.10");
     client->WaitForIdle();
-    agent_->flow_stats_collector()->UpdateFlowAgeTime(AGE_TIME);
+    agent_->flow_stats_manager()->\
+        default_flow_stats_collector()->UpdateFlowAgeTime(AGE_TIME);
+}
+
+// negative test scenario where VM tries to ping its own floating IP
+TEST_F(FlowTest, vm_packet_to_own_floating_ip) {
+    TxIpPacket(vnet[1]->id(), vnet_addr[1], "2.1.1.100", 1);
+    client->WaitForIdle();
+
+    // verify flow created as short flow
+    FlowEntry *fe = FlowGet(vnet[1]->vrf()->vrf_id(), vnet_addr[1], "2.1.1.100",
+                            1, 0, 0, vnet[1]->flow_key_nh()->id());
+
+    EXPECT_TRUE(fe != NULL && fe->is_flags_set(FlowEntry::ShortFlow) == true &&
+                fe->short_flow_reason() == FlowEntry::SHORT_IPV4_FWD_DIS);
+
+    //cleanup
+    client->EnqueueFlowFlush();
+    client->WaitForIdle(2);
+    WAIT_FOR(1000, 100, (0U == flow_proto_->FlowCount()));
 }
 
 int main(int argc, char *argv[]) {

@@ -69,7 +69,12 @@ string AgentInit::InstanceId() {
 }
 
 void AgentInit::InitPlatform() {
-    Ip4Address ip = Ip4Address::from_string("127.0.0.1");
+    boost::system::error_code ec;
+    Ip4Address ip = Ip4Address::from_string("127.0.0.1", ec);
+    if (ec.value() != 0) {
+        assert(0);
+    }
+
     if (agent_param_->platform() == AgentParam::VROUTER_ON_NIC) {
         agent_->set_vrouter_server_ip(ip);
         agent_->set_vrouter_server_port(VROUTER_SERVER_PORT);
@@ -112,7 +117,9 @@ int AgentInit::Start() {
     else {
         LoggingInit(agent_param_->log_file(), agent_param_->log_file_size(),
                     agent_param_->log_files_count(), agent_param_->use_syslog(),
-                    agent_param_->syslog_facility(), module_name);
+                    agent_param_->syslog_facility(), module_name,
+                    SandeshLevelTolog4Level(
+                        Sandesh::StringToLevel(agent_param_->log_level())));
     }
     agent_param_->LogConfig();
 
@@ -313,6 +320,7 @@ void AgentInit::InitDoneBase() {
     agent_->task_scheduler()->EnableLatencyThresholds
         (agent_param_->tbb_exec_delay() * 1000,
          agent_param_->tbb_schedule_delay() * 1000);
+    agent_->InitDone();
     InitDone();
 }
 
@@ -461,6 +469,7 @@ void AgentInit::ModulesShutdownBase() {
     if (agent_->cfg()) {
         agent_->cfg()->Shutdown();
     }
+    agent_->Shutdown();
     return;
 }
 

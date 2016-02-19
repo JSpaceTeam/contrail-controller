@@ -84,8 +84,6 @@ public:
         UpdateFlowAgeTime(secs * 1000 * 1000);
     }
 
-    void UpdateFlowStats(FlowEntry *flow, uint64_t &diff_bytes,
-                         uint64_t &diff_pkts);
     void UpdateFloatingIpStats(const FlowEntry *flow, uint64_t bytes,
                                uint64_t pkts);
     void Shutdown();
@@ -93,7 +91,7 @@ public:
     void AddEvent(FlowEntryPtr &flow);
     void DeleteEvent(const FlowKey &key);
     void SourceIpOverride(const FlowKey &key, FlowExportInfo *info,
-                          FlowDataIpv4 &s_flow);
+                          FlowLogData &s_flow);
     FlowExportInfo *FindFlowExportInfo(const FlowKey &flow);
     const FlowExportInfo *FindFlowExportInfo(const FlowKey &flow) const;
     void ExportFlow(const FlowKey &key, FlowExportInfo *info,
@@ -101,6 +99,8 @@ public:
     void UpdateFloatingIpStats(const FlowExportInfo *flow,
                                uint64_t bytes, uint64_t pkts);
     void FlowIndexUpdateEvent(const FlowKey &key, uint32_t idx);
+    void UpdateStatsEvent(const FlowKey &key, uint32_t bytes, uint32_t packets,
+                          uint32_t oflow_bytes);
     size_t Size() const { return flow_tree_.size(); }
     void NewFlow(const FlowKey &key, const FlowExportInfo &info);
     void set_deleted(bool val) {
@@ -118,16 +118,38 @@ public:
     friend class FetchFlowStatsRecord;
     friend class FlowStatsManager;
 protected:
-    virtual void DispatchFlowMsg(const std::vector<FlowDataIpv4> &lst);
+    virtual void DispatchFlowMsg(const std::vector<FlowLogData> &lst);
 
 private:
+    void UpdateStatsAndExportFlow(FlowExportInfo *info, const FlowKey &key,
+                                  uint64_t teardown_time);
+    void EvictedFlowStatsUpdate(const FlowKey &key,
+                                uint32_t bytes,
+                                uint32_t packets,
+                                uint32_t oflow_bytes);
+    void UpdateAndExportInternal(FlowExportInfo *info,
+                                 const FlowKey &key,
+                                 uint32_t bytes,
+                                 uint16_t oflow_bytes,
+                                 uint32_t pkts,
+                                 uint16_t oflow_pkts,
+                                 uint64_t time,
+                                 bool teardown_time);
+    void UpdateFlowStatsInternal(FlowExportInfo *info,
+                                 uint32_t bytes,
+                                 uint16_t oflow_bytes,
+                                 uint32_t pkts,
+                                 uint16_t oflow_pkts,
+                                 uint64_t time,
+                                 bool teardown_time,
+                                 uint64_t *diff_bytes,
+                                 uint64_t *diff_pkts);
     void FlowDeleteEnqueue(const FlowKey &key, bool rev);
     void EnqueueFlowMsg();
     void DispatchPendingFlowMsg();
     void GetFlowSandeshActionParams(const FlowAction &action_info,
                                     std::string &action_str);
-    void SetUnderlayInfo(FlowExportInfo *info, FlowDataIpv4 &s_flow);
-    bool SetUnderlayPort(FlowExportInfo *info, FlowDataIpv4 &s_flow);
+    void SetUnderlayInfo(FlowExportInfo *info, FlowLogData &s_flow);
     void UpdateThreshold(uint32_t new_value);
 
     void UpdateInterVnStats(FlowExportInfo *info,
@@ -149,6 +171,8 @@ private:
     void AddFlow(const FlowKey &key, FlowExportInfo info);
     void DeleteFlow(const FlowKey &key);
     void UpdateFlowIndex(const FlowKey &key, uint32_t idx);
+    void HandleFlowStatsUpdate(const FlowKey &key, uint32_t bytes,
+                               uint32_t packets, uint32_t oflow_bytes);
 
     void UpdateFlowStats(FlowExportInfo *flow, uint64_t &diff_bytes,
                          uint64_t &diff_pkts);
@@ -170,10 +194,9 @@ private:
     uint32_t flow_export_count_;
     uint64_t prev_flow_export_rate_compute_time_;
     uint32_t flow_export_rate_;
-    uint32_t threshold_;
     uint64_t flow_export_msg_drops_;
     uint32_t prev_cfg_flow_export_rate_;
-    std::vector<FlowDataIpv4> msg_list_;
+    std::vector<FlowLogData> msg_list_;
     uint8_t msg_index_;
     tbb::atomic<bool> deleted_;
     FlowAgingTableKey flow_aging_key_;

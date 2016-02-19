@@ -58,7 +58,8 @@ const std::map<FlowEntry::FlowPolicyState, const char*>
         (DEFAULT_GW_ICMP_OR_DNS,   "00000000-0000-0000-0000-000000000003")
         (LINKLOCAL_FLOW,           "00000000-0000-0000-0000-000000000004")
         (MULTICAST_FLOW,           "00000000-0000-0000-0000-000000000005")
-        (NON_IP_FLOW,              "00000000-0000-0000-0000-000000000006");
+        (NON_IP_FLOW,              "00000000-0000-0000-0000-000000000006")
+        (BGPROUTERSERVICE_FLOW,    "00000000-0000-0000-0000-000000000007");
 
 const std::map<uint16_t, const char*>
     FlowEntry::FlowDropReasonStr = boost::assign::map_list_of
@@ -90,11 +91,124 @@ const std::map<uint16_t, const char*>
         ((uint16_t)DROP_REVERSE_OUT_SG,      "DROP_REVERSE_OUT_SG");
 
 tbb::atomic<int> FlowEntry::alloc_count_;
-InetUnicastRouteEntry FlowEntry::inet4_route_key_(NULL, Ip4Address(), 32,
-                                                  false);
-InetUnicastRouteEntry FlowEntry::inet6_route_key_(NULL, Ip6Address(), 128,
-                                                  false);
 SecurityGroupList FlowEntry::default_sg_list_;
+
+/////////////////////////////////////////////////////////////////////////////
+// VmFlowRef
+/////////////////////////////////////////////////////////////////////////////
+const int VmFlowRef::kInvalidFd;
+VmFlowRef::VmFlowRef() : vm_(NULL), fd_(kInvalidFd), port_(0) {
+}
+
+VmFlowRef::VmFlowRef(const VmFlowRef &rhs) {
+    // UPDATE on linklocal flows is not supported. So, fd_ should be invalid
+    assert(fd_ == VmFlowRef::kInvalidFd);
+    assert(rhs.fd_ == VmFlowRef::kInvalidFd);
+    SetVm(rhs.vm_.get());
+}
+
+VmFlowRef:: ~VmFlowRef() {
+    Reset();
+}
+
+void VmFlowRef::operator=(const VmFlowRef &rhs) {
+    // When flow is evicted by vrouter, reuse the older fd and port
+    FreeFd();
+    fd_ = rhs.fd_;
+    port_ = rhs.port_;
+    SetVm(rhs.vm_.get());
+}
+
+void VmFlowRef::Reset() {
+    FreeRef();
+    FreeFd();
+    vm_.reset(NULL);
+}
+
+void VmFlowRef::FreeRef() {
+    if (vm_.get() == NULL)
+        return;
+
+    vm_->update_flow_count(-1);
+    if (fd_ != kInvalidFd) {
+        vm_->update_linklocal_flow_count(-1);
+        Agent *agent = static_cast<VmTable *>(vm_->get_table())->agent();
+        agent->pkt()->get_flow_proto()->update_linklocal_flow_count(-1);
+    }
+}
+
+void VmFlowRef::FreeFd() {
+    if (fd_ == kInvalidFd) {
+        assert(port_ == 0);
+        return;
+    }
+
+    close(fd_);
+    fd_ = kInvalidFd;
+    port_ = 0;
+}
+
+void VmFlowRef::SetVm(const VmEntry *vm) {
+    if (vm == vm_.get())
+        return;
+    FreeRef();
+
+    vm_.reset(vm);
+    if (vm == NULL)
+        return;
+
+    // Add flow-ref-count for both forward and reverse flow
+    vm->update_flow_count(1);
+    if (fd_ != kInvalidFd) {
+        vm_->update_linklocal_flow_count(1);
+        Agent *agent = static_cast<VmTable *>(vm->get_table())->agent();
+        agent->pkt()->get_flow_proto()->update_linklocal_flow_count(1);
+    }
+
+    return;
+}
+
+bool VmFlowRef::AllocateFd(Agent *agent, FlowEntry *flow, uint8_t l3_proto) {
+    if (fd_ != kInvalidFd)
+        return true;
+
+    port_ = 0;
+    // Short flows are always dropped. Dont allocate FD for short flow
+    if (flow->IsShortFlow())
+        return false;
+
+    if (l3_proto == IPPROTO_TCP) {
+        fd_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    } else if (l3_proto == IPPROTO_UDP) {
+        fd_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    }
+
+    if (fd_ == kInvalidFd) {
+        return false;
+    }
+
+    // allow the socket to be reused upon close
+    int optval = 1;
+    setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    if (bind(fd_, (struct sockaddr*) &address, sizeof(address)) < 0) {
+        FreeFd();
+        return false;
+    }
+
+    struct sockaddr_in bound_to;
+    socklen_t len = sizeof(bound_to);
+    if (getsockname(fd_, (struct sockaddr*) &bound_to, &len) < 0) {
+        FreeFd();
+        return false;
+    }
+
+    port_ = ntohs(bound_to.sin_port);
+    return true;
+}
 
 /////////////////////////////////////////////////////////////////////////////
 // FlowData constructor/destructor
@@ -109,8 +223,10 @@ FlowData::~FlowData() {
 void FlowData::Reset() {
     smac = MacAddress();
     dmac = MacAddress();
-    source_vn = "";
-    dest_vn = "";
+    source_vn_list.clear();
+    source_vn_match = "";
+    dest_vn_match = "";
+    dest_vn_list.clear();
     source_sg_id_l.clear();
     dest_sg_id_l.clear();
     flow_source_vrf = VrfEntry::kInvalidIndex;
@@ -118,8 +234,8 @@ void FlowData::Reset() {
     match_p.Reset();
     vn_entry.reset(NULL);
     intf_entry.reset(NULL);
-    in_vm_entry.reset(NULL);
-    out_vm_entry.reset(NULL);
+    in_vm_entry.Reset();
+    out_vm_entry.Reset();
     nh.reset(NULL);
     vrf = VrfEntry::kInvalidIndex;
     mirror_vrf = VrfEntry::kInvalidIndex;
@@ -137,6 +253,24 @@ void FlowData::Reset() {
     enable_rpf = true;
     l2_rpf_plen = Address::kMaxV4PrefixLen;
     vm_cfg_name = "";
+    bgp_as_a_service_port = 0;
+}
+
+static std::vector<std::string> MakeList(const VnListType &ilist) {
+    std::vector<std::string> olist;
+    for (VnListType::const_iterator it = ilist.begin();
+         it != ilist.end(); ++it) {
+        olist.push_back(*it);
+    }
+    return olist;
+}
+
+std::vector<std::string> FlowData::SourceVnList() const {
+    return MakeList(source_vn_list);
+}
+
+std::vector<std::string> FlowData::DestinationVnList() const {
+    return MakeList(dest_vn_list);
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -181,7 +315,6 @@ void MatchPolicy::Reset() {
 /////////////////////////////////////////////////////////////////////////////
 FlowEntry::FlowEntry(FlowTable *flow_table) :
     flow_table_(flow_table), flags_(0),
-    linklocal_src_port_fd_(PktFlowInfo::kLinkLocalInvalidFd),
     tunnel_type_(TunnelType::INVALID),
     fip_vmi_(AgentKey::ADD_DEL_CHANGE, nil_uuid(), ""), fsc_(NULL) {
     Reset();
@@ -195,28 +328,13 @@ FlowEntry::~FlowEntry() {
 }
 
 void FlowEntry::Reset() {
-    if (is_flags_set(FlowEntry::LinkLocalBindLocalSrcPort) &&
-        (linklocal_src_port_fd_ == PktFlowInfo::kLinkLocalInvalidFd ||
-         !linklocal_src_port_)) {
-        LOG(DEBUG, "Linklocal Flow Inconsistency fd = " <<
-            linklocal_src_port_fd_ << " port = " << linklocal_src_port_ <<
-            " flow index = " << flow_handle_ << " source = " <<
-            key_.src_addr.to_string() << " dest = " <<
-            key_.dst_addr.to_string() << " protocol = " << key_.protocol <<
-            " sport = " << key_.src_port << " dport = " << key_.dst_port);
-    }
-    if (linklocal_src_port_fd_ != PktFlowInfo::kLinkLocalInvalidFd) {
-        close(linklocal_src_port_fd_);
-        flow_table_->DelLinkLocalFlowInfo(linklocal_src_port_fd_);
-    }
     data_.Reset();
     l3_flow_ = true;
     flow_handle_ = kInvalidFlowHandle;
+    reverse_flow_entry_ = NULL;
     deleted_ = false;
     flags_ = 0;
     short_flow_reason_ = SHORT_UNKNOWN;
-    linklocal_src_port_ = 0;
-    linklocal_src_port_fd_ = PktFlowInfo::kLinkLocalInvalidFd;
     peer_vrouter_ = "";
     tunnel_type_ = TunnelType::INVALID;
     on_tree_ = false;
@@ -275,6 +393,7 @@ void intrusive_ptr_release(FlowEntry *fe) {
     int prev = fe->refcount_.fetch_and_decrement();
     if (prev == 1) {
         if (fe->on_tree()) {
+            flow_table->ConcurrencyCheck();
             FlowTable::FlowEntryMap::iterator it =
                 flow_table->flow_entry_map_.find(fe->key());
             assert(it != flow_table->flow_entry_map_.end());
@@ -320,11 +439,18 @@ bool FlowEntry::InitFlowCmn(const PktFlowInfo *info, const PktControlInfo *ctrl,
     } else {
         reset_flags(FlowEntry::TcpAckFlow);
     }
+    if (info->bgp_router_service_flow) {
+        set_flags(FlowEntry::BgpRouterService);
+        data_.bgp_as_a_service_port = info->nat_sport;
+    } else {
+        reset_flags(FlowEntry::BgpRouterService);
+        data_.bgp_as_a_service_port = 0;
+    }
 
     data_.intf_entry = ctrl->intf_ ? ctrl->intf_ : rev_ctrl->intf_;
     data_.vn_entry = ctrl->vn_ ? ctrl->vn_ : rev_ctrl->vn_;
-    data_.in_vm_entry = ctrl->vm_ ? ctrl->vm_ : NULL;
-    data_.out_vm_entry = rev_ctrl->vm_ ? rev_ctrl->vm_ : NULL;
+    data_.in_vm_entry.SetVm(ctrl->vm_);
+    data_.out_vm_entry.SetVm(rev_ctrl->vm_);
     l3_flow_ = info->l3_flow;
     return true;
 }
@@ -338,9 +464,8 @@ void FlowEntry::InitFwdFlow(const PktFlowInfo *info, const PktInfo *pkt,
         return;
     }
     if (info->linklocal_bind_local_port) {
-        linklocal_src_port_ = info->nat_sport;
-        linklocal_src_port_fd_ = info->linklocal_src_port_fd;
-        flow_table_->AddLinkLocalFlowInfo(linklocal_src_port_fd_, flow_handle_,
+        flow_table_->AddLinkLocalFlowInfo(data_.in_vm_entry.fd(),
+                                          flow_handle_,
                                           key_, UTCTimestampUsec());
         set_flags(FlowEntry::LinkLocalBindLocalSrcPort);
     } else {
@@ -389,7 +514,7 @@ void FlowEntry::InitFwdFlow(const PktFlowInfo *info, const PktInfo *pkt,
         } else {
             GetSourceRouteInfo(rev_ctrl->rt_);
         }
-        data_.dest_vn = data_.source_vn;
+        data_.dest_vn_list = data_.source_vn_list;
     } else {
         GetSourceRouteInfo(ctrl->rt_);
         GetDestRouteInfo(rev_ctrl->rt_);
@@ -464,7 +589,7 @@ void FlowEntry::InitRevFlow(const PktFlowInfo *info, const PktInfo *pkt,
         //SG id would be left empty, user who wants
         //unknown unicast to happen should modify the
         //SG to allow such traffic
-        data_.dest_vn = data_.source_vn;
+        data_.dest_vn_list = data_.source_vn_list;
     } else {
         GetSourceRouteInfo(ctrl->rt_);
         GetDestRouteInfo(rev_ctrl->rt_);
@@ -478,8 +603,8 @@ void FlowEntry::InitAuditFlow(uint32_t flow_idx) {
     flow_handle_ = flow_idx;
     set_flags(FlowEntry::ShortFlow);
     short_flow_reason_ = SHORT_AUDIT_ENTRY;
-    data_.source_vn = FlowHandler::UnknownVn();
-    data_.dest_vn = FlowHandler::UnknownVn();
+    data_.source_vn_list = FlowHandler::UnknownVnList();
+    data_.dest_vn_list = FlowHandler::UnknownVnList();
     data_.source_sg_id_l = default_sg_list();
     data_.dest_sg_id_l = default_sg_list();
 }
@@ -499,11 +624,11 @@ AgentRoute *FlowEntry::GetUcRoute(const VrfEntry *entry,
                                   const IpAddress &addr) {
     AgentRoute *rt = NULL;
     if (addr.is_v4()) {
-        inet4_route_key_.set_addr(addr.to_v4());
-        rt = entry->GetUcRoute(inet4_route_key_);
+        InetUnicastRouteEntry key(NULL, addr, 32, false);
+        rt = entry->GetUcRoute(key);
     } else {
-        inet6_route_key_.set_addr(addr.to_v6());
-        rt = entry->GetUcRoute(inet6_route_key_);
+        InetUnicastRouteEntry key(NULL, addr, 128, false);
+        rt = entry->GetUcRoute(key);
     }
     if (rt != NULL && rt->IsRPFInvalid()) {
         return NULL;
@@ -593,11 +718,14 @@ void FlowEntry::GetSourceRouteInfo(const AgentRoute *rt) {
         path = rt->GetActivePath();
     }
     if (path == NULL) {
-        data_.source_vn = FlowHandler::UnknownVn();
+        data_.source_vn_list = FlowHandler::UnknownVnList();
+        data_.source_vn_match = FlowHandler::UnknownVn();
         data_.source_sg_id_l = default_sg_list();
         data_.source_plen = 0;
     } else {
-        data_.source_vn = path->dest_vn_name();
+        data_.source_vn_list = path->dest_vn_list();
+        if (path->dest_vn_list().size())
+            data_.source_vn_match = *path->dest_vn_list().begin();
         data_.source_sg_id_l = path->sg_list();
         data_.source_plen = rt->plen();
     }
@@ -613,11 +741,14 @@ void FlowEntry::GetDestRouteInfo(const AgentRoute *rt) {
     }
 
     if (path == NULL) {
-        data_.dest_vn = FlowHandler::UnknownVn();
+        data_.dest_vn_list = FlowHandler::UnknownVnList();
+        data_.dest_vn_match = FlowHandler::UnknownVn();
         data_.dest_sg_id_l = default_sg_list();
         data_.dest_plen = 0;
     } else {
-        data_.dest_vn = path->dest_vn_name();
+        data_.dest_vn_list = path->dest_vn_list();
+        if (path->dest_vn_list().size())
+            data_.dest_vn_match = *path->dest_vn_list().begin();
         data_.dest_sg_id_l = path->sg_list();
         data_.dest_plen = rt->plen();
     }
@@ -826,9 +957,11 @@ void FlowEntry::GetPolicy(const VnEntry *vn, const FlowEntry *rflow) {
         data_.match_p.m_mirror_acl_l.push_back(acl);
     }
 
-    // Dont apply network-policy for linklocal and subnet broadcast flow
+    // Dont apply network-policy for linklocal, bgp router service
+    // and subnet broadcast flow
     if (is_flags_set(FlowEntry::LinkLocalFlow) ||
-        is_flags_set(FlowEntry::Multicast)) {
+        is_flags_set(FlowEntry::Multicast) ||
+        is_flags_set(FlowEntry::BgpRouterService)) {
         return;
     }
 
@@ -1092,6 +1225,8 @@ uint32_t FlowEntry::MatchAcl(const PacketHeader &hdr,
                 info->uuid = FlowPolicyStateStr.at(LINKLOCAL_FLOW);
             } else if (is_flags_set(FlowEntry::Multicast)) {
                 info->uuid = FlowPolicyStateStr.at(MULTICAST_FLOW);
+            } else if (is_flags_set(FlowEntry::BgpRouterService)) {
+                info->uuid = FlowPolicyStateStr.at(BGPROUTERSERVICE_FLOW);
             } else {
                 /* We need to make sure that info is not already populated
                  * before setting it to IMPLICIT_ALLOW. This is required
@@ -1167,8 +1302,8 @@ void FlowEntry::SetPacketHeader(PacketHeader *hdr) {
         hdr->src_port = 0;
         hdr->dst_port = 0;
     }
-    hdr->src_policy_id = &(data_.source_vn);
-    hdr->dst_policy_id = &(data_.dest_vn);
+    hdr->src_policy_id = &(data_.source_vn_list);
+    hdr->dst_policy_id = &(data_.dest_vn_list);
     hdr->src_sg_id_l = &(data_.source_sg_id_l);
     hdr->dst_sg_id_l = &(data_.dest_sg_id_l);
 }
@@ -1190,8 +1325,8 @@ void FlowEntry::SetOutPacketHeader(PacketHeader *hdr) {
         hdr->src_port = 0;
         hdr->dst_port = 0;
     }
-    hdr->src_policy_id = &(rflow->data().dest_vn);
-    hdr->dst_policy_id = &(rflow->data().source_vn);
+    hdr->src_policy_id = &(rflow->data().dest_vn_list);
+    hdr->dst_policy_id = &(rflow->data().source_vn_list);
     hdr->src_sg_id_l = &(rflow->data().dest_sg_id_l);
     hdr->dst_sg_id_l = &(rflow->data().source_sg_id_l);
 }
@@ -1360,6 +1495,10 @@ bool FlowEntry::DoPolicy() {
 
 done:
     nw_ace_uuid_ = nw_acl_info.uuid;
+    if (!nw_acl_info.src_match_vn.empty())
+        data_.source_vn_match = nw_acl_info.src_match_vn;
+    if (!nw_acl_info.dst_match_vn.empty())
+        data_.dest_vn_match = nw_acl_info.dst_match_vn;
     // Set mirror vrf after evaluation of actions
     SetMirrorVrfFromAction();
     //Set VRF assign action
@@ -1639,8 +1778,10 @@ void FlowEntry::FillFlowInfo(FlowInfo &info) {
     info.set_protocol(key_.protocol);
     info.set_nh_id(key_.nh);
     info.set_vrf(data_.vrf);
-    info.set_source_vn(data_.source_vn);
-    info.set_dest_vn(data_.dest_vn);
+    info.set_source_vn_list(data_.SourceVnList());
+    info.set_dest_vn_list(data_.DestinationVnList());
+    info.set_source_vn_match(data_.source_vn_match);
+    info.set_dest_vn_match(data_.dest_vn_match);
     std::vector<uint32_t> v;
     SecurityGroupList::const_iterator it;
     for (it = data_.source_sg_id_l.begin();
@@ -1729,6 +1870,10 @@ void FlowEntry::FillFlowInfo(FlowInfo &info) {
     info.set_l3_flow(l3_flow_);
     info.set_smac(data_.smac.ToString());
     info.set_dmac(data_.dmac.ToString());
+    info.set_drop_reason(FlowEntry::DropReasonStr(data_.drop_reason));
+    if (flow_table_) {
+        info.set_table_id(flow_table_->table_index());
+    }
 }
 
 static void SetAclListAceId(const AclDBEntry *acl,
@@ -1769,9 +1914,10 @@ void FlowEntry::SetAclFlowSandeshData(const AclDBEntry *acl,
     fe_sandesh_data.set_acl_action_l(acl_action_l);
 
     fe_sandesh_data.set_flow_handle(integerToString(flow_handle_));
-    fe_sandesh_data.set_source_vn(data_.source_vn);
-    fe_sandesh_data.set_source_vn(data_.source_vn);
-    fe_sandesh_data.set_dest_vn(data_.dest_vn);
+    fe_sandesh_data.set_source_vn(data_.source_vn_match);
+    fe_sandesh_data.set_dest_vn(data_.dest_vn_match);
+    fe_sandesh_data.set_source_vn_list(data_.SourceVnList());
+    fe_sandesh_data.set_dest_vn_list(data_.DestinationVnList());
     std::vector<uint32_t> v;
     if (!fsc_) {
         return;

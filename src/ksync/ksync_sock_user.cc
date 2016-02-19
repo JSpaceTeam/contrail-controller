@@ -612,7 +612,7 @@ void KSyncSockTypeMap::SetFlowEntry(vr_flow_req *req, bool set) {
         Address::INET6;
     IpAddress sip, dip;
     VectorToIp(req->get_fr_flow_ip(), family, &sip, &dip);
-    f->fe_flags |= VR_FLOW_FLAG_ACTIVE;
+    f->fe_flags = VR_FLOW_FLAG_ACTIVE;
     f->fe_stats.flow_bytes = 30;
     f->fe_stats.flow_packets = 1;
     if (sip.is_v4()) {
@@ -676,9 +676,10 @@ void KSyncSockTypeMap::Init(boost::asio::io_service &ios) {
     KSyncSock::SetSockTableEntry(singleton_);
     KSyncSock::Init(true);
 
-    singleton_->local_ep_.address(ip::address::from_string("127.0.0.1"));
+    singleton_->local_ep_.address
+        (boost::asio::ip::address::from_string("127.0.0.1"));
     singleton_->local_ep_.port(0);
-    singleton_->sock_.open(ip::udp::v4());
+    singleton_->sock_.open(boost::asio::ip::udp::v4());
     singleton_->sock_.bind(singleton_->local_ep_);
     singleton_->local_ep_ = singleton_->sock_.local_endpoint();
 }

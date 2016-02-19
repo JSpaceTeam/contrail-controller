@@ -207,7 +207,7 @@ void ArpDBState::UpdateArpRoutes(const InetUnicastRouteEntry *rt) {
            start_iter->first.vrf == rt->vrf() &&
            IsIp4SubnetMember(Ip4Address(start_iter->first.ip),
                              rt->addr().to_v4(), plen)) {
-        start_iter->second->Resync(policy_, vn_, sg_list_);
+        start_iter->second->Resync(policy_, vn_list_, sg_list_);
         start_iter++;
     }
 }
@@ -242,10 +242,10 @@ void ArpDBState::Update(const InetUnicastRouteEntry *rt) {
     
 
     if (policy_ != policy || sg != sg_list_ ||
-        vn_ != rt->GetActivePath()->dest_vn_name()) {
+        vn_list_ != rt->GetActivePath()->dest_vn_list()) {
         policy_ = policy;
         sg_list_ = sg;
-        vn_ = rt->GetActivePath()->dest_vn_name();
+        vn_list_ = rt->GetActivePath()->dest_vn_list();
         if (resolve_route_) {
             UpdateArpRoutes(rt);
         }
@@ -500,7 +500,6 @@ ArpProto::ArpIterator
 ArpProto::DeleteArpEntry(ArpProto::ArpIterator iter) {
     ArpEntry *entry = iter->second;
     arp_cache_.erase(iter++);
-    ValidateAndClearVrfState(const_cast<VrfEntry *>(entry->key().vrf));
     delete entry;
     return iter;
 }

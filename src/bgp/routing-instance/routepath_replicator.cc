@@ -10,7 +10,11 @@
 
 #include "base/set_util.h"
 #include "base/task_annotations.h"
+#include "base/task_trigger.h"
+#include "bgp/bgp_config.h"
 #include "bgp/bgp_log.h"
+#include "bgp/bgp_route.h"
+#include "bgp/bgp_server.h"
 #include "bgp/origin-vn/origin_vn.h"
 #include "bgp/routing-instance/routing_instance.h"
 #include "bgp/routing-instance/rtarget_group_mgr.h"
@@ -20,6 +24,7 @@ using std::ostringstream;
 using std::make_pair;
 using std::pair;
 using std::string;
+using std::vector;
 
 //
 // RoutePathReplication trace macro. Optionally logs the server name as well for
@@ -117,6 +122,10 @@ const RtGroup *TableState::FindGroup(RtGroup *group) const {
     return (it != list_.end() ? *it : NULL);
 }
 
+uint32_t TableState::route_count() const {
+    return table_->GetDBStateCount(listener_id());
+}
+
 RtReplicated::RtReplicated(RoutePathReplicator *replicator)
     : replicator_(replicator) {
 }
@@ -132,6 +141,25 @@ void RtReplicated::DeleteRouteInfo(BgpTable *table, BgpRoute *rt,
     ReplicatedRtPathList::const_iterator it) {
     replicator_->DeleteSecondaryPath(table, rt, *it);
     replicate_list_.erase(it);
+}
+
+//
+// Return the list of secondary table names for the given primary path.
+// We go through all SecondaryRouteInfos and skip the ones that don't
+// match the primary path.
+//
+vector<string> RtReplicated::GetTableNameList(const BgpPath *path) const {
+    vector<string> table_list;
+    BOOST_FOREACH(const SecondaryRouteInfo &rinfo, replicate_list_) {
+        if (rinfo.peer_ != path->GetPeer())
+            continue;
+        if (rinfo.path_id_ != path->GetPathId())
+            continue;
+        if (rinfo.src_ != path->GetSource())
+            continue;
+        table_list.push_back(rinfo.table_->name());
+    }
+    return table_list;
 }
 
 RoutePathReplicator::RoutePathReplicator(BgpServer *server,
@@ -206,8 +234,10 @@ TableState *RoutePathReplicator::FindTableState(BgpTable *table) {
     return (loc != table_state_list_.end() ? loc->second : NULL);
 }
 
-const TableState *RoutePathReplicator::FindTableState(BgpTable *table) const {
-    TableStateList::const_iterator loc = table_state_list_.find(table);
+const TableState *RoutePathReplicator::FindTableState(
+    const BgpTable *table) const {
+    TableStateList::const_iterator loc =
+        table_state_list_.find(const_cast<BgpTable *>(table));
     return (loc != table_state_list_.end() ? loc->second : NULL);
 }
 
@@ -405,9 +435,9 @@ void RoutePathReplicator::DBStateSync(BgpTable *table, TableState *ts,
 static ExtCommunityPtr UpdateExtCommunity(BgpServer *server,
         const RoutingInstance *rtinstance, const ExtCommunity *ext_community,
         const ExtCommunity::ExtCommunityList &export_list) {
-    // Add RouteTargets exported by the instance for a non-default instance.
+    // Add RouteTargets exported by the instance for a non-master instance.
     ExtCommunityPtr extcomm_ptr;
-    if (!rtinstance->IsDefaultRoutingInstance()) {
+    if (!rtinstance->IsMasterRoutingInstance()) {
         extcomm_ptr =
             server->extcomm_db()->AppendAndLocate(ext_community, export_list);
         return extcomm_ptr;
@@ -473,8 +503,14 @@ bool RoutePathReplicator::RouteListener(TableState *ts,
         static_cast<RtReplicated *>(rt->GetState(table, id));
     RtReplicated::ReplicatedRtPathList replicated_path_list;
 
+    //
     // Cleanup if the route is not usable.
-    if (!rt->IsUsable()) {
+    // If route aggregation is enabled, contributing route/more specific route
+    // for a aggregate route will NOT be replicated to destination table
+    //
+    if (!rt->IsUsable() || (table->IsRouteAggregationSupported() &&
+                            !rtinstance->deleted() &&
+                            table->IsContributingRoute(rt))) {
         if (!dbstate) {
             return true;
         }
@@ -492,7 +528,7 @@ bool RoutePathReplicator::RouteListener(TableState *ts,
 
     // Get the export route target list from the routing instance.
     ExtCommunity::ExtCommunityList export_list;
-    if (!rtinstance->IsDefaultRoutingInstance()) {
+    if (!rtinstance->IsMasterRoutingInstance()) {
         BOOST_FOREACH(RouteTarget rtarget, rtinstance->GetExportList()) {
             export_list.push_back(rtarget.GetExtCommunity());
         }
@@ -554,7 +590,7 @@ bool RoutePathReplicator::RouteListener(TableState *ts,
             continue;
 
         // Add OriginVn when replicating self-originated routes from a VRF.
-        if (!rtinstance->IsDefaultRoutingInstance() &&
+        if (!vn_index && !rtinstance->IsMasterRoutingInstance() &&
             path->IsVrfOriginated() && rtinstance->virtual_network_index()) {
             vn_index = rtinstance->virtual_network_index();
             OriginVn origin_vn(server_->autonomous_system(), vn_index);
@@ -620,6 +656,21 @@ const RtReplicated *RoutePathReplicator::GetReplicationState(
     RtReplicated *dbstate =
         static_cast<RtReplicated *>(rt->GetState(table, ts->listener_id()));
     return dbstate;
+}
+
+//
+// Return the list of secondary table names for the given primary path.
+//
+vector<string> RoutePathReplicator::GetReplicatedTableNameList(
+    const BgpTable *table, const BgpRoute *rt, const BgpPath *path) const {
+    const TableState *ts = FindTableState(table);
+    if (!ts)
+        return vector<string>();
+    const RtReplicated *dbstate = static_cast<const RtReplicated *>(
+        rt->GetState(table, ts->listener_id()));
+    if (!dbstate)
+        return vector<string>();
+    return dbstate->GetTableNameList(path);
 }
 
 void RoutePathReplicator::DeleteSecondaryPath(BgpTable *table, BgpRoute *rt,

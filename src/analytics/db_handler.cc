@@ -70,7 +70,9 @@ DbHandler::DbHandler(EventManager *evm,
     drop_level_(SandeshLevel::INVALID),
     ttl_map_(ttl_map),
     use_cql_(use_cql),
-    tablespace_() {
+    tablespace_(),
+    gen_partition_no_((uint8_t)g_viz_constants.PARTITION_MIN,
+        (uint8_t)g_viz_constants.PARTITION_MAX) {
 #ifdef USE_CASSANDRA_CQL
     if (use_cql) {
         dbif_.reset(new cass::cql::CqlIf(evm, cassandra_ips,
@@ -92,7 +94,9 @@ DbHandler::DbHandler(EventManager *evm,
 
 DbHandler::DbHandler(GenDb::GenDbIf *dbif, const TtlMap& ttl_map) :
     dbif_(dbif),
-    ttl_map_(ttl_map) {
+    ttl_map_(ttl_map),
+    gen_partition_no_((uint8_t)g_viz_constants.PARTITION_MIN,
+        (uint8_t)g_viz_constants.PARTITION_MAX) {
 }
 
 DbHandler::~DbHandler() {
@@ -121,12 +125,9 @@ uint64_t DbHandler::GetTtlFromMap(const TtlMap& ttl_map,
 std::string DbHandler::GetName() const {
     return name_;
 }
-std::string DbHandler::GetHost() const {
-    return dbif_->Db_GetHost();
-}
 
-int DbHandler::GetPort() const {
-    return dbif_->Db_GetPort();
+std::vector<boost::asio::ip::tcp::endpoint> DbHandler::GetEndpoints() const {
+    return dbif_->Db_GetEndpoints();
 }
 
 bool DbHandler::DropMessage(const SandeshHeader &header,
@@ -231,7 +232,9 @@ bool DbHandler::CreateTables() {
         columns.push_back(stat_col);
 
         if (!dbif_->Db_AddColumnSync(col_list)) {
-            VIZD_ASSERT(0);
+            DB_LOG(ERROR, g_viz_constants.SYSTEM_OBJECT_TABLE <<
+                ": Start Time Column Add FAILED");
+            return false;
         }
     }
 
@@ -266,7 +269,9 @@ bool DbHandler::CreateTables() {
         columns.push_back(stat_col);
 
         if (!dbif_->Db_AddColumnSync(col_list)) {
-            VIZD_ASSERT(0);
+            DB_LOG(ERROR, g_viz_constants.SYSTEM_OBJECT_TABLE <<
+                ": TTL Column Add FAILED");
+            return false;
         }
     }
 
@@ -392,9 +397,33 @@ bool DbHandler::GetStats(std::vector<GenDb::DbTableInfo> *vdbti,
     GenDb::DbErrors *dbe, std::vector<GenDb::DbTableInfo> *vstats_dbti) {
     {
         tbb::mutex::scoped_lock lock(smutex_);
-        stable_stats_.Get(vstats_dbti);
+        stable_stats_.GetDiffs(vstats_dbti);
     }
     return dbif_->Db_GetStats(vdbti, dbe);
+}
+
+bool DbHandler::GetCqlMetrics(cass::cql::Metrics *metrics) const {
+    if (!UseCql()) {
+        return false;
+    }
+    cass::cql::CqlIf *cql_if(dynamic_cast<cass::cql::CqlIf *>(dbif_.get()));
+    if (cql_if == NULL) {
+        return false;
+    }
+    cql_if->Db_GetCqlMetrics(metrics);
+    return true;
+}
+
+bool DbHandler::GetCqlStats(cass::cql::DbStats *stats) const {
+    if (!UseCql()) {
+        return false;
+    }
+    cass::cql::CqlIf *cql_if(dynamic_cast<cass::cql::CqlIf *>(dbif_.get()));
+    if (cql_if == NULL) {
+        return false;
+    }
+    cql_if->Db_GetCqlStats(stats);
+    return true;
 }
 
 bool DbHandler::AllowMessageTableInsert(const SandeshHeader &header) {
@@ -410,6 +439,51 @@ bool DbHandler::MessageIndexTableInsert(const std::string& cfname,
     col_list->cfname_ = cfname;
     // Rowkey
     GenDb::DbDataValueVec& rowkey = col_list->rowkey_;
+#ifdef USE_CASSANDRA_CQL
+    rowkey.reserve(2);
+    uint32_t T2(header.get_Timestamp() >> g_viz_constants.RowTimeInBits);
+    rowkey.push_back(T2);
+    //Push partition into row key
+    rowkey.push_back(gen_partition_no_());
+    // Columns
+    GenDb::DbDataValueVec *col_name(new GenDb::DbDataValueVec());
+    col_name->reserve(3);
+    int ttl;
+    if (message_type == "VncApiConfigLog") {
+        ttl = GetTtl(TtlType::CONFIGAUDIT_TTL);
+    } else {
+        ttl = GetTtl(TtlType::GLOBAL_TTL);
+    }
+    if (cfname == g_viz_constants.MESSAGE_TABLE_SOURCE) {
+        col_name->push_back(header.get_Source());
+    } else if (cfname == g_viz_constants.MESSAGE_TABLE_MODULE_ID) {
+        col_name->push_back(header.get_Module());
+    } else if (cfname == g_viz_constants.MESSAGE_TABLE_CATEGORY) {
+        col_name->push_back(header.get_Category());
+    } else if (cfname == g_viz_constants.MESSAGE_TABLE_MESSAGE_TYPE) {
+        col_name->push_back(message_type);
+    } else if (cfname == g_viz_constants.MESSAGE_TABLE_TIMESTAMP) {
+    } else if (cfname == g_viz_constants.MESSAGE_TABLE_KEYWORD) {
+        if (keyword.length()) {
+            col_name->push_back(keyword);
+        } else {
+            return false;
+        }
+    } else {
+        DB_LOG(ERROR, "Unknown table: " << cfname << ", message: "
+                << message_type << ", message UUID: " << unm);
+        return false;
+    }
+    uint32_t T1(header.get_Timestamp() & g_viz_constants.RowTimeInMask);
+    col_name->push_back(T1);
+    col_name->push_back(unm);
+    //No value to be stored against the columns
+    GenDb::DbDataValueVec *col_value(new GenDb::DbDataValueVec(0));
+    GenDb::NewCol *col(new GenDb::NewCol(col_name, col_value, ttl));
+    GenDb::NewColVec& columns = col_list->columns_;
+    columns.reserve(1);
+    columns.push_back(col);
+#else
     rowkey.reserve(8);
     uint32_t T2(header.get_Timestamp() >> g_viz_constants.RowTimeInBits);
     rowkey.push_back(T2);
@@ -446,6 +520,7 @@ bool DbHandler::MessageIndexTableInsert(const std::string& cfname,
     }
     GenDb::NewCol *col(new GenDb::NewCol(col_name, col_value, ttl));
     columns.push_back(col);
+#endif
     if (!dbif_->Db_AddColumn(col_list)) {
         DB_LOG(ERROR, "Addition of message: " << message_type <<
                 ", message UUID: " << unm << " to table: " << cfname <<
@@ -806,7 +881,7 @@ bool DbHandler::StatTableWrite(uint32_t t2,
             break;
         default:
             tbb::mutex::scoped_lock lock(smutex_);
-            stable_stats_.Update(statName + ":" + statAttr, true, true);
+            stable_stats_.Update(statName + ":" + statAttr, true, true, 1);
             DB_LOG(ERROR, "Bad Prefix Tag " << statName <<
                     ", " << statAttr <<  " tag " << ptag.first <<
                     ":" << stag.first << " jsonline " << jsonline);
@@ -814,7 +889,7 @@ bool DbHandler::StatTableWrite(uint32_t t2,
     }
     if (bad_suffix) {
         tbb::mutex::scoped_lock lock(smutex_);
-        stable_stats_.Update(statName + ":" + statAttr, true, true);
+        stable_stats_.Update(statName + ":" + statAttr, true, true, 1);
         DB_LOG(ERROR, "Bad Suffix Tag " << statName <<
                 ", " << statAttr <<  " tag " << ptag.first <<
                 ":" << stag.first << " jsonline " << jsonline);
@@ -867,11 +942,11 @@ bool DbHandler::StatTableWrite(uint32_t t2,
                 ":" << stag.first << " into table " <<
                 cfname <<" FAILED");
         tbb::mutex::scoped_lock lock(smutex_);
-        stable_stats_.Update(statName + ":" + statAttr, true, true);
+        stable_stats_.Update(statName + ":" + statAttr, true, true, 1);
         return false;
     } else {
         tbb::mutex::scoped_lock lock(smutex_);
-        stable_stats_.Update(statName + ":" + statAttr, true, false);
+        stable_stats_.Update(statName + ":" + statAttr, true, false, 1);
         return true;
     }
 }
@@ -1342,7 +1417,7 @@ static bool PopulateFlowIndexTables(const FlowValueArray &fvalues,
 }
 
 template <typename T>
-bool FlowDataIpv4ObjectWalker<T>::for_each(pugi::xml_node& node) {
+bool FlowLogDataObjectWalker<T>::for_each(pugi::xml_node& node) {
     std::string col_name(node.name());
     FlowTypeMap::const_iterator it = flow_msg2type_map.find(col_name);
     if (it != flow_msg2type_map.end()) {
@@ -1366,7 +1441,23 @@ bool FlowDataIpv4ObjectWalker<T>::for_each(pugi::xml_node& node) {
         case GenDb::DbDataType::Unsigned32Type:
             {
                 int32_t val;
+#ifndef USE_CASSANDRA_CQL
+                if (strcmp(node.attribute("type").value(), "ipaddr") == 0) {
+                    boost::system::error_code ec;
+                    IpAddress ipaddr(IpAddress::from_string(
+                                     node.child_value(), ec));
+                    if (ec) {
+                        LOG(ERROR, "FlowRecordTable: " << col_name << ": (" <<
+                            node.child_value() << ") INVALID");
+                    } else {
+                        val = ipaddr.to_v4().to_ulong();
+                    }
+                } else {
+                    stringToInteger(node.child_value(), val);
+                }
+#else // !USE_CASSANDRA_CQL
                 stringToInteger(node.child_value(), val);
+#endif // USE_CASSANDRA_CQL
                 values_[ftinfo.get<0>()] = static_cast<uint32_t>(val);
                 break;
             }
@@ -1390,10 +1481,12 @@ bool FlowDataIpv4ObjectWalker<T>::for_each(pugi::xml_node& node) {
                 std::stringstream ss;
                 ss << node.child_value();
                 boost::uuids::uuid u;
-                ss >> u;
-                if (ss.fail()) {
-                    LOG(ERROR, "FlowRecordTable: " << col_name << ": (" << 
-                        node.child_value() << ") INVALID");
+                if (!ss.str().empty()) {
+                    ss >> u;
+                    if (ss.fail()) {
+                        LOG(ERROR, "FlowRecordTable: " << col_name << ": (" <<
+                            node.child_value() << ") INVALID");
+                    }
                 }     
                 values_[ftinfo.get<0>()] = u;
                 break;
@@ -1443,7 +1536,7 @@ bool DbHandler::FlowSampleAdd(const pugi::xml_node& flow_sample,
                               const SandeshHeader& header) {
     // Traverse and populate the flow entry values
     FlowValueArray flow_entry_values;
-    FlowDataIpv4ObjectWalker<FlowValueArray> flow_msg_walker(flow_entry_values);
+    FlowLogDataObjectWalker<FlowValueArray> flow_msg_walker(flow_entry_values);
     pugi::xml_node &mnode = const_cast<pugi::xml_node &>(flow_sample);
     if (!mnode.traverse(flow_msg_walker)) {
         VIZD_ASSERT(0);
@@ -1610,21 +1703,17 @@ bool DbHandlerInitializer::Initialize() {
     boost::system::error_code ec;
     if (!db_handler_->Init(true, db_task_instance_)) {
         // Update connection info
-        boost::asio::ip::address db_addr(boost::asio::ip::address::from_string(
-            db_handler_->GetHost(), ec));
-        boost::asio::ip::tcp::endpoint db_endpoint(db_addr, db_handler_->GetPort());
         ConnectionState::GetInstance()->Update(ConnectionType::DATABASE,
-            db_name_, ConnectionStatus::DOWN, db_endpoint, std::string());
+            db_name_, ConnectionStatus::DOWN, db_handler_->GetEndpoints(),
+            std::string());
         LOG(DEBUG, db_name_ << ": Db Initialization FAILED");
         ScheduleInit();
         return false;
     }
     // Update connection info
-    boost::asio::ip::address db_addr(boost::asio::ip::address::from_string(
-        db_handler_->GetHost(), ec));
-    boost::asio::ip::tcp::endpoint db_endpoint(db_addr, db_handler_->GetPort());
     ConnectionState::GetInstance()->Update(ConnectionType::DATABASE,
-        db_name_, ConnectionStatus::UP, db_endpoint, std::string());
+        db_name_, ConnectionStatus::UP, db_handler_->GetEndpoints(),
+        std::string());
 
     if (callback_) {
        callback_();

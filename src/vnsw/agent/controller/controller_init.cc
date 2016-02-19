@@ -31,10 +31,22 @@ SandeshTraceBufferPtr ControllerDiscoveryTraceBuf(SandeshTraceBufferCreate(
     "ControllerDiscovery", 5000));
 SandeshTraceBufferPtr ControllerInfoTraceBuf(SandeshTraceBufferCreate(
     "ControllerInfo", 5000));
+SandeshTraceBufferPtr ControllerTxConfigTraceBuf1(SandeshTraceBufferCreate(
+    "ControllerTxConfig_1", 5000));
+SandeshTraceBufferPtr ControllerTxConfigTraceBuf2(SandeshTraceBufferCreate(
+    "ControllerTxConfig_2", 5000));
 SandeshTraceBufferPtr ControllerRouteWalkerTraceBuf(SandeshTraceBufferCreate(
     "ControllerRouteWalker", 5000));
 SandeshTraceBufferPtr ControllerTraceBuf(SandeshTraceBufferCreate(
     "Controller", 5000));
+SandeshTraceBufferPtr ControllerRxRouteMessageTraceBuf1(SandeshTraceBufferCreate(
+    "ControllerRxRouteXmppMessage1", 5000));
+SandeshTraceBufferPtr ControllerRxConfigMessageTraceBuf1(SandeshTraceBufferCreate(
+    "ControllerRxConfigXmppMessage1", 5000));
+SandeshTraceBufferPtr ControllerRxRouteMessageTraceBuf2(SandeshTraceBufferCreate(
+    "ControllerRxRouteXmppMessage2", 5000));
+SandeshTraceBufferPtr ControllerRxConfigMessageTraceBuf2(SandeshTraceBufferCreate(
+    "ControllerRxConfigXmppMessage2", 5000));
 
 ControllerDiscoveryData::ControllerDiscoveryData(std::vector<DSResponse> resp) :
     ControllerWorkQueueData(), discovery_response_(resp) {
@@ -47,7 +59,7 @@ VNController::VNController(Agent *agent)
     work_queue_(agent->task_scheduler()->GetTaskId("Agent::ControllerXmpp"), 0,
                 boost::bind(&VNController::ControllerWorkQueueProcess, this,
                             _1)),
-    fabric_multicast_label_range_() {
+    fabric_multicast_label_range_(), xmpp_channel_down_cb_() {
     work_queue_.set_name("Controller Queue");
     decommissioned_peer_list_.clear();
 }
@@ -87,7 +99,7 @@ void VNController::SetAgentMcastLabelRange(uint8_t idx) {
     //         split remaining unicast label for both control
     //         node
     //  Remaining label would be used for unicast mpls label
-    if (agent_->vrouter_max_labels() == 0) {
+    if (agent_->vrouter_max_labels() <=  MIN_UNICAST_LABEL_RANGE) {
         str << 0 << "-" << 0;
         fabric_multicast_label_range_[idx].start = 0;
         fabric_multicast_label_range_[idx].end = 0;
@@ -163,6 +175,10 @@ void VNController::XmppServerConnect() {
             XmppChannel *channel = client->
                 FindChannel(XmppInit::kControlNodeJID);
             assert(channel);
+            channel->RegisterRxMessageTraceCallback(
+                             boost::bind(&VNController::XmppMessageTrace,
+                                         this, bgp_peer->GetXmppServerIdx(),
+                                         _1, _2, _3, _4, _5));
             bgp_peer->RegisterXmppChannel(channel);
 
             bgp_peer->UpdateConnectionInfo(channel->GetPeerState());
@@ -302,7 +318,8 @@ void VNController::DnsXmppServerDisConnect() {
 //If not agent never got a channel down state and is being removed
 //as it is not part of discovery list.
 //Artificially inject NOT_READY in agent xmpp channel.
-void VNController::DeleteAgentXmppChannel(AgentXmppChannel *channel) {
+void VNController::DeleteAgentXmppChannel(uint8_t idx) {
+    AgentXmppChannel *channel = agent_->controller_xmpp_channel(idx);
     if (!channel)
         return;
 
@@ -315,6 +332,9 @@ void VNController::DeleteAgentXmppChannel(AgentXmppChannel *channel) {
         AgentXmppChannel::HandleAgentXmppClientChannelEvent(channel,
                                                             xmps::NOT_READY);
     }
+    //Every delete of channel should delete flow of bgp-as-a-service,
+    //which is using this CN.
+    xmpp_channel_down_cb_(idx);
 }
 
 //Trigger shutdown and cleanup of routes for the client
@@ -386,7 +406,7 @@ void VNController::DisConnectControllerIfmapServer(uint8_t idx) {
     agent_->set_controller_ifmap_xmpp_client(NULL, idx);
 
     //cleanup AgentXmppChannel
-    DeleteAgentXmppChannel(agent_->controller_xmpp_channel(idx));
+    DeleteAgentXmppChannel(idx);
     agent_->reset_controller_xmpp_channel(idx);
 
     //cleanup AgentIfmapXmppChannel
@@ -802,4 +822,22 @@ bool VNController::XmppMessageProcess(ControllerXmppDataType data) {
 
 void VNController::Enqueue(ControllerWorkQueueDataType data) {
     work_queue_.Enqueue(data);
+}
+
+bool VNController::XmppMessageTrace(uint8_t peer_index,
+                                    const std::string &to_address,
+                                    int port, int size,
+                                    const std::string &msg,
+                                    const XmppStanza::XmppMessage *xmppmsg) {
+    const std::string &to = xmppmsg->to;
+    if (to.find(XmppInit::kBgpPeer) != string::npos) {
+        CONTROLLER_RX_ROUTE_MESSAGE_TRACE(Message, peer_index, to_address,
+                                           port, size, msg);
+        return true;
+    } else if (to.find(XmppInit::kConfigPeer) != string::npos) {
+        CONTROLLER_RX_CONFIG_MESSAGE_TRACE(Message, peer_index, to_address,
+                                           port, size, msg);
+        return true;
+    }
+    return false;
 }

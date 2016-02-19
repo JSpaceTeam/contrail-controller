@@ -24,6 +24,7 @@ import utils
 import datetime
 import re
 from operator import itemgetter
+import itertools
 
 class VncCassandraClient(object):
     # Name to ID mapping keyspace + tables
@@ -39,6 +40,10 @@ class VncCassandraClient(object):
     # where type is entity object is being shared with. Project initially
     _OBJ_SHARED_CF_NAME = 'obj_shared_table'
 
+    _UUID_KEYSPACE = {_UUID_KEYSPACE_NAME:
+        [(_OBJ_UUID_CF_NAME, UTF8_TYPE), (_OBJ_FQ_NAME_CF_NAME, UTF8_TYPE),
+         (_OBJ_SHARED_CF_NAME, None)]}
+
     _MAX_COL = 10000000
 
     @classmethod
@@ -49,11 +54,12 @@ class VncCassandraClient(object):
         return db_info
     # end get_db_info
 
-    def __init__(self, server_list, db_prefix, keyspaces, logger,
-                 generate_url=None, reset_config=[], credential=None):
+    def __init__(self, server_list, db_prefix, rw_keyspaces, ro_keyspaces,
+            logger, generate_url=None, reset_config=False, credential=None):
         self._re_match_parent = re.compile('parent:')
         self._re_match_prop = re.compile('prop:')
         self._re_match_prop_list = re.compile('propl:')
+        self._re_match_prop_map = re.compile('propm:')
         self._re_match_ref = re.compile('ref:')
         self._re_match_backref = re.compile('backref:')
         self._re_match_children = re.compile('children:')
@@ -74,12 +80,11 @@ class VncCassandraClient(object):
         # returns an empty string
         self._generate_url = generate_url or (lambda x,y: '')
         self._cf_dict = {}
-        self._keyspaces = { self._UUID_KEYSPACE_NAME: [(self._OBJ_UUID_CF_NAME, UTF8_TYPE),
-                                       (self._OBJ_FQ_NAME_CF_NAME, UTF8_TYPE),
-                                       (self._OBJ_SHARED_CF_NAME, None)]}
-
-        if keyspaces:
-            self._keyspaces.update(keyspaces)
+        self._ro_keyspaces = ro_keyspaces or {}
+        self._rw_keyspaces = rw_keyspaces or {}
+        if ((self._UUID_KEYSPACE_NAME not in self._ro_keyspaces) and
+            (self._UUID_KEYSPACE_NAME not in self._rw_keyspaces)):
+            self._ro_keyspaces.update(self._UUID_KEYSPACE)
         self._cassandra_init(server_list)
         self._cache_uuid_to_fq_name = {}
         self._obj_uuid_cf = self._cf_dict[self._OBJ_UUID_CF_NAME]
@@ -87,32 +92,169 @@ class VncCassandraClient(object):
         self._obj_shared_cf = self._cf_dict[self._OBJ_SHARED_CF_NAME]
     # end __init__
 
-    def get_cf(self, func):
-        return self._cf_dict.get(func)
+    def get_cf(self, cf_name):
+        return self._cf_dict.get(cf_name)
     #end
 
-    def add(self, func, key, value):
+    def add(self, cf_name, key, value):
         try:
-            self.get_cf(func).insert(key, value)
+            self.get_cf(cf_name).insert(key, value)
             return True
         except:
             return False
     #end
 
-    def get(self, func, key):
+    def get(self, cf_name, key):
         try:
-            return self.get_cf(func).get(key)
+            return self.get_cf(cf_name).get(key)
         except:
             return None
     #end
 
-    def delete(self, func, key):
+    def delete(self, cf_name, key):
         try:
-            self.get_cf(func).remove(key)
+            self.get_cf(cf_name).remove(key)
             return True
         except:
             return False
     #end
+
+    def get_range(self, cf_name):
+        try:
+            return self.get_cf(cf_name).get_range(column_count=100000)
+        except:
+            return None
+    #end
+
+    def _create_prop(self, bch, obj_uuid, prop_name, prop_val):
+        bch.insert(obj_uuid, {'prop:%s' % (prop_name): json.dumps(prop_val)})
+    # end _create_prop
+
+    def _update_prop(self, bch, obj_uuid, prop_name, new_props):
+        if new_props[prop_name] is None:
+            bch.remove(obj_uuid, columns=['prop:' + prop_name])
+        else:
+            bch.insert(
+                obj_uuid,
+                {'prop:' + prop_name: json.dumps(new_props[prop_name])})
+
+        # prop has been accounted for, remove so only new ones remain
+        del new_props[prop_name]
+    # end _update_prop
+
+    def _add_to_prop_list(self, bch, obj_uuid, prop_name,
+                          prop_elem_value, prop_elem_position):
+        bch.insert(obj_uuid,
+            {'propl:%s:%s' %(prop_name, prop_elem_position):
+             json.dumps(prop_elem_value)})
+    # end _add_to_prop_list
+
+    def _delete_from_prop_list(self, bch, obj_uuid, prop_name,
+                               prop_elem_position):
+        bch.remove(obj_uuid,
+            columns=['propl:%s:%s' %(prop_name, prop_elem_position)])
+    # end _delete_from_prop_list
+
+    def _set_in_prop_map(self, bch, obj_uuid, prop_name,
+                          prop_elem_value, prop_elem_position):
+        bch.insert(obj_uuid,
+            {'propm:%s:%s' %(prop_name, prop_elem_position):
+             json.dumps(prop_elem_value)})
+    # end _set_in_prop_map
+
+    def _delete_from_prop_map(self, bch, obj_uuid, prop_name,
+                               prop_elem_position):
+        bch.remove(obj_uuid,
+            columns=['propm:%s:%s' %(prop_name, prop_elem_position)])
+    # end _delete_from_prop_map
+
+    def _create_child(self, bch, parent_type, parent_uuid,
+                      child_type, child_uuid):
+        child_col = {'children:%s:%s' %
+                     (child_type, child_uuid): json.dumps(None)}
+        bch.insert(parent_uuid, child_col)
+
+        parent_col = {'parent:%s:%s' %
+                      (parent_type, parent_uuid): json.dumps(None)}
+        bch.insert(child_uuid, parent_col)
+    # end _create_child
+
+    def _delete_child(self, bch, parent_type, parent_uuid,
+                      child_type, child_uuid):
+        child_col = {'children:%s:%s' %
+                     (child_type, child_uuid): json.dumps(None)}
+        bch.remove(parent_uuid, columns=[
+                   'children:%s:%s' % (child_type, child_uuid)])
+    # end _delete_child
+
+    def _create_ref(self, bch, obj_type, obj_uuid, ref_type,
+                    ref_uuid, ref_data):
+        bch.insert(
+            obj_uuid, {'ref:%s:%s' %
+                  (ref_type, ref_uuid): json.dumps(ref_data)})
+        if obj_type == ref_type:
+            bch.insert(
+                ref_uuid, {'ref:%s:%s' %
+                      (obj_type, obj_uuid): json.dumps(ref_data)})
+        else:
+            bch.insert(
+                ref_uuid, {'backref:%s:%s' %
+                      (obj_type, obj_uuid): json.dumps(ref_data)})
+    # end _create_ref
+
+    def _update_ref(self, bch, obj_type, obj_uuid, ref_type,
+                    old_ref_uuid, new_ref_infos):
+        if ref_type not in new_ref_infos:
+            # update body didn't touch this type, nop
+            return
+
+        if old_ref_uuid not in new_ref_infos[ref_type]:
+            # remove old ref
+            bch.remove(obj_uuid, columns=[
+                       'ref:%s:%s' % (ref_type, old_ref_uuid)])
+            if obj_type == ref_type:
+                bch.remove(old_ref_uuid, columns=[
+                           'ref:%s:%s' % (obj_type, obj_uuid)])
+            else:
+                bch.remove(old_ref_uuid, columns=[
+                           'backref:%s:%s' % (obj_type, obj_uuid)])
+        else:
+            # retain old ref with new ref attr
+            new_ref_data = new_ref_infos[ref_type][old_ref_uuid]
+            bch.insert(
+                obj_uuid,
+                {'ref:%s:%s' %
+                 (ref_type, old_ref_uuid): json.dumps(new_ref_data)})
+            if obj_type == ref_type:
+                bch.insert(
+                    old_ref_uuid,
+                    {'ref:%s:%s' %
+                     (obj_type, obj_uuid): json.dumps(new_ref_data)})
+            else:
+                bch.insert(
+                    old_ref_uuid,
+                    {'backref:%s:%s' %
+                     (obj_type, obj_uuid): json.dumps(new_ref_data)})
+            # uuid has been accounted for, remove so only new ones remain
+            del new_ref_infos[ref_type][old_ref_uuid]
+    # end _update_ref
+
+    def _delete_ref(self, bch, obj_type, obj_uuid, ref_type, ref_uuid):
+        send = False
+        if bch is None:
+            send = True
+            bch = self._cassandra_db._obj_uuid_cf.batch()
+        bch.remove(obj_uuid, columns=['ref:%s:%s' % (ref_type, ref_uuid)])
+        if obj_type == ref_type:
+            bch.remove(ref_uuid, columns=[
+                       'ref:%s:%s' % (obj_type, obj_uuid)])
+        else:
+            bch.remove(ref_uuid, columns=[
+                       'backref:%s:%s' % (obj_type, obj_uuid)])
+        if send:
+            bch.send()
+    # end _delete_ref
+
 
     def _update_sandesh_status(self, status, msg=''):
         ConnectionState.update(conn_type=ConnType.DATABASE,
@@ -130,8 +272,8 @@ class VncCassandraClient(object):
             except AllServersUnavailable as e:
                 if self._conn_state != ConnectionStatus.DOWN:
                     self._update_sandesh_status(ConnectionStatus.DOWN)
-                    msg = 'Cassandra connection down. Exception in %s' \
-                          %(str(func))
+                    msg = 'Cassandra connection down. Exception in %s' %(
+                        str(func))
                     self._logger(msg, level=SandeshLevel.SYS_ERR)
 
                 self._conn_state = ConnectionStatus.DOWN
@@ -157,9 +299,15 @@ class VncCassandraClient(object):
         ColumnFamily.remove = self._handle_exceptions(ColumnFamily.remove)
         Mutator.send = self._handle_exceptions(Mutator.send)
 
-        for ks,cf_list in self._keyspaces.items():
+        self.sys_mgr = self._cassandra_system_manager()
+        self.existing_keyspaces = self.sys_mgr.list_keyspaces()
+        for ks,cf_list in self._rw_keyspaces.items():
             keyspace = '%s%s' %(self._db_prefix, ks)
-            self._cassandra_ensure_keyspace(server_list, keyspace, cf_list)
+            self._cassandra_ensure_keyspace(keyspace, cf_list)
+
+        for ks,cf_list in self._ro_keyspaces.items():
+            keyspace = '%s%s' %(self._db_prefix, ks)
+            self._cassandra_wait_for_keyspace(keyspace)
 
         self._cassandra_init_conn_pools()
     # end _cassandra_init
@@ -171,7 +319,8 @@ class VncCassandraClient(object):
         while not connected:
             try:
                 cass_server = self._server_list[server_idx]
-                sys_mgr = SystemManager(cass_server, credentials=self._credential)
+                sys_mgr = SystemManager(cass_server,
+                                        credentials=self._credential)
                 connected = True
             except Exception:
                 # TODO do only for
@@ -181,23 +330,30 @@ class VncCassandraClient(object):
         return sys_mgr
     # end _cassandra_system_manager
 
-    def _cassandra_ensure_keyspace(self, server_list,
-                                   keyspace_name, cf_info_list):
-        sys_mgr = self._cassandra_system_manager()
+    def _cassandra_wait_for_keyspace(self, keyspace):
+        # Wait for it to be created by another process
+        while keyspace not in self.existing_keyspaces:
+            gevent.sleep(1)
+            self._logger("Waiting for keyspace %s to be created" % keyspace,
+                         level=SandeshLevel.SYS_NOTICE)
+            self.existing_keyspaces = self.sys_mgr.list_keyspaces()
+    # end _cassandra_wait_for_keyspace
 
-        if keyspace_name in self._reset_config:
+    def _cassandra_ensure_keyspace(self, keyspace_name, cf_info_list):
+        if self._reset_config and keyspace_name in self.existing_keyspaces:
             try:
-                sys_mgr.drop_keyspace(keyspace_name)
+                self.sys_mgr.drop_keyspace(keyspace_name)
+            except pycassa.cassandra.ttypes.InvalidRequestException as e:
+                # TODO verify only EEXISTS
+                self._logger(str(e), level=SandeshLevel.SYS_NOTICE)
+
+        if (self._reset_config or keyspace_name not in self.existing_keyspaces):
+            try:
+                self.sys_mgr.create_keyspace(keyspace_name, SIMPLE_STRATEGY,
+                        {'replication_factor': str(self._num_dbnodes)})
             except pycassa.cassandra.ttypes.InvalidRequestException as e:
                 # TODO verify only EEXISTS
                 self._logger("Warning! " + str(e), level=SandeshLevel.SYS_WARN)
-
-        try:
-            sys_mgr.create_keyspace(keyspace_name, SIMPLE_STRATEGY,
-                                    {'replication_factor': str(self._num_dbnodes)})
-        except pycassa.cassandra.ttypes.InvalidRequestException as e:
-            # TODO verify only EEXISTS
-            self._logger("Warning! " + str(e), level=SandeshLevel.SYS_WARN)
 
         gc_grace_sec = CASSANDRA_DEFAULT_GC_GRACE_SECONDS
 
@@ -205,28 +361,30 @@ class VncCassandraClient(object):
             try:
                 (cf_name, comparator_type) = cf_info
                 if comparator_type:
-                    sys_mgr.create_column_family(
+                    self.sys_mgr.create_column_family(
                         keyspace_name, cf_name,
                         comparator_type=comparator_type,
                         gc_grace_seconds=gc_grace_sec,
                         default_validation_class='UTF8Type',
                         key_validation_class='UTF8Type')
                 else:
-                    sys_mgr.create_column_family(keyspace_name, cf_name,
+                    self.sys_mgr.create_column_family(keyspace_name, cf_name,
                         gc_grace_seconds=gc_grace_sec,
                         default_validation_class='UTF8Type')
             except pycassa.cassandra.ttypes.InvalidRequestException as e:
                 # TODO verify only EEXISTS
                 self._logger("Warning! " + str(e), level=SandeshLevel.SYS_WARN)
-                sys_mgr.alter_column_family(keyspace_name, cf_name,
+                self.sys_mgr.alter_column_family(keyspace_name, cf_name,
                     gc_grace_seconds=gc_grace_sec,
                     default_validation_class='UTF8Type')
     # end _cassandra_ensure_keyspace
 
     def _cassandra_init_conn_pools(self):
-        for ks,cf_list in self._keyspaces.items():
+        for ks,cf_list in itertools.chain(self._rw_keyspaces.items(),
+                                          self._ro_keyspaces.items()):
+            keyspace = '%s%s' %(self._db_prefix, ks)
             pool = pycassa.ConnectionPool(
-                ks, self._server_list, max_overflow=-1, use_threadlocal=True,
+                keyspace, self._server_list, max_overflow=-1, use_threadlocal=True,
                 prefill=True, pool_size=20, pool_timeout=120,
                 max_retries=-1, timeout=5, credentials=self._credential)
 
@@ -271,7 +429,7 @@ class VncCassandraClient(object):
         # Properties
         for prop_field in obj_class.prop_fields:
             field = obj_dict.get(prop_field)
-            if field is None:
+            if not field:
                 continue
             if prop_field == 'id_perms':
                 field['created'] = datetime.datetime.utcnow().isoformat()
@@ -289,6 +447,19 @@ class VncCassandraClient(object):
                 for i in range(len(list_coll)):
                     self._add_to_prop_list(
                         bch, obj_id, prop_field, list_coll[i], str(i))
+            elif prop_field in obj_class.prop_map_fields:
+                # iterate on wrapped element or directly or prop field
+                if obj_class.prop_map_field_has_wrappers[prop_field]:
+                    wrapper_field = field.keys()[0]
+                    map_coll = field[wrapper_field]
+                else:
+                    map_coll = field
+
+                map_key_name = obj_class.prop_map_field_key_names[prop_field]
+                for map_elem in map_coll:
+                    map_key = map_elem[map_key_name]
+                    self._set_in_prop_map(
+                        bch, obj_id, prop_field, map_elem, map_key)
             else:
                 self._create_prop(bch, obj_id, prop_field, field)
 
@@ -312,7 +483,8 @@ class VncCassandraClient(object):
 
         # Update fqname table
         fq_name_str = ':'.join(obj_dict['fq_name'])
-        fq_name_cols = {utils.encode_string(fq_name_str) + ':' + obj_id: json.dumps(None)}
+        fq_name_cols = {utils.encode_string(fq_name_str) + ':' + obj_id:
+                        json.dumps(None)}
         self._obj_fq_name_cf.insert(self._get_obj_type_to_db_type(obj_type), fq_name_cols)
 
         return (True, '')
@@ -320,7 +492,6 @@ class VncCassandraClient(object):
 
     def object_read(self, res_type, obj_uuids, field_names=None):
         # if field_names=None, all fields will be read/returned
-
         obj_type = res_type.replace('-', '_')
         obj_class = self._get_resource_class(obj_type)
         obj_uuid_cf = self._obj_uuid_cf
@@ -329,7 +500,8 @@ class VncCassandraClient(object):
         # ignoring columns starting from 'b' and 'c' - significant performance
         # impact in scaled setting. e.g. read of project
         if (field_names is None or
-            (set(field_names) & (obj_class.backref_fields | obj_class.children_fields))):
+            (set(field_names) & (obj_class.backref_fields |
+                                 obj_class.children_fields))):
             # atleast one backref/children field is needed
             obj_rows = obj_uuid_cf.multiget(obj_uuids,
                                        column_count=self._MAX_COL,
@@ -358,7 +530,8 @@ class VncCassandraClient(object):
                     result['parent_type'] = parent_type
                     try:
                         result['parent_uuid'] = parent_uuid
-                        result['parent_href'] = self._generate_url(parent_type, parent_uuid)
+                        result['parent_href'] = self._generate_url(parent_type,
+                                                                   parent_uuid)
                     except NoIdError:
                         err_msg = 'Unknown uuid for parent ' + result['fq_name'][-2]
                         return (False, err_msg)
@@ -367,10 +540,16 @@ class VncCassandraClient(object):
                     (_, prop_name) = col_name.split(':')
                     result[prop_name] = json.loads(obj_cols[col_name][0])
 
-                if self._re_match_prop_list.match(col_name):
-                    # already read in order since lexically ordered
+                if (self._re_match_prop_list.match(col_name) or
+                    self._re_match_prop_map.match(col_name)):
                     (_, prop_name, prop_elem_position) = col_name.split(':')
-                    if obj_class.prop_list_field_has_wrappers[prop_name]:
+                    if self._re_match_prop_list.match(col_name):
+                        has_wrapper = \
+                            obj_class.prop_list_field_has_wrappers[prop_name]
+                    else:
+                        has_wrapper = \
+                            obj_class.prop_map_field_has_wrappers[prop_name]
+                    if has_wrapper:
                         _, wrapper_type = obj_class.prop_field_types[prop_name]
                         wrapper_cls = self._get_xsd_class(wrapper_type)
                         wrapper_field = wrapper_cls.attr_fields[0]
@@ -391,22 +570,25 @@ class VncCassandraClient(object):
 
                     child_tstamp = obj_cols[col_name][1]
                     try:
-                        self._read_child(result, obj_uuid, child_type, child_uuid, child_tstamp)
+                        self._read_child(result, obj_uuid, child_type,
+                                         child_uuid, child_tstamp)
                     except NoIdError:
                         continue
 
                 if self._re_match_ref.match(col_name):
                     (_, ref_type, ref_uuid) = col_name.split(':')
-                    self._read_ref(result, obj_uuid, ref_type, ref_uuid, obj_cols[col_name][0])
+                    self._read_ref(result, obj_uuid, ref_type, ref_uuid,
+                                   obj_cols[col_name][0])
 
                 if self._re_match_backref.match(col_name):
                     (_, back_ref_type, back_ref_uuid) = col_name.split(':')
-                    if field_names and '%s_back_refs' %(back_ref_type) not in field_names:
+                    if (field_names and
+                        '%s_back_refs' %(back_ref_type) not in field_names):
                         continue
 
                     try:
-                        self._read_back_ref(result, obj_uuid, back_ref_type, back_ref_uuid,
-                                            obj_cols[col_name][0])
+                        self._read_back_ref(result, obj_uuid, back_ref_type,
+                                            back_ref_uuid, obj_cols[col_name][0])
                     except NoIdError:
                         continue
 
@@ -448,6 +630,15 @@ class VncCassandraClient(object):
                                    max_count=self._MAX_COL)
         return (True, num_children)
     # end object_count_children
+
+    def update_last_modified(self, bch, obj_uuid, id_perms=None):
+        if id_perms is None:
+            id_perms = json.loads(
+                 self._obj_uuid_cf.get(obj_uuid,
+                                       ['prop:id_perms'])['prop:id_perms'])
+        id_perms['last_modified'] = datetime.datetime.utcnow().isoformat()
+        self._update_prop(bch, obj_uuid, 'id_perms', {'id_perms': id_perms})
+    # end update_last_modified
 
     def object_update(self, res_type, obj_uuid, new_obj_dict):
         obj_type = res_type.replace('-', '_')
@@ -496,7 +687,8 @@ class VncCassandraClient(object):
                 if prop_name == 'id_perms':
                     # id-perms always has to be updated for last-mod timestamp
                     # get it from request dict(or from db if not in request dict)
-                    new_id_perms = new_obj_dict.get(prop_name, json.loads(obj_cols[col_name]))
+                    new_id_perms = new_obj_dict.get(
+                        prop_name, json.loads(obj_cols[col_name]))
                     self.update_last_modified(bch, obj_uuid, new_id_perms)
                 elif prop_name in new_obj_dict:
                     self._update_prop(bch, obj_uuid, prop_name, new_props)
@@ -508,16 +700,25 @@ class VncCassandraClient(object):
                     self._delete_from_prop_list(
                         bch, obj_uuid, prop_name, prop_elem_position)
 
+            if self._re_match_prop_map.match(col_name):
+                (_, prop_name, prop_elem_position) = col_name.split(':')
+                if prop_name in new_props:
+                    # delete all old values of prop list
+                    self._delete_from_prop_map(
+                        bch, obj_uuid, prop_name, prop_elem_position)
+
             if self._re_match_ref.match(col_name):
                 (_, ref_type, ref_uuid) = col_name.split(':')
-                self._update_ref(bch, obj_type, obj_uuid, ref_type, ref_uuid, new_ref_infos)
+                self._update_ref(bch, obj_type, obj_uuid, ref_type, ref_uuid,
+                                 new_ref_infos)
         # for all column names
 
         # create new refs
         for ref_type in new_ref_infos.keys():
             for ref_uuid in new_ref_infos[ref_type].keys():
                 ref_data = new_ref_infos[ref_type][ref_uuid]
-                self._create_ref(bch, obj_type, obj_uuid, ref_type, ref_uuid, ref_data)
+                self._create_ref(bch, obj_type, obj_uuid, ref_type, ref_uuid,
+                                 ref_data)
 
         # create new props
         for prop_name in new_props.keys():
@@ -535,6 +736,22 @@ class VncCassandraClient(object):
                 for i in range(len(list_coll)):
                     self._add_to_prop_list(bch, obj_uuid,
                         prop_name, list_coll[i], str(i))
+            elif prop_name in obj_class.prop_map_fields:
+                # store map elements in key order
+                # iterate on wrapped element or directly on prop field
+                # for wrapped lists, store without the wrapper. regenerate
+                # wrapper on read
+                if obj_class.prop_map_field_has_wrappers[prop_name]:
+                    wrapper_field = new_props[prop_name].keys()[0]
+                    map_coll = new_props[prop_name][wrapper_field]
+                else:
+                    map_coll = new_props[prop_name]
+
+                map_key_name = obj_class.prop_map_field_key_names[prop_name]
+                for map_elem in map_coll:
+                    map_key = map_elem[map_key_name]
+                    self._set_in_prop_map(bch, obj_uuid,
+                        prop_name, map_elem, map_key)
             else:
                 self._create_prop(bch, obj_uuid, prop_name, new_props[prop_name])
 
@@ -613,18 +830,21 @@ class VncCassandraClient(object):
                     child_uuid = col_name.split(':')[2]
                     if obj_uuids and child_uuid not in obj_uuids:
                         continue
-                    all_child_infos[child_uuid] = {'uuid': child_uuid, 'tstamp': col_val_ts[1]}
+                    all_child_infos[child_uuid] = {'uuid': child_uuid,
+                                                   'tstamp': col_val_ts[1]}
 
                 filter_cols = ['prop:%s' %(fname) for fname, _ in filter_fields]
                 if filter_cols:
-                    filt_child_infos = filter_rows(all_child_infos, filter_cols, filter_fields)
+                    filt_child_infos = filter_rows(all_child_infos, filter_cols,
+                                                   filter_fields)
                 else: # no filter specified
                     filt_child_infos = all_child_infos
 
                 if not sort:
                     ret_child_infos = filt_child_infos.values()
                 else:
-                    ret_child_infos = sorted(filt_child_infos.values(), key=itemgetter('tstamp'))
+                    ret_child_infos = sorted(filt_child_infos.values(),
+                                             key=itemgetter('tstamp'))
 
                 return get_fq_name_uuid_list(r['uuid'] for r in ret_child_infos)
             # end filter_rows_parent_anchor
@@ -672,7 +892,8 @@ class VncCassandraClient(object):
                 else: # no filter specified
                     filt_backref_infos = all_backref_infos
 
-                return get_fq_name_uuid_list(r['uuid'] for r in filt_backref_infos.values())
+                return get_fq_name_uuid_list(r['uuid'] for r in
+                                             filt_backref_infos.values())
             # end filter_rows_backref_anchor
 
             if count:
@@ -726,7 +947,8 @@ class VncCassandraClient(object):
 
                     filter_cols = ['prop:%s' %(fname) for fname, _ in filter_fields]
                     if filter_cols:
-                        filt_obj_infos = filter_rows(all_obj_infos, filter_cols, filter_fields)
+                        filt_obj_infos = filter_rows(all_obj_infos, filter_cols,
+                                                     filter_fields)
                     else: # no filters specified
                         filt_obj_infos = all_obj_infos
 
@@ -772,6 +994,15 @@ class VncCassandraClient(object):
             (_, ref_type, ref_uuid) = col_name.split(':')
             self._delete_ref(bch, obj_type, obj_uuid, ref_type, ref_uuid)
 
+        # remove link from relaxed back refs
+        col_start = 'relaxbackref:'
+        col_fin = 'relaxbackref;'
+        col_name_iter = obj_uuid_cf.xget(
+            obj_uuid, column_start=col_start, column_finish=col_fin)
+        for (col_name, col_val) in col_name_iter:
+            (_, backref_uuid) = col_name.split(':')
+            self._delete_ref(bch, None, backref_uuid, obj_type, obj_uuid)
+
         bch.remove(obj_uuid)
         bch.send()
 
@@ -783,7 +1014,9 @@ class VncCassandraClient(object):
         return (True, '')
     # end object_delete
 
-    def prop_list_read(self, obj_uuid, obj_fields, position):
+    def prop_collection_read(self, obj_type, obj_uuid, obj_fields, position):
+        obj_class = self._get_resource_class(obj_type)
+
         result = {}
         # always read-in id-perms for upper-layers to do rbac/visibility
         try:
@@ -795,14 +1028,18 @@ class VncCassandraClient(object):
         except pycassa.NotFoundException:
             raise NoIdError(obj_uuid)
 
-        # read in prop-list fields
+        # read in prop-list or prop-map fields
         for field in obj_fields:
+            if field in obj_class.prop_list_fields:
+                prop_pfx = 'propl'
+            elif field in obj_class.prop_map_fields:
+                prop_pfx = 'propm'
             if position:
-                col_start = 'propl:%s:%s' %(field, position)
-                col_end = 'propl:%s:%s' %(field, position)
+                col_start = '%s:%s:%s' %(prop_pfx, field, position)
+                col_end = '%s:%s:%s' %(prop_pfx, field, position)
             else:
-                col_start = 'propl:%s:' %(field)
-                col_end = 'propl:%s;' %(field)
+                col_start = '%s:%s:' %(prop_pfx, field)
+                col_end = '%s:%s;' %(prop_pfx, field)
 
             obj_cols = self._obj_uuid_cf.get(obj_uuid,
                 column_start=col_start,
@@ -819,7 +1056,7 @@ class VncCassandraClient(object):
                      col_name.split(':')[-1]) )
 
         return (True, result)
-    # end prop_list_read
+    # end prop_collection_read
 
     def cache_uuid_to_fq_name_add(self, id, fq_name, obj_type):
         self._cache_uuid_to_fq_name[id] = (fq_name, obj_type)

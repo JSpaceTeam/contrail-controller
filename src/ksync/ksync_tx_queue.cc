@@ -26,6 +26,7 @@ public:
         queue_->Run();
         return true;
     }
+    std::string Description() const { return "KSyncTxQueue"; }
 
 private:
     KSyncTxQueue *queue_;
@@ -96,7 +97,16 @@ bool KSyncTxQueue::EnqueueInternal(IoContext *io_context) {
         max_queue_len_ = ncount;
     if (ncount == 1) {
         uint64_t u = 1;
-        assert(write(event_fd_, &u, sizeof(u)) == sizeof(u));
+        int res = 0;
+        while ((res = write(event_fd_, &u, sizeof(u))) < (int)sizeof(u)) {
+            int ec = errno;
+            if (ec != EINTR && ec != EIO) {
+                LOG(ERROR, "KsyncTxQueue write failure : " << ec << " : "
+                    << strerror(ec));
+                assert(0);
+            }
+        }
+
         write_events_++;
     }
     return true;

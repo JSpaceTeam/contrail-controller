@@ -26,6 +26,7 @@
 #include <oper/vm.h>
 #include <oper/vn.h>
 #include <oper/mirror_table.h>
+#include <oper/ecmp_load_balance.h>
 #include <cfg/cfg_types.h>
 #include <openstack/instance_service_server.h>
 #include <base/contrail_ports.h>
@@ -64,13 +65,12 @@ InstanceServiceAsyncHandler::AddPort(const PortList& port_list) {
         uuid vn_id = ConvertToUuid(port.vn_id);
         uuid vm_project_id = ConvertToUuid(port.vm_project_id);
         boost::system::error_code ec;
-        IpAddress ip = IpAddress::from_string(port.ip_address, ec);
+        Ip4Address ip = Ip4Address::from_string(port.ip_address, ec);
         bool v4_valid = (ec.value() == 0);
-        if (v4_valid == false || ip.is_v4() == false) {
+        if (v4_valid == false) {
             CFG_TRACE(IntfInfo,
                       "IPv4 address is not correct, " + port.ip_address);
             v4_valid = false;
-            ip = IpAddress();
         }
 
         bool v6_valid = false;
@@ -346,6 +346,8 @@ InstanceServiceAsyncHandler::RouteEntryAdd(const std::string& ip_address,
     uint32_t mpls_label;
     const std::string vn = " ";
     sscanf(label.c_str(), "%u", &mpls_label);
+    VnListType vn_list;
+    vn_list.insert(vn);
     ControllerVmRoute *data =
         ControllerVmRoute::MakeControllerVmRoute(agent_->local_peer(),
                                                  agent_->fabric_vrf_name(),
@@ -353,8 +355,9 @@ InstanceServiceAsyncHandler::RouteEntryAdd(const std::string& ip_address,
                                                  vrf, gwv4,
                                                  TunnelType::AllType(),
                                                  mpls_label,
-                                                 vn, SecurityGroupList(),
-                                                 PathPreference(), false);
+                                                 vn_list, SecurityGroupList(),
+                                                 PathPreference(), false,
+                                                 EcmpLoadBalance());
     InetUnicastAgentRouteTable::AddRemoteVmRouteReq(agent_->local_peer(),
                                      vrf, ipv4, 32, data);
     return true;
@@ -418,11 +421,15 @@ InstanceServiceAsyncHandler::AddLocalVmRoute(const std::string& ip_address,
         sscanf(label.c_str(), "%u", &mpls_label);
     }
 
+    VnListType vn_list;
+    vn_list.insert("instance-service");
+    EcmpLoadBalance ecmp_load_balance;
     agent_->fabric_inet4_unicast_table()->
         AddLocalVmRouteReq(novaPeer_.get(), vrf, ip.to_v4(), 32, intf_uuid, 
-                           "instance-service", mpls_label, SecurityGroupList(),
+                           vn_list, mpls_label, SecurityGroupList(),
                            CommunityList(),
-                           false, PathPreference(), Ip4Address(0));
+                           false, PathPreference(), Ip4Address(0),
+                           ecmp_load_balance);
     return true;
 }
 
@@ -453,12 +460,14 @@ InstanceServiceAsyncHandler::AddRemoteVmRoute(const std::string& ip_address,
         sscanf(label.c_str(), "%u", &mpls_label);
     }
 
+    VnListType vn_list;
     ControllerVmRoute *data =
         ControllerVmRoute::MakeControllerVmRoute(novaPeer_.get(),
                               agent_->fabric_vrf_name(),
                               agent_->router_id(), vrf, gw.to_v4(),
-                              TunnelType::AllType(), mpls_label, "",
-                              SecurityGroupList(), PathPreference(), false);
+                              TunnelType::AllType(), mpls_label, vn_list,
+                              SecurityGroupList(), PathPreference(), false,
+                              EcmpLoadBalance());
     agent_->fabric_inet4_unicast_table()->
         AddRemoteVmRouteReq(novaPeer_.get(),
                             vrf, ip.to_v4(), 32, data);
@@ -551,9 +560,10 @@ void AddPortReq::HandleRequest() const {
     CfgIntEntry::CfgIntType intf_type;
 
     boost::system::error_code ec, ec6;
-    IpAddress ip(IpAddress::from_string(get_ip_address(), ec));
+    Ip4Address ip(Ip4Address::from_string(get_ip_address(), ec));
     Ip6Address ip6 = Ip6Address::from_string(get_ip6_address(), ec6);
-    if ((ec != 0) && (ec6 != 0)) {
+    if (((ec != 0) && (ec6 != 0)) ||
+        (ip.is_unspecified() && ip6.is_unspecified())) {
         resp_str += "Neither Ipv4 nor IPv6 address is correct, ";
         err = true;
     }

@@ -9,6 +9,9 @@ import errno
 import uuid
 import logging
 import coverage
+import random
+import netaddr
+
 import cgitb
 cgitb.enable(format='text')
 
@@ -31,7 +34,7 @@ import stevedore
 import netaddr
 
 from vnc_api.vnc_api import *
-from vnc_api.common import exceptions as vnc_exceptions
+from cfgm_common import exceptions as vnc_exceptions
 import vnc_api.gen.vnc_api_test_gen
 from vnc_api.gen.resource_test import *
 import cfgm_common
@@ -1258,8 +1261,8 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
 
         vn_objs = create_vns()
         # unanchored summary list without filters
-        read_vn_dicts = self._vnc_lib.virtual_networks_list()['virtual-network']
-	self.assertThat(len(read_vn_dicts), Not(LessThan(num_objs)))
+        read_vn_dicts = self._vnc_lib.virtual_networks_list()['virtual-networks']
+        self.assertThat(len(read_vn_dicts), Not(LessThan(num_objs)))
         for obj in vn_objs:
             # locate created object, should only be one, expect exact fields
             obj_dict = [d for d in read_vn_dicts if d['uuid'] == obj.uuid]
@@ -1751,6 +1754,35 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
                     fip_obj.floating_ip_address)
     # end test_ip_addr_not_released_on_delete_error
 
+    def test_uve_trace_delete_name_from_msg(self):
+        test_obj = self._create_test_object()
+        self.assertTill(self.ifmap_has_ident, obj=test_obj)
+        db_client = self._api_server._db_conn
+
+        uve_delete_trace_invoked = []
+        uuid_to_fq_name_on_delete_invoked = []
+        def spy_uve_trace(orig_method, *args, **kwargs):
+            oper = args[0].upper()
+            obj_uuid = args[2]
+            if oper == 'DELETE' and obj_uuid == test_obj.uuid:
+                if not uve_delete_trace_invoked:
+                    uve_delete_trace_invoked.append(True)
+                def assert_on_call(*args, **kwargs):
+                    uuid_to_fq_name_on_delete_invoked.append(True)
+                with test_common.patch(db_client,
+                    'uuid_to_fq_name', assert_on_call):
+                    return orig_method(*args, **kwargs)
+            else:
+                return orig_method(*args, **kwargs)
+        with test_common.patch(db_client,
+            'dbe_uve_trace', spy_uve_trace):
+            self._delete_test_object(test_obj)
+            self.assertTill(self.ifmap_doesnt_have_ident, obj=test_obj)
+            self.assertEqual(len(uve_delete_trace_invoked), 1,
+                'uve_trace not invoked on object delete')
+            self.assertEqual(len(uuid_to_fq_name_on_delete_invoked), 0,
+                'uuid_to_fq_name invoked in delete at dbe_uve_trace')
+    # end test_uve_trace_delete_name_from_msg
 # end class TestVncCfgApiServer
 
 
@@ -2254,17 +2286,17 @@ class TestExtensionApi(test_case.ApiServerTestCase):
 
 
 class TestPropertyWithList(test_case.ApiServerTestCase):
-    def assert_kvpos(self, rd_bindings, idx, k, v, pos):
-        self.assertEqual(rd_bindings[idx][0]['key'], k)
-        self.assertEqual(rd_bindings[idx][0]['value'], v)
-        self.assertEqual(rd_bindings[idx][1], pos)
+    def assert_kvpos(self, rd_ff_proto, idx, k, v, pos):
+        self.assertEqual(rd_ff_proto[idx][0]['protocol'], k)
+        self.assertEqual(rd_ff_proto[idx][0]['port'], v)
+        self.assertEqual(rd_ff_proto[idx][1], pos)
 
     def test_set_in_object(self):
         vmi_obj = VirtualMachineInterface('vmi-%s' %(self.id()),
             parent_obj=Project())
-        vmi_obj.set_virtual_machine_interface_bindings(
-            KeyValuePairs([KeyValuePair(key='k1', value='v1'),
-                           KeyValuePair(key='k2', value='v2')]))
+        vmi_obj.set_virtual_machine_interface_fat_flow_protocols(
+            FatFlowProtocols([ProtocolType(protocol='p1', port=1),
+                              ProtocolType(protocol='p2', port=2)]))
         # needed for backend type-specific handling
         vmi_obj.add_virtual_network(VirtualNetwork())
         self._vnc_lib.virtual_machine_interface_create(vmi_obj)
@@ -2272,35 +2304,36 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
         # ensure stored as list order
         rd_vmi_obj = self._vnc_lib.virtual_machine_interface_read(
             id=vmi_obj.uuid)
-        rd_bindings = rd_vmi_obj.virtual_machine_interface_bindings
+        rd_ff_proto = rd_vmi_obj.virtual_machine_interface_fat_flow_protocols
         self.assertThat(
-            rd_bindings.key_value_pair[0].key, Equals('k1'))
+            rd_ff_proto.fat_flow_protocol[0].protocol, Equals('p1'))
         self.assertThat(
-            rd_bindings.key_value_pair[1].key, Equals('k2'))
+            rd_ff_proto.fat_flow_protocol[1].protocol, Equals('p2'))
 
         # verify db storage format (wrapper/container type stripped in storage)
         uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
         cols = uuid_cf.get(vmi_obj.uuid,
-            column_start='propl:virtual_machine_interface_bindings:',
-            column_finish='propl:virtual_machine_interface_bindings;')
+            column_start='propl:virtual_machine_interface_fat_flow_protocols:',
+            column_finish='propl:virtual_machine_interface_fat_flow_protocols;')
         col_name_0, col_val_0 = cols.popitem(last=False)
         col_name_1, col_val_1 = cols.popitem(last=False)
         self.assertThat(col_name_0.split(':')[-1], Equals('0'))
-        self.assertThat(json.loads(col_val_0)['key'], Equals('k1'))
+        self.assertThat(json.loads(col_val_0)['protocol'], Equals('p1'))
         self.assertThat(col_name_1.split(':')[-1], Equals('1'))
-        self.assertThat(json.loads(col_val_1)['key'], Equals('k2'))
+        self.assertThat(json.loads(col_val_1)['protocol'], Equals('p2'))
 
         # update and clobber old entries
         #vmi_obj.set_virtual_machine_interface_bindings([])
-        vmi_obj.set_virtual_machine_interface_bindings(KeyValuePairs())
+        vmi_obj.set_virtual_machine_interface_fat_flow_protocols(
+            FatFlowProtocols())
         self._vnc_lib.virtual_machine_interface_update(vmi_obj)
         rd_vmi_obj = self._vnc_lib.virtual_machine_interface_read(
             id=vmi_obj.uuid)
-        rd_bindings = rd_vmi_obj.virtual_machine_interface_bindings
-        self.assertIsNone(rd_bindings)
+        rd_ff_proto = rd_vmi_obj.virtual_machine_interface_fat_flow_protocols
+        self.assertIsNone(rd_ff_proto)
         cols = uuid_cf.get(vmi_obj.uuid,
-            column_start='propl:virtual_machine_interface_bindings:',
-            column_finish='propl:virtual_machine_interface_bindings;')
+            column_start='propl:virtual_machine_interface_fat_flow_protocols:',
+            column_finish='propl:virtual_machine_interface_fat_flow_protocols;')
         self.assertEqual(len(cols), 0)
     # end test_set_in_object
 
@@ -2308,41 +2341,41 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
         vmi_obj = VirtualMachineInterface('vmi-%s' %(self.id()),
             parent_obj=Project())
 
-        for key,val,pos in [('k2','v2','p1'), ('k1','v1','p2'),
-                            ('k3','v3','p3'), ('k4', 'v4', None)]:
-            vmi_obj.add_virtual_machine_interface_bindings(
-                KeyValuePair(key=key, value=val), pos)
+        for proto,port,pos in [('proto2', 2, 'pos1'), ('proto1', 1, 'pos2'),
+                            ('proto3', 3, 'pos3'), ('proto4', 4, None)]:
+            vmi_obj.add_virtual_machine_interface_fat_flow_protocols(
+                ProtocolType(protocol=proto, port=port), pos)
 
         # needed for backend type-specific handling
         vmi_obj.add_virtual_network(VirtualNetwork())
         self._vnc_lib.virtual_machine_interface_create(vmi_obj)
-        rd_bindings = self._vnc_lib.virtual_machine_interface_read(
-            id=vmi_obj.uuid).virtual_machine_interface_bindings
+        rd_ff_proto = self._vnc_lib.virtual_machine_interface_read(
+            id=vmi_obj.uuid).virtual_machine_interface_fat_flow_protocols
 
-        self.assertEqual(len(rd_bindings.key_value_pair), 4)
+        self.assertEqual(len(rd_ff_proto.fat_flow_protocol), 4)
 
-        self.assertEqual(rd_bindings.key_value_pair[0].key, 'k4')
-        self.assertEqual(rd_bindings.key_value_pair[0].value, 'v4')
-        self.assertEqual(rd_bindings.key_value_pair[1].key, 'k2')
-        self.assertEqual(rd_bindings.key_value_pair[1].value, 'v2')
-        self.assertEqual(rd_bindings.key_value_pair[2].key, 'k1')
-        self.assertEqual(rd_bindings.key_value_pair[2].value, 'v1')
-        self.assertEqual(rd_bindings.key_value_pair[3].key, 'k3')
-        self.assertEqual(rd_bindings.key_value_pair[3].value, 'v3')
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[0].protocol, 'proto4')
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[0].port, 4)
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[1].protocol, 'proto2')
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[1].port, 2)
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[2].protocol, 'proto1')
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[2].port, 1)
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[3].protocol, 'proto3')
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[3].port, 3)
 
-        for pos in ['p1', 'p3']:
-            vmi_obj.del_virtual_machine_interface_bindings(
+        for pos in ['pos1', 'pos3']:
+            vmi_obj.del_virtual_machine_interface_fat_flow_protocols(
                 elem_position=pos)
         self._vnc_lib.virtual_machine_interface_update(vmi_obj)
-        rd_bindings = self._vnc_lib.virtual_machine_interface_read(
-            id=vmi_obj.uuid).virtual_machine_interface_bindings
+        rd_ff_proto = self._vnc_lib.virtual_machine_interface_read(
+            id=vmi_obj.uuid).virtual_machine_interface_fat_flow_protocols
 
-        self.assertEqual(len(rd_bindings.key_value_pair), 2)
+        self.assertEqual(len(rd_ff_proto.fat_flow_protocol), 2)
 
-        self.assertEqual(rd_bindings.key_value_pair[0].key, 'k4')
-        self.assertEqual(rd_bindings.key_value_pair[0].value, 'v4')
-        self.assertEqual(rd_bindings.key_value_pair[1].key, 'k1')
-        self.assertEqual(rd_bindings.key_value_pair[1].value, 'v1')
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[0].protocol, 'proto4')
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[0].port, 4)
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[1].protocol, 'proto1')
+        self.assertEqual(rd_ff_proto.fat_flow_protocol[1].port, 1)
     # end test_add_del_in_object
 
     def test_prop_list_add_delete_get_element(self):
@@ -2354,103 +2387,68 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
         # 1. Add tests
         # add with element as type
         self._vnc_lib.prop_list_add_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings', KeyValuePair('k1','v1'))
+            'virtual_machine_interface_fat_flow_protocols',
+            ProtocolType('proto1', 1))
 
         # add with element as dict
         self._vnc_lib.prop_list_add_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings', {'key':'k2','value':'v2'})
+            'virtual_machine_interface_fat_flow_protocols',
+            {'protocol':'proto2', 'port':2})
 
         # verify above add without position specified generated uuid'd order
-        rd_bindings = self._vnc_lib.prop_list_get(vmi_obj.uuid,
-            'virtual_machine_interface_bindings')
+        rd_ff_proto = self._vnc_lib.prop_list_get(vmi_obj.uuid,
+            'virtual_machine_interface_fat_flow_protocols')
+        self.assertEqual(len(rd_ff_proto), 2)
 
         # add with position specified
         self._vnc_lib.prop_list_add_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings',
-            {'key':'k3','value':'v3'}, '0.1')
+            'virtual_machine_interface_fat_flow_protocols',
+            {'protocol':'proto3', 'port':3}, '0.1')
         self._vnc_lib.prop_list_add_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings',
-            {'key':'k4','value':'v4'}, '0.0')
+            'virtual_machine_interface_fat_flow_protocols',
+            {'protocol':'proto4', 'port':4}, '0.0')
         self._vnc_lib.prop_list_add_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings',
-            {'key':'k5','value':'v5'}, '.00')
+            'virtual_machine_interface_fat_flow_protocols',
+            {'protocol':'proto5', 'port':5}, '.00')
 
         # 2. Get tests (specific and all elements)
         # get specific element
-        rd_bindings = self._vnc_lib.prop_list_get(vmi_obj.uuid,
-            'virtual_machine_interface_bindings', '0.0')
-        self.assertEqual(len(rd_bindings), 1)
-        self.assert_kvpos(rd_bindings, 0, 'k4', 'v4', '0.0')
+        rd_ff_proto = self._vnc_lib.prop_list_get(vmi_obj.uuid,
+            'virtual_machine_interface_fat_flow_protocols', '0.0')
+        self.assertEqual(len(rd_ff_proto), 1)
+        self.assert_kvpos(rd_ff_proto, 0, 'proto4', 4, '0.0')
 
         # get all elements
-        rd_bindings = self._vnc_lib.prop_list_get(vmi_obj.uuid,
-            'virtual_machine_interface_bindings')
+        rd_ff_proto = self._vnc_lib.prop_list_get(vmi_obj.uuid,
+            'virtual_machine_interface_fat_flow_protocols')
 
-        self.assertEqual(len(rd_bindings), 5)
+        self.assertEqual(len(rd_ff_proto), 5)
 
-        self.assert_kvpos(rd_bindings, 0, 'k5', 'v5', '.00')
-        self.assert_kvpos(rd_bindings, 1, 'k4', 'v4', '0.0')
-        self.assert_kvpos(rd_bindings, 2, 'k3', 'v3', '0.1')
+        self.assert_kvpos(rd_ff_proto, 0, 'proto5', 5, '.00')
+        self.assert_kvpos(rd_ff_proto, 1, 'proto4', 4, '0.0')
+        self.assert_kvpos(rd_ff_proto, 2, 'proto3', 3, '0.1')
 
         self.assertTrue(
-            isinstance(uuid.UUID(rd_bindings[-1][1]), uuid.UUID),
+            isinstance(uuid.UUID(rd_ff_proto[-1][1]), uuid.UUID),
             'Auto-generated position not of uuid form')
 
         # 3. Delete tests - middle and edges
         self._vnc_lib.prop_list_delete_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings', '0.1')
+            'virtual_machine_interface_fat_flow_protocols', '0.1')
         self._vnc_lib.prop_list_delete_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings', '.00')
+            'virtual_machine_interface_fat_flow_protocols', '.00')
         self._vnc_lib.prop_list_delete_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings', rd_bindings[-1][1])
+            'virtual_machine_interface_fat_flow_protocols', rd_ff_proto[-1][1])
 
-        rd_bindings = self._vnc_lib.prop_list_get(vmi_obj.uuid,
-            'virtual_machine_interface_bindings')
+        rd_ff_proto = self._vnc_lib.prop_list_get(vmi_obj.uuid,
+            'virtual_machine_interface_fat_flow_protocols')
 
-        self.assertEqual(len(rd_bindings), 2)
-        self.assert_kvpos(rd_bindings, 0, 'k4', 'v4', '0.0')
+        self.assertEqual(len(rd_ff_proto), 2)
+        self.assert_kvpos(rd_ff_proto, 0, 'proto4', 4, '0.0')
         self.assertTrue(
-            isinstance(uuid.UUID(rd_bindings[-1][1]), uuid.UUID),
+            isinstance(uuid.UUID(rd_ff_proto[-1][1]), uuid.UUID),
             'Deleted incorrect element')
     # end test_prop_list_add_delete_get_element
-
-    def test_prop_list_use_as_dict(self):
-        # by using key to be also position we can emulate a dictionary
-        vmi_obj = VirtualMachineInterface('vmi-%s' %(self.id()),
-            parent_obj=Project())
-        vmi_obj.add_virtual_network(VirtualNetwork())
-        self._vnc_lib.virtual_machine_interface_create(vmi_obj)
-
-        # 1. Add tests
-        # add with element as type
-        self._vnc_lib.prop_list_add_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings',
-            KeyValuePair('k1','v1'), 'k1')
-
-        # add with element as dict
-        self._vnc_lib.prop_list_add_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings',
-            {'key':'k2','value':'v2'}, position='k2')
-
-        # verify we can access by key as position
-        rd_bindings = self._vnc_lib.prop_list_get(vmi_obj.uuid,
-            'virtual_machine_interface_bindings', position='k1')
-        self.assertEqual(len(rd_bindings), 1)
-        self.assertEqual(rd_bindings[0][0]['key'], 'k1')
-        self.assertEqual(rd_bindings[0][0]['value'], 'v1')
-        self.assertEqual(rd_bindings[0][1], 'k1')
-
-        # modify specifying position
-        self._vnc_lib.prop_list_modify_element(vmi_obj.uuid,
-            'virtual_machine_interface_bindings',
-            {'key':'k2','value':'v2mod'}, position='k2')
-        rd_bindings = self._vnc_lib.prop_list_get(vmi_obj.uuid,
-            'virtual_machine_interface_bindings')
-        self.assertEqual(len(rd_bindings), 2)
-        self.assertEqual(rd_bindings[1][0]['key'], 'k2')
-        self.assertEqual(rd_bindings[1][0]['value'], 'v2mod')
-        self.assertEqual(rd_bindings[1][1], 'k2')
-    # end test_prop_list_use_as_dict
 
     def test_set_in_resource_body_rest_api(self):
         listen_ip = self._api_server_ip
@@ -2463,12 +2461,12 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
                             'default-project',
                             'vmi-%s' %(self.id())],
                 'parent_type': 'project',
-                'virtual_machine_interface_bindings': {
-                    'key_value_pair': [
-                        {'key': 'vif_type', 'value': 'vrouter'},
-                        {'key': 'vnic_type', 'value': 'normal'},
-                        {'key': 'k1', 'value': 'v1'},
-                        {'key': 'k2', 'value': 'v2'},
+                'virtual_machine_interface_fat_flow_protocols': {
+                    'fat_flow_protocol': [
+                        {'protocol': 'proto1', 'port': 1},
+                        {'protocol': 'proto1', 'port': 2},
+                        {'protocol': 'proto2', 'port': 1},
+                        {'protocol': 'proto2', 'port': 2},
                     ]
                 },
                 'virtual_network_refs': [
@@ -2489,18 +2487,18 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
 
         vmi_read = json.loads(
             requests.get(vmi_url).content)['virtual-machine-interface']
-        rd_bindings = vmi_read['virtual_machine_interface_bindings']
-        self.assertEqual(len(rd_bindings['key_value_pair']), 4)
-        self.assertEqual(rd_bindings['key_value_pair'][0]['key'], 'vif_type')
-        self.assertEqual(rd_bindings['key_value_pair'][1]['key'], 'vnic_type')
-        self.assertEqual(rd_bindings['key_value_pair'][2]['key'], 'k1')
-        self.assertEqual(rd_bindings['key_value_pair'][3]['key'], 'k2')
+        rd_ff_proto = vmi_read['virtual_machine_interface_fat_flow_protocols']
+        self.assertEqual(len(rd_ff_proto['fat_flow_protocol']), 4)
+        self.assertEqual(rd_ff_proto['fat_flow_protocol'][0]['protocol'], 'proto1')
+        self.assertEqual(rd_ff_proto['fat_flow_protocol'][1]['protocol'], 'proto1')
+        self.assertEqual(rd_ff_proto['fat_flow_protocol'][2]['protocol'], 'proto2')
+        self.assertEqual(rd_ff_proto['fat_flow_protocol'][3]['protocol'], 'proto2')
 
         vmi_body = {
             'virtual-machine-interface': {
-                'virtual_machine_interface_bindings': {
-                    'key_value_pair': [
-                        {'key': 'k3', 'value': 'v3'}
+                'virtual_machine_interface_fat_flow_protocols': {
+                    'fat_flow_protocol': [
+                        {'protocol': 'proto3', 'port': 3}
                     ]
                 }
             }
@@ -2511,9 +2509,9 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
 
         vmi_read = json.loads(
             requests.get(vmi_url).content)['virtual-machine-interface']
-        rd_bindings = vmi_read['virtual_machine_interface_bindings']
-        self.assertEqual(len(rd_bindings['key_value_pair']), 1)
-        self.assertEqual(rd_bindings['key_value_pair'][0]['key'], 'k3')
+        rd_ff_proto = vmi_read['virtual_machine_interface_fat_flow_protocols']
+        self.assertEqual(len(rd_ff_proto['fat_flow_protocol']), 1)
+        self.assertEqual(rd_ff_proto['fat_flow_protocol'][0]['protocol'], 'proto3')
     # end test_set_in_resource_body_rest_api
 
     def _rest_vmi_create(self):
@@ -2550,119 +2548,118 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
 
         vmi_uuid = self._rest_vmi_create()
 
-        prop_list_update_url = 'http://%s:%s/prop-list-update' %(
+        prop_coll_update_url = 'http://%s:%s/prop-collection-update' %(
             listen_ip, listen_port)
-        prop_list_get_url = 'http://%s:%s/prop-list-get' %(
+        prop_coll_get_url = 'http://%s:%s/prop-collection-get' %(
             listen_ip, listen_port)
 
         # 1. Add elements
-        requests.post(prop_list_update_url,
+        requests.post(prop_coll_update_url,
             headers={'Content-type': 'application/json; charset="UTF-8"'},
             data=json.dumps(
                 {'uuid': vmi_uuid,
                  'updates': [
-                     {'field': 'virtual_machine_interface_bindings',
+                     {'field': 'virtual_machine_interface_fat_flow_protocols',
                       'operation': 'add',
-                      'value': {'key': 'k1', 'value': 'v1'} },
-                     {'field': 'virtual_machine_interface_bindings',
+                      'value': {'protocol': 'proto1', 'port': 1} },
+                     {'field': 'virtual_machine_interface_fat_flow_protocols',
                       'operation': 'add',
-                      'value': {'key': 'k2', 'value': 'v2'},
+                      'value': {'protocol': 'proto2', 'port': 2},
                       'position': '0.0'},
-                     {'field': 'virtual_machine_interface_bindings',
+                     {'field': 'virtual_machine_interface_fat_flow_protocols',
                       'operation': 'add',
-                      'value': {'key': 'k3', 'value': 'v3'},
+                      'value': {'protocol': 'proto3', 'port': 3},
                       'position': '.01'} ] }))
 
         # 2. Get elements (all and specific)
         # get all elements
         query_params = {'uuid': vmi_uuid,
                         'fields': ','.join(
-                                  ['virtual_machine_interface_bindings'])}
-        rd_bindings = json.loads(requests.get(prop_list_get_url,
-            params=query_params).content)['virtual_machine_interface_bindings']
+                                  ['virtual_machine_interface_fat_flow_protocols'])}
+        rd_ff_proto = json.loads(requests.get(prop_coll_get_url,
+            params=query_params).content)['virtual_machine_interface_fat_flow_protocols']
 
-        self.assertEqual(len(rd_bindings), 3)
-        self.assertEqual(rd_bindings[0][0]['key'], 'k3')
-        self.assertEqual(rd_bindings[0][0]['value'], 'v3')
-        self.assertEqual(rd_bindings[0][1], '.01')
+        self.assertEqual(len(rd_ff_proto), 3)
+        self.assertEqual(rd_ff_proto[0][0]['protocol'], 'proto3')
+        self.assertEqual(rd_ff_proto[0][0]['port'], 3)
+        self.assertEqual(rd_ff_proto[0][1], '.01')
 
-        self.assertEqual(rd_bindings[2][0]['key'], 'k1')
-        self.assertEqual(rd_bindings[2][0]['value'], 'v1')
+        self.assertEqual(rd_ff_proto[2][0]['protocol'], 'proto1')
+        self.assertEqual(rd_ff_proto[2][0]['port'], 1)
         self.assertTrue(
-            isinstance(uuid.UUID(rd_bindings[2][1]), uuid.UUID),
+            isinstance(uuid.UUID(rd_ff_proto[2][1]), uuid.UUID),
             'Autogenerated position not of uuid form')
 
         # get specific element
         query_params = {'uuid': vmi_uuid,
                         'fields': ','.join(
-                                  ['virtual_machine_interface_bindings']),
+                                  ['virtual_machine_interface_fat_flow_protocols']),
                         'position': '.01'}
-        rd_bindings = json.loads(requests.get(prop_list_get_url,
-            params=query_params).content)['virtual_machine_interface_bindings']
-        self.assertEqual(len(rd_bindings), 1)
-        self.assertEqual(rd_bindings[0][0]['key'], 'k3')
-        self.assertEqual(rd_bindings[0][0]['value'], 'v3')
-        self.assertEqual(rd_bindings[0][1], '.01')
+        rd_ff_proto = json.loads(requests.get(prop_coll_get_url,
+            params=query_params).content)['virtual_machine_interface_fat_flow_protocols']
+        self.assertEqual(len(rd_ff_proto), 1)
+        self.assertEqual(rd_ff_proto[0][0]['protocol'], 'proto3')
+        self.assertEqual(rd_ff_proto[0][0]['port'], 3)
+        self.assertEqual(rd_ff_proto[0][1], '.01')
 
         # 3. Modify specific elements
-        requests.post(prop_list_update_url,
+        requests.post(prop_coll_update_url,
             headers={'Content-type': 'application/json; charset="UTF-8"'},
             data=json.dumps(
                 {'uuid': vmi_uuid,
                  'updates': [
-                     {'field': 'virtual_machine_interface_bindings',
+                     {'field': 'virtual_machine_interface_fat_flow_protocols',
                       'operation': 'modify',
-                      'value': {'key': 'k2', 'value': 'v2mod'},
+                      'value': {'protocol': 'proto2', 'port': 21},
                       'position': '0.0'},
-                     {'field': 'virtual_machine_interface_bindings',
+                     {'field': 'virtual_machine_interface_fat_flow_protocols',
                       'operation': 'modify',
-                      'value': {'key': 'k3', 'value': 'v3mod'},
+                      'value': {'protocol': 'proto3', 'port': 31},
                       'position': '.01'} ] }))
 
         query_params = {'uuid': vmi_uuid,
                         'fields': ','.join(
-                                  ['virtual_machine_interface_bindings'])}
-        rd_bindings = json.loads(requests.get(prop_list_get_url,
-            params=query_params).content)['virtual_machine_interface_bindings']
+                                  ['virtual_machine_interface_fat_flow_protocols'])}
+        rd_ff_proto = json.loads(requests.get(prop_coll_get_url,
+            params=query_params).content)['virtual_machine_interface_fat_flow_protocols']
 
-        self.assertEqual(len(rd_bindings), 3)
-        self.assertEqual(rd_bindings[0][0]['key'], 'k3')
-        self.assertEqual(rd_bindings[0][0]['value'], 'v3mod')
-        self.assertEqual(rd_bindings[0][1], '.01')
+        self.assertEqual(len(rd_ff_proto), 3)
+        self.assertEqual(rd_ff_proto[0][0]['protocol'], 'proto3')
+        self.assertEqual(rd_ff_proto[0][0]['port'], 31)
+        self.assertEqual(rd_ff_proto[0][1], '.01')
 
-        self.assertEqual(rd_bindings[1][0]['key'], 'k2')
-        self.assertEqual(rd_bindings[1][0]['value'], 'v2mod')
+        self.assertEqual(rd_ff_proto[1][0]['protocol'], 'proto2')
+        self.assertEqual(rd_ff_proto[1][0]['port'], 21)
 
         # 4. Delete (and add) elements
-        requests.post(prop_list_update_url,
+        requests.post(prop_coll_update_url,
             headers={'Content-type': 'application/json; charset="UTF-8"'},
             data=json.dumps(
                 {'uuid': vmi_uuid,
                  'updates': [
-                     {'field': 'virtual_machine_interface_bindings',
+                     {'field': 'virtual_machine_interface_fat_flow_protocols',
                       'operation': 'delete',
                       'position': '.01'},
-                     {'field': 'virtual_machine_interface_bindings',
+                     {'field': 'virtual_machine_interface_fat_flow_protocols',
                       'operation': 'delete',
                       'position': '0.0'},
-                     {'field': 'virtual_machine_interface_bindings',
+                     {'field': 'virtual_machine_interface_fat_flow_protocols',
                       'operation': 'add',
-                      'value': {'key': 'k4', 'value': 'v4'},
+                      'value': {'protocol': 'proto4', 'port': 4},
                       'position': '.01'} ] }))
 
         query_params = {'uuid': vmi_uuid,
                         'fields': ','.join(
-                                  ['virtual_machine_interface_bindings'])}
-        rd_bindings = json.loads(requests.get(prop_list_get_url,
-            params=query_params).content)['virtual_machine_interface_bindings']
+                                  ['virtual_machine_interface_fat_flow_protocols'])}
+        rd_ff_proto = json.loads(requests.get(prop_coll_get_url,
+            params=query_params).content)['virtual_machine_interface_fat_flow_protocols']
 
-        self.assertEqual(len(rd_bindings), 2)
-        self.assertEqual(rd_bindings[0][0]['key'], 'k4')
-        self.assertEqual(rd_bindings[0][0]['value'], 'v4')
-        self.assertEqual(rd_bindings[0][1], '.01')
-        self.assertEqual(rd_bindings[1][0]['key'], 'k1')
-        self.assertEqual(rd_bindings[1][0]['value'], 'v1')
-
+        self.assertEqual(len(rd_ff_proto), 2)
+        self.assertEqual(rd_ff_proto[0][0]['protocol'], 'proto4')
+        self.assertEqual(rd_ff_proto[0][0]['port'], 4)
+        self.assertEqual(rd_ff_proto[0][1], '.01')
+        self.assertEqual(rd_ff_proto[1][0]['protocol'], 'proto1')
+        self.assertEqual(rd_ff_proto[1][0]['port'], 1)
     # end test_prop_list_add_delete_get_rest_api
 
     def test_prop_list_wrong_type_should_fail(self):
@@ -2671,13 +2668,13 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
 
         vmi_uuid = self._rest_vmi_create()
 
-        prop_list_update_url = 'http://%s:%s/prop-list-update' %(
+        prop_coll_update_url = 'http://%s:%s/prop-collection-update' %(
             listen_ip, listen_port)
-        prop_list_get_url = 'http://%s:%s/prop-list-get' %(
+        prop_coll_get_url = 'http://%s:%s/prop-collection-get' %(
             listen_ip, listen_port)
 
         # 1. Try adding elements to non-prop-list field
-        response = requests.post(prop_list_update_url,
+        response = requests.post(prop_coll_update_url,
             headers={'Content-type': 'application/json; charset="UTF-8"'},
             data=json.dumps(
                 {'uuid': vmi_uuid,
@@ -2692,12 +2689,472 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
         query_params = {'uuid': vmi_uuid,
                         'fields': ','.join(
                                   ['display_name'])}
-        response = requests.get(prop_list_get_url,
+        response = requests.get(prop_coll_get_url,
             params=query_params)
         self.assertEqual(response.status_code, 400)
     # end test_prop_list_wrong_type_should_fail
 
 # end class TestPropertyWithlist
+
+
+class TestPropertyWithMap(test_case.ApiServerTestCase):
+    def assert_kvpos(self, rd_bindings, idx, k, v, pos):
+        self.assertEqual(rd_bindings[idx][0]['key'], k)
+        self.assertEqual(rd_bindings[idx][0]['value'], v)
+        self.assertEqual(rd_bindings[idx][1], pos)
+
+    def test_set_in_object(self):
+        vmi_obj = VirtualMachineInterface('vmi-%s' %(self.id()),
+            parent_obj=Project())
+        vmi_obj.set_virtual_machine_interface_bindings(
+            KeyValuePairs([KeyValuePair(key='k1', value='v1'),
+                           KeyValuePair(key='k2', value='v2')]))
+        # needed for backend type-specific handling
+        vmi_obj.add_virtual_network(VirtualNetwork())
+        self._vnc_lib.virtual_machine_interface_create(vmi_obj)
+
+        # ensure stored as list order
+        rd_vmi_obj = self._vnc_lib.virtual_machine_interface_read(
+            id=vmi_obj.uuid)
+        rd_bindings = rd_vmi_obj.virtual_machine_interface_bindings
+        self.assertThat(
+            rd_bindings.key_value_pair[0].key, Equals('k1'))
+        self.assertThat(
+            rd_bindings.key_value_pair[1].key, Equals('k2'))
+
+        # verify db storage format (wrapper/container type stripped in storage)
+        uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+        cols = uuid_cf.get(vmi_obj.uuid,
+            column_start='propm:virtual_machine_interface_bindings:',
+            column_finish='propm:virtual_machine_interface_bindings;')
+        col_name_0, col_val_0 = cols.popitem(last=False)
+        col_name_1, col_val_1 = cols.popitem(last=False)
+        self.assertThat(col_name_0.split(':')[-1], Equals('k1'))
+        self.assertThat(json.loads(col_val_0)['key'], Equals('k1'))
+        self.assertThat(col_name_1.split(':')[-1], Equals('k2'))
+        self.assertThat(json.loads(col_val_1)['key'], Equals('k2'))
+
+        # update and clobber old entries
+        #vmi_obj.set_virtual_machine_interface_bindings([])
+        vmi_obj.set_virtual_machine_interface_bindings(KeyValuePairs())
+        self._vnc_lib.virtual_machine_interface_update(vmi_obj)
+        rd_vmi_obj = self._vnc_lib.virtual_machine_interface_read(
+            id=vmi_obj.uuid)
+        rd_bindings = rd_vmi_obj.virtual_machine_interface_bindings
+        self.assertIsNone(rd_bindings)
+        cols = uuid_cf.get(vmi_obj.uuid,
+            column_start='propm:virtual_machine_interface_bindings:',
+            column_finish='propm:virtual_machine_interface_bindings;')
+        self.assertEqual(len(cols), 0)
+    # end test_set_in_object
+
+    def test_element_add_del_in_object(self):
+        vmi_obj = VirtualMachineInterface('vmi-%s' %(self.id()),
+            parent_obj=Project())
+
+        for key,val in [('k2','v2'), ('k1','v1'),
+                            ('k3','v3'), ('k4', 'v4')]:
+            vmi_obj.add_virtual_machine_interface_bindings(
+                KeyValuePair(key=key, value=val))
+
+        # needed for backend type-specific handling
+        vmi_obj.add_virtual_network(VirtualNetwork())
+        self._vnc_lib.virtual_machine_interface_create(vmi_obj)
+        rd_bindings = self._vnc_lib.virtual_machine_interface_read(
+            id=vmi_obj.uuid).virtual_machine_interface_bindings
+
+        self.assertEqual(len(rd_bindings.key_value_pair), 4)
+
+        self.assertEqual(rd_bindings.key_value_pair[0].key, 'k1')
+        self.assertEqual(rd_bindings.key_value_pair[0].value, 'v1')
+        self.assertEqual(rd_bindings.key_value_pair[1].key, 'k2')
+        self.assertEqual(rd_bindings.key_value_pair[1].value, 'v2')
+        self.assertEqual(rd_bindings.key_value_pair[2].key, 'k3')
+        self.assertEqual(rd_bindings.key_value_pair[2].value, 'v3')
+        self.assertEqual(rd_bindings.key_value_pair[3].key, 'k4')
+        self.assertEqual(rd_bindings.key_value_pair[3].value, 'v4')
+
+        for pos in ['k1', 'k4']:
+            vmi_obj.del_virtual_machine_interface_bindings(
+                elem_position=pos)
+        self._vnc_lib.virtual_machine_interface_update(vmi_obj)
+        rd_bindings = self._vnc_lib.virtual_machine_interface_read(
+            id=vmi_obj.uuid).virtual_machine_interface_bindings
+
+        self.assertEqual(len(rd_bindings.key_value_pair), 2)
+
+        self.assertEqual(rd_bindings.key_value_pair[0].key, 'k2')
+        self.assertEqual(rd_bindings.key_value_pair[0].value, 'v2')
+        self.assertEqual(rd_bindings.key_value_pair[1].key, 'k3')
+        self.assertEqual(rd_bindings.key_value_pair[1].value, 'v3')
+    # end test_element_set_del_in_object
+# end class TestPropertyWithMap
+
+
+class TestDBAudit(test_case.ApiServerTestCase):
+    @contextlib.contextmanager
+    def audit_mocks(self):
+        def fake_ks_prop(*args, **kwargs):
+            return {'strategy_options': {'replication_factor': 1}}
+
+        with test_common.patch_imports(
+            [('schema_transformer.db',
+              flexmock(db=flexmock(
+                  SchemaTransformerDB=flexmock(get_db_info=lambda: [])))),
+             ('discovery.disc_cassdb',
+              flexmock(disc_cassdb=flexmock(
+                  DiscoveryCassandraClient=flexmock(
+                      get_db_info=lambda: []))))]):
+            with test_common.flexmocks([
+                (pycassa.SystemManager, 'get_keyspace_properties',
+                 fake_ks_prop)]):
+                yield
+    # end audit_mocks
+
+    def _create_vn_subnet_ipam(self, name):
+        ipam_obj = vnc_api.NetworkIpam(name)
+        self._vnc_lib.network_ipam_create(ipam_obj)
+        vn_obj = vnc_api.VirtualNetwork(name)
+        vn_obj.add_network_ipam(ipam_obj,
+            VnSubnetsType(
+                [IpamSubnetType(SubnetType('1.1.1.0', 28))]))
+        self._vnc_lib.virtual_network_create(vn_obj)
+
+        return vn_obj, ipam_obj
+    # end _create_vn_subnet_ipam
+
+    def test_checker(self):
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            test_obj = self._create_test_object()
+            self.assertTill(self.ifmap_has_ident, obj=test_obj)
+            db_manage.db_check('--ifmap-credentials a:b')
+    # end test_checker
+
+    def test_checker_missing_mandatory_fields(self):
+        # detect OBJ_UUID_TABLE entry missing required fields
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            test_obj = self._create_test_object()
+            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            orig_col_val_ts = uuid_cf.get(test_obj.uuid,
+                include_timestamp=True)
+            omit_col_names = random.sample(set(
+                ['type', 'fq_name', 'prop:id_perms']), 1)
+            wrong_col_val_ts = dict((k,v) for k,v in orig_col_val_ts.items()
+                if k not in omit_col_names)
+            with uuid_cf.patch_row(
+                test_obj.uuid, wrong_col_val_ts):
+                db_checker = db_manage.DatabaseChecker(
+                    '--ifmap-credentials a:b')
+                errors = db_checker.check_obj_mandatory_fields()
+                self.assertIn(db_manage.MandatoryFieldsMissingError,
+                    [type(x) for x in errors])
+    # end test_checker_missing_mandatory_fields
+
+    def test_checker_fq_name_mismatch_index_to_object(self):
+        # detect OBJ_UUID_TABLE and OBJ_FQ_NAME_TABLE inconsistency
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            test_obj = self._create_test_object()
+            self.assertTill(self.ifmap_has_ident, obj=test_obj)
+
+            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            orig_col_val_ts = uuid_cf.get(test_obj.uuid,
+                include_timestamp=True)
+            wrong_col_val_ts = copy.deepcopy(orig_col_val_ts)
+            wrong_col_val_ts['fq_name'] = (json.dumps(['wrong-fq-name']),
+                wrong_col_val_ts['fq_name'][1])
+            with uuid_cf.patch_row(
+                test_obj.uuid, wrong_col_val_ts):
+                db_checker = db_manage.DatabaseChecker(
+                    '--ifmap-credentials a:b')
+                errors = db_checker.check_fq_name_uuid_ifmap_match()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.FQNMismatchError, error_types)
+                self.assertIn(db_manage.FQNStaleIndexError, error_types)
+                self.assertIn(db_manage.FQNIndexMissingError, error_types)
+    # end test_checker_fq_name_mismatch_index_to_object
+
+    def test_checker_fq_name_index_stale(self):
+        # fq_name table in cassandra has entry but obj_uuid table doesn't
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            test_obj = self._create_test_object()
+            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            fq_name_cf = test_common.CassandraCFs.get_cf('obj_fq_name_table')
+            with uuid_cf.patch_row(test_obj.uuid, new_columns=None):
+                db_checker = db_manage.DatabaseChecker(
+                    '--ifmap-credentials a:b')
+                errors = db_checker.check_fq_name_uuid_ifmap_match()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.FQNStaleIndexError, error_types)
+    # test_checker_fq_name_mismatch_stale
+
+    def test_checker_fq_name_index_missing(self):
+        # obj_uuid table has entry but fq_name table in cassandra doesn't
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            test_obj = self._create_test_object()
+            self.assertTill(self.ifmap_has_ident, obj=test_obj)
+            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            fq_name_cf = test_common.CassandraCFs.get_cf('obj_fq_name_table')
+            test_obj_type = test_obj.get_type().replace('-', '_')
+            orig_col_val_ts = fq_name_cf.get(test_obj_type,
+                include_timestamp=True)
+            # remove test obj in fq-name table
+            wrong_col_val_ts = dict((k,v) for k,v in orig_col_val_ts.items()
+                if ':'.join(test_obj.fq_name) not in k)
+            with fq_name_cf.patch_row(test_obj_type, new_columns=wrong_col_val_ts):
+                db_checker = db_manage.DatabaseChecker(
+                    '--ifmap-credentials a:b')
+                errors = db_checker.check_fq_name_uuid_ifmap_match()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.FQNIndexMissingError, error_types)
+    # test_checker_fq_name_mismatch_missing
+
+    def test_checker_ifmap_identifier_extra(self):
+        # ifmap has identifier but obj_uuid table in cassandra doesn't
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            test_obj = self._create_test_object()
+            self.assertTill(self.ifmap_has_ident, obj=test_obj)
+     
+            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            with uuid_cf.patch_row(test_obj.uuid, new_columns=None):
+                db_checker = db_manage.DatabaseChecker(
+                    '--ifmap-credentials a:b')
+                errors = db_checker.check_fq_name_uuid_ifmap_match()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.FQNStaleIndexError, error_types)
+                self.assertIn(db_manage.IfmapExtraIdentifiersError, error_types)
+    # test_checker_ifmap_identifier_extra
+
+    def test_checker_ifmap_identifier_missing(self):
+        # ifmap has doesn't have an identifier but obj_uuid table 
+        # in cassandra does
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            with uuid_cf.patch_row(str(uuid.uuid4()),
+                    new_columns={'type': json.dumps(''),
+                                 'fq_name':json.dumps(''),
+                                 'prop:id_perms':json.dumps('')}):
+                db_checker = db_manage.DatabaseChecker(
+                    '--ifmap-credentials a:b')
+                errors = db_checker.check_fq_name_uuid_ifmap_match()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.FQNIndexMissingError, error_types)
+                self.assertIn(db_manage.IfmapMissingIdentifiersError, error_types)
+    # test_checker_ifmap_identifier_missing
+
+    def test_checker_useragent_subnet_key_missing(self):
+        pass # move to vnc_openstack test
+    # test_checker_useragent_subnet_key_missing
+
+    def test_checker_useragent_subnet_id_missing(self):
+        pass # move to vnc_openstack test
+    # test_checker_useragent_subnet_id_missing
+
+    def test_checker_ipam_subnet_uuid_missing(self):
+        pass # move to vnc_openstack test
+    # test_checker_ipam_subnet_uuid_missing
+
+    def test_checker_subnet_count_mismatch(self):
+        pass # move to vnc_openstack test
+    # test_checker_subnet_count_mismatch
+
+    def test_checker_useragent_subnet_missing(self):
+        pass # move to vnc_openstack test
+    # test_checker_useragent_subnet_missing
+
+    def test_checker_useragent_subnet_extra(self):
+        pass # move to vnc_openstack test
+    # test_checker_useragent_subnet_extra
+
+    def test_checker_zk_vn_extra(self):
+        vn_obj, _ = self._create_vn_subnet_ipam(self.id())
+        fq_name_cf = test_common.CassandraCFs.get_cf('obj_fq_name_table')
+        orig_col_val_ts = fq_name_cf.get('virtual_network',
+            include_timestamp=True)
+        # remove test obj in fq-name table
+        wrong_col_val_ts = dict((k,v) for k,v in orig_col_val_ts.items()
+            if ':'.join(vn_obj.fq_name) not in k)
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            db_checker = db_manage.DatabaseChecker(
+                '--ifmap-credentials a:b')
+            # verify catch of extra ZK VN when name index is mocked
+            with fq_name_cf.patch_row('virtual_network',
+                new_columns=wrong_col_val_ts):
+                errors = db_checker.check_subnet_addr_alloc()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.ZkVNExtraError, error_types)
+                self.assertIn(db_manage.ZkSubnetExtraError, error_types)
+    # test_checker_zk_vn_extra
+
+    def test_checker_zk_vn_missing(self):
+        vn_obj, _ = self._create_vn_subnet_ipam(self.id())
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            db_checker = db_manage.DatabaseChecker(
+                '--ifmap-credentials a:b')
+
+            with db_checker._zk_client.patch_path(
+                '%s/%s' %(db_checker.BASE_SUBNET_ZK_PATH,
+                          vn_obj.get_fq_name_str())):
+                errors = db_checker.check_subnet_addr_alloc()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.ZkVNMissingError, error_types)
+                self.assertIn(db_manage.ZkSubnetMissingError, error_types)
+    # test_checker_zk_vn_missing
+
+    def test_checker_zk_ip_extra(self):
+        vn_obj, _ = self._create_vn_subnet_ipam(self.id())
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            db_checker = db_manage.DatabaseChecker(
+                '--ifmap-credentials a:b')
+
+            # verify catch of zk extra ip when iip is mocked absent
+            iip_obj = vnc_api.InstanceIp(self.id())
+            iip_obj.add_virtual_network(vn_obj)
+            self._vnc_lib.instance_ip_create(iip_obj)
+            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            with uuid_cf.patch_row(iip_obj.uuid, None):
+                errors = db_checker.check_subnet_addr_alloc()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.FQNStaleIndexError, error_types)
+                self.assertIn(db_manage.ZkIpExtraError, error_types)
+    # test_checker_zk_ip_extra
+
+    def test_checker_zk_ip_missing(self):
+        vn_obj, _ = self._create_vn_subnet_ipam(self.id())
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            db_checker = db_manage.DatabaseChecker(
+                '--ifmap-credentials a:b')
+
+            iip_obj = vnc_api.InstanceIp(self.id())
+            iip_obj.add_virtual_network(vn_obj)
+            self._vnc_lib.instance_ip_create(iip_obj)
+            ip_addr = self._vnc_lib.instance_ip_read(
+                id=iip_obj.uuid).instance_ip_address
+            ip_str = "%(#)010d" % {'#': int(netaddr.IPAddress(ip_addr))}
+            with db_checker._zk_client.patch_path(
+                '%s/%s:1.1.1.0/28/%s' %(db_checker.BASE_SUBNET_ZK_PATH,
+                                  vn_obj.get_fq_name_str(), ip_str)):
+                errors = db_checker.check_subnet_addr_alloc()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.ZkIpMissingError, error_types)
+        pass
+    # test_checker_zk_ip_missing
+
+    def test_checker_zk_reserved_ip_missing(self):
+        vn_obj, _ = self._create_vn_subnet_ipam(self.id())
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            db_checker = db_manage.DatabaseChecker(
+                '--ifmap-credentials a:b')
+            # mock absence of gateway ip in zk
+            ip_str = "%(#)010d" % {'#': int(netaddr.IPAddress('1.1.1.14'))}
+            with db_checker._zk_client.patch_path(
+                '%s/%s:1.1.1.0/28/%s' %(db_checker.BASE_SUBNET_ZK_PATH,
+                                  vn_obj.get_fq_name_str(), ip_str)):
+                errors = db_checker.check_subnet_addr_alloc()
+                error_types = [type(x) for x in errors]
+                self.assertIn(db_manage.ZkIpReserveError, error_types)
+    # test_checker_zk_reserved_ip_missing
+
+    def test_checker_zk_route_target_extra(self):
+        pass # move to schema transformer test
+    # test_checker_zk_route_target_extra
+
+    def test_checker_zk_route_target_missing(self):
+        pass # move to schema transformer test
+    # test_checker_zk_route_target_missing
+
+    def test_checker_zk_route_target_range_wrong(self):
+        pass # move to schema transformer test
+    # test_checker_zk_route_target_range_wrong
+
+    def test_checker_cass_route_target_range_wrong(self):
+        pass # move to schema transformer test
+    # test_checker_cass_route_target_range_wrong
+
+    def test_checker_route_target_count_mismatch(self):
+        # include user assigned route-targets here
+        pass # move to schema transformer test
+    # test_checker_route_target_count_mismatch
+
+    def test_checker_virtual_network_id_missing(self):
+        pass # move to schema transformer test
+    # test_checker_virtual_network_id_missing
+
+    def test_checker_zk_vn_id_extra(self):
+        pass # move to schema transformer test
+    # test_checker_zk_vn_id_extra
+
+    def test_checker_zk_vn_id_missing(self):
+        pass # move to schema transformer test
+    # test_checker_zk_vn_id_missing
+
+    def test_checker_zk_sg_id_extra(self):
+        pass # move to schema transformer test
+    # test_checker_zk_sg_id_extra
+
+    def test_checker_zk_sg_id_missing(self):
+        pass # move to schema transformer test
+    # test_checker_zk_sg_id_missing
+
+    def test_checker_sg_0_missing(self):
+        pass # move to schema transformer test
+    # test_checker_sg_0_missing
+
+    def test_cleaner(self):
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            db_manage.db_clean('--ifmap-credentials a:b')
+    # end test_cleaner
+
+    def test_clean_obj_missing_mandatory_fields(self):
+        pass
+    # end test_clean_obj_missing_mandatory_fields
+
+    def test_clean_dangling_fq_names(self):
+        pass
+    # end test_clean_dangling_fq_names()
+
+    def test_clean_dangling_back_refs(self):
+        pass
+    # end test_clean_dangling_back_refs()
+
+    def test_clean_dangling_children(self):
+        pass
+    # end test_clean_dangling_children
+
+    def test_healer(self):
+        with self.audit_mocks():
+            from vnc_cfg_api_server import db_manage
+            db_manage.db_heal('--ifmap-credentials a:b')
+    # end test_healer
+
+    def test_heal_fq_name_index(self):
+        pass
+    # end test_heal_fq_name_index
+
+    def test_heal_back_ref_index(self):
+        pass
+    # end test_heal_back_ref_index
+
+    def test_heal_children_index(self):
+        pass
+    # end test_heal_children_index
+
+    def test_heal_useragent_subnet_uuid(self):
+        pass
+    # end test_heal_useragent_subnet_uuid
+# end class TestDBAudit
 
 if __name__ == '__main__':
     ch = logging.StreamHandler()

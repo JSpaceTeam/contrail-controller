@@ -10,7 +10,6 @@
 #include "bgp/bgp_table.h"
 #include "bgp/inet/inet_route.h"
 #include "net/address.h"
-#include "route/table.h"
 
 class Ip4Prefix;
 class BgpServer;
@@ -51,6 +50,7 @@ public:
                              ExtCommunityPtr ptr);
 
     virtual bool IsRoutingPolicySupported() const { return true; }
+    virtual bool IsRouteAggregationSupported() const { return true; }
 private:
     virtual BgpRoute *TableFind(DBTablePartition *rtp,
                                 const DBRequestKey *prefix);

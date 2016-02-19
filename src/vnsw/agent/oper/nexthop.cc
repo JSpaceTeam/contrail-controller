@@ -786,7 +786,7 @@ bool TunnelNH::Change(const DBRequest *req) {
                                               nh->interface()->vrf()->GetName(),
                                               nh->interface(),
                                               nh->PolicyEnabled(),
-                                              rt->GetActivePath()->dest_vn_name(),
+                                              rt->GetActivePath()->dest_vn_list(),
                                               rt->GetActivePath()->sg_list());
         rt = NULL;
     } else {
@@ -864,14 +864,29 @@ void TunnelNH::SendObjectLog(const NextHopTable *table,
 /////////////////////////////////////////////////////////////////////////////
 // Mirror NH routines
 /////////////////////////////////////////////////////////////////////////////
+MirrorNH::MirrorNH(const VrfKey &vkey, const IpAddress &sip, uint16_t sport,
+                   const IpAddress &dip, uint16_t dport):
+        NextHop(NextHop::MIRROR, false, false), vrf_name_(vkey.name_),
+        sip_(sip), sport_(sport), dip_(dip), dport_(dport), arp_rt_(this),
+        interface_(NULL), dmac_() {
+    VrfEntry *vrf = static_cast<VrfEntry *>
+        (Agent::GetInstance()->vrf_table()->Find(&vkey, true));
+    vrf_ = VrfEntryRef(vrf, this);
+}
+
 bool MirrorNH::CanAdd() const {
+    /* For service-chain based mirroring, vrf will always be empty. In this
+     * case we should create MirrorNH even when VRF is NULL */
+    if (!vrf_name_.empty() && vrf_ == NULL) {
+        LOG(ERROR, "Invalid VRF in mirror NH");
+        return false;
+    }
+
     return true;
 }
 
 NextHop *MirrorNHKey::AllocEntry() const {
-    VrfEntry *vrf = static_cast<VrfEntry *>
-        (Agent::GetInstance()->vrf_table()->Find(&vrf_key_, true));
-    return new MirrorNH(vrf, sip_, sport_, dip_, dport_);
+    return new MirrorNH(vrf_key_, sip_, sport_, dip_, dport_);
 }
 
 bool MirrorNH::NextHopIsLess(const DBEntry &rhs) const {
@@ -908,6 +923,16 @@ MirrorNH::KeyPtr MirrorNH::GetDBRequestKey() const {
     return DBEntryBase::KeyPtr(key);
 }
 
+InetUnicastAgentRouteTable *MirrorNH::GetRouteTable() {
+    InetUnicastAgentRouteTable *rt_table = NULL;
+    if (dip_.is_v4()) {
+        rt_table = GetVrf()->GetInet4UnicastRouteTable();
+    } else {
+        rt_table = GetVrf()->GetInet6UnicastRouteTable();
+    }
+    return rt_table;
+}
+
 bool MirrorNH::Change(const DBRequest *req) {
     bool ret = false;
     bool valid = false;
@@ -916,8 +941,7 @@ bool MirrorNH::Change(const DBRequest *req) {
         valid_ = true;
         return true;
     }
-    InetUnicastAgentRouteTable *rt_table =
-        (GetVrf()->GetInet4UnicastRouteTable());
+    InetUnicastAgentRouteTable *rt_table = GetRouteTable();
     InetUnicastRouteEntry *rt = rt_table->FindLPM(dip_);
     if (!rt) {
         //No route to reach destination, add to unresolved list
@@ -930,11 +954,11 @@ bool MirrorNH::Change(const DBRequest *req) {
         rt_table->AddUnresolvedNH(this);
         const ResolveNH *nh =
             static_cast<const ResolveNH *>(rt->GetActiveNextHop());
-        InetUnicastAgentRouteTable::AddArpReq(GetVrf()->GetName(), dip_,
+        InetUnicastAgentRouteTable::AddArpReq(GetVrf()->GetName(), dip_.to_v4(),
                                               nh->interface()->vrf()->GetName(),
                                               nh->interface(),
                                               nh->PolicyEnabled(),
-                                              rt->GetActivePath()->dest_vn_name(),
+                                              rt->GetActivePath()->dest_vn_list(),
                                               rt->GetActivePath()->sg_list());
         rt = NULL;
     } else {
@@ -946,7 +970,7 @@ bool MirrorNH::Change(const DBRequest *req) {
         ret = true;
     }
 
-    if (arp_rt_.get() != rt) {
+    if (dip_.is_v4() && (arp_rt_.get() != rt)) {
         arp_rt_.reset(rt);
         ret = true;
     }
@@ -989,8 +1013,7 @@ void MirrorNH::Delete(const DBRequest *req) {
     if (!GetVrf()) {
         return;
     }
-    InetUnicastAgentRouteTable *rt_table =
-        (GetVrf()->GetInet4UnicastRouteTable());
+    InetUnicastAgentRouteTable *rt_table = GetRouteTable();
     rt_table->RemoveUnresolvedNH(this);
 }
 
@@ -1004,9 +1027,9 @@ void MirrorNH::SendObjectLog(const NextHopTable *table,
     if (vrf) {
         info.set_vrf(vrf->GetName());
     }
-    const Ip4Address *sip = GetSip();
+    const IpAddress *sip = GetSip();
     info.set_source_ip(sip->to_string());
-    const Ip4Address *dip = GetDip();
+    const IpAddress *dip = GetDip();
     info.set_dest_ip(dip->to_string());
     info.set_source_port((short int)GetSPort());
     info.set_dest_port((short int)GetDPort());

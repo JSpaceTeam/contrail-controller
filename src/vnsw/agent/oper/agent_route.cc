@@ -111,10 +111,9 @@ void AgentRouteTable::SetVrf(VrfEntry *vrf) {
 auto_ptr<DBEntry> AgentRouteTable::AllocEntry(const DBRequestKey *k) const {
     const AgentRouteKey *key = static_cast<const AgentRouteKey*>(k);
     VrfKey vrf_key(key->vrf_name());
-    VrfEntry *vrf = 
-        static_cast<VrfEntry *>(agent_->vrf_table()->Find(&vrf_key, true));
     AgentRoute *route = 
-        static_cast<AgentRoute *>(key->AllocRouteEntry(vrf, false));
+        static_cast<AgentRoute *>(key->AllocRouteEntry(vrf_entry_.get(),
+                                                       false));
     return auto_ptr<DBEntry>(static_cast<DBEntry *>(route));
 }
 
@@ -565,7 +564,8 @@ uint32_t AgentRoute::GetActiveLabel() const {
 };
 
 const string &AgentRoute::dest_vn_name() const { 
-    return GetActivePath()->dest_vn_name();
+    assert(GetActivePath()->dest_vn_list().size() <= 1);
+    return *GetActivePath()->dest_vn_list().begin();
 };
 
 string AgentRoute::ToString() const {
@@ -719,7 +719,8 @@ void AgentRoute::EnqueueRouteResync(void) const {
     DBRequest  req(DBRequest::DB_ENTRY_ADD_CHANGE);
     req.key = GetDBRequestKey();
     (static_cast<AgentKey *>(req.key.get()))->sub_op_ = AgentKey::RESYNC;
-    get_table()->Enqueue(&req);
+    Agent *agent = (static_cast<AgentRouteTable *>(get_table()))->agent();
+    agent->fabric_inet4_unicast_table()->Enqueue(&req);
 }
 
 //If a direct route get modified invariably trigger change

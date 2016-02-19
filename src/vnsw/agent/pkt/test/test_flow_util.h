@@ -3,6 +3,7 @@
  */
 #ifndef __testflow__
 #define __testflow__
+#include "pkt/flow_entry.h"
 #include "test_pkt_util.h"
 static uint32_t running_hash = 1;
 class TestFlowPkt {
@@ -248,6 +249,7 @@ private:
             table->Delete(key_, true);
             return true;
         }
+        std::string Description() const { return "FlowDeleteTask"; }
     private:
         FlowKey key_;
     };
@@ -280,14 +282,14 @@ public:
     virtual ~VerifyVn() {};
 
     virtual void Verify(FlowEntry *fe) {
-        EXPECT_TRUE(fe->data().source_vn == src_vn_);
-        EXPECT_TRUE(fe->data().dest_vn == dest_vn_);
+        EXPECT_TRUE(VnMatch(fe->data().source_vn_list, src_vn_));
+        EXPECT_TRUE(VnMatch(fe->data().dest_vn_list, dest_vn_));
 
         if (true) {
             FlowEntry *rev = fe->reverse_flow_entry();
             EXPECT_TRUE(rev != NULL);
-            EXPECT_TRUE(rev->data().source_vn == dest_vn_);
-            EXPECT_TRUE(rev->data().dest_vn == src_vn_);
+            EXPECT_TRUE(VnMatch(rev->data().source_vn_list, dest_vn_));
+            EXPECT_TRUE(VnMatch(rev->data().dest_vn_list, src_vn_));
         }
     };
 
@@ -397,8 +399,12 @@ public:
         EXPECT_TRUE(rev->key().src_addr == Ip4Address::from_string(nat_sip_));
         EXPECT_TRUE(rev->key().dst_addr == Ip4Address::from_string(nat_dip_));
         EXPECT_TRUE(rev->key().src_port == nat_sport_);
+        uint32_t dport = fe->linklocal_src_port();
+        if (dport == 0) {
+            dport = fe->key().src_port;
+        }
         EXPECT_TRUE(rev->key().dst_port == nat_dport_ ||
-                    rev->key().dst_port == fe->linklocal_src_port());
+                    rev->key().dst_port == dport);
     };
 
 private:

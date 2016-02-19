@@ -167,6 +167,22 @@ const VnIpam *VnEntry::GetIpam(const IpAddress &ip) const {
     return NULL;
 }
 
+IpAddress VnEntry::GetGatewayFromIpam(const IpAddress &ip) const {
+    const VnIpam *ipam = GetIpam(ip);
+    if (ipam) {
+        return ipam->default_gw;
+    }
+    return IpAddress();
+}
+
+IpAddress VnEntry::GetDnsFromIpam(const IpAddress &ip) const {
+    const VnIpam *ipam = GetIpam(ip);
+    if (ipam) {
+        return ipam->dns_server;
+    }
+    return IpAddress();
+}
+
 bool VnEntry::GetIpamVdnsData(const IpAddress &vm_addr,
                               autogen::IpamType *ipam_type,
                               autogen::VirtualDnsType *vdns_type) const {
@@ -202,12 +218,12 @@ bool VnEntry::GetPrefix(const Ip6Address &ip, Ip6Address *prefix,
 std::string VnEntry::GetProject() const {
     // TODO: update to get the project name from project-vn link.
     // Currently, this info doesnt come to the agent
-    std::size_t start_pos = name_.find(":") + 1;
-    std::size_t end_pos = name_.find(":", start_pos);
-    if (end_pos == std::string::npos)
+    std::string name(name_.c_str());
+    char *saveptr;
+    if (strtok_r(const_cast<char *>(name.c_str()), ":", &saveptr) == NULL)
         return "";
-
-    return name_.substr(start_pos, end_pos - start_pos);
+    char *project = strtok_r(NULL, ":", &saveptr);
+    return (project == NULL) ? "" : std::string(project);
 }
 
 int VnEntry::GetVxLanId() const {

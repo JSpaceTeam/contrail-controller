@@ -61,8 +61,8 @@ FlowTable::FlowTable(Agent *agent, uint16_t table_index) :
     table_index_(table_index),
     ksync_object_(NULL),
     flow_entry_map_(),
-    linklocal_flow_count_(),
-    free_list_(this) {
+    free_list_(this),
+    flow_task_id_(0) {
 }
 
 FlowTable::~FlowTable() {
@@ -70,6 +70,7 @@ FlowTable::~FlowTable() {
 }
 
 void FlowTable::Init() {
+    flow_task_id_ = agent_->task_scheduler()->GetTaskId(kTaskFlowEvent);
     FlowEntry::Init();
     rand_gen_ = boost::uuids::random_generator();
     return;
@@ -79,6 +80,19 @@ void FlowTable::InitDone() {
 }
 
 void FlowTable::Shutdown() {
+}
+
+// Concurrency check to ensure all flow-table and free-list manipulations
+// are done from FlowEvent task context only
+void FlowTable::ConcurrencyCheck() {
+    Task *current = Task::Running();
+    // test code invokes FlowTable API from main thread. The running task
+    // will be NULL in such cases
+    if (current == NULL) {
+        return;
+    }
+    assert(current->GetTaskId() == flow_task_id_);
+    assert(current->GetTaskInstance() == table_index_);
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -102,6 +116,7 @@ void FlowTable::GetMutexSeq(tbb::mutex &mutex1, tbb::mutex &mutex2,
 }
 
 FlowEntry *FlowTable::Find(const FlowKey &key) {
+    ConcurrencyCheck();
     FlowEntryMap::iterator it;
 
     it = flow_entry_map_.find(key);
@@ -119,6 +134,7 @@ void FlowTable::Copy(FlowEntry *lhs, const FlowEntry *rhs) {
 }
 
 FlowEntry *FlowTable::Locate(FlowEntry *flow, uint64_t time) {
+    ConcurrencyCheck();
     std::pair<FlowEntryMap::iterator, bool> ret;
     ret = flow_entry_map_.insert(FlowEntryMapPair(flow->key(), flow));
     if (ret.second == true) {
@@ -350,6 +366,19 @@ void FlowTable::UpdateReverseFlow(FlowEntry *flow, FlowEntry *rflow) {
         }
     }
 
+    if (rflow && rflow->is_flags_set(FlowEntry::BgpRouterService)) {
+        //In BGP router service for some reason if tcp connection does not
+        //succeed, then client will try again with new source port and this will
+        //create a new flow. Now there will be two flows - one with old source
+        //port and other with new source port. However both of them will have
+        //same reverse flow as its is nat'd with fabric sip/dip.
+        //To avoid this delete old flow and dont let new flow to be short flow.
+        if (rflow_rev) {
+            Delete(rflow_rev->key(), false);
+            rflow_rev = NULL;
+        }
+    }
+    
     if (rflow_rev && (rflow_rev->reverse_flow_entry() == NULL)) {
         rflow_rev->MakeShortFlow(FlowEntry::SHORT_NO_REVERSE_FLOW);
         if (ValidFlowMove(flow, rflow_rev) == false) {
@@ -374,112 +403,6 @@ void FlowTable::UpdateReverseFlow(FlowEntry *flow, FlowEntry *rflow) {
             rflow->set_flags(FlowEntry::Multicast);
         }
     }
-}
-
-////////////////////////////////////////////////////////////////////////////
-// VM notification handler
-////////////////////////////////////////////////////////////////////////////
-void FlowTable::DeleteVmFlowInfo(FlowEntry *fe, const VmEntry *vm) {
-    VmFlowTree::iterator vm_it = vm_flow_tree_.find(vm);
-    if (vm_it != vm_flow_tree_.end()) {
-        VmFlowInfo *vm_flow_info = vm_it->second;
-        if (vm_flow_info->fet.erase(fe)) {
-            if (fe->linklocal_src_port()) {
-                vm_flow_info->linklocal_flow_count--;
-                linklocal_flow_count_--;
-            }
-            if (vm_flow_info->fet.empty()) {
-                delete vm_flow_info;
-                vm_flow_tree_.erase(vm_it);
-            }
-        }
-    }
-}
-
-void FlowTable::DeleteVmFlowInfo(FlowEntry *fe) {
-    if (fe->in_vm_entry()) {
-        DeleteVmFlowInfo(fe, fe->in_vm_entry());
-    }
-    if (fe->out_vm_entry()) {
-        DeleteVmFlowInfo(fe, fe->out_vm_entry());
-    }
-}
-
-void FlowTable::AddVmFlowInfo(FlowEntry *fe) {
-    if (fe->in_vm_entry()) {
-        AddVmFlowInfo(fe, fe->in_vm_entry());
-    }
-    if (fe->out_vm_entry()) {
-        AddVmFlowInfo(fe, fe->out_vm_entry());
-    }
-}
-
-void FlowTable::AddVmFlowInfo(FlowEntry *fe, const VmEntry *vm) {
-    if (fe->is_flags_set(FlowEntry::ShortFlow)) {
-        // do not include short flows
-        // this is done so that we allow atleast the minimum allowed flows
-        // for a VM; Otherwise, in a continuous flow scenario, all flows
-        // become short and we dont allow any flows to a VM.
-        return;
-    }
-
-    bool update = false;
-    VmFlowTree::iterator it;
-    it = vm_flow_tree_.find(vm);
-    VmFlowInfo *vm_flow_info;
-    if (it == vm_flow_tree_.end()) {
-        vm_flow_info = new VmFlowInfo();
-        vm_flow_info->vm_entry = vm;
-        vm_flow_info->fet.insert(fe);
-        vm_flow_tree_.insert(VmFlowPair(vm, vm_flow_info));
-        update = true;
-    } else {
-        vm_flow_info = it->second;
-        /* fe can already exist. In that case it won't be inserted */
-        if (vm_flow_info->fet.insert(fe).second) {
-            update = true;
-        }
-    }
-    if (update) {
-        if (fe->linklocal_src_port()) {
-            vm_flow_info->linklocal_flow_count++;
-            linklocal_flow_count_++;
-        }
-    }
-}
-
-void FlowTable::DeleteVmFlows(const VmEntry *vm) {
-    VmFlowTree::iterator vm_it;
-    vm_it = vm_flow_tree_.find(vm);
-    if (vm_it == vm_flow_tree_.end()) {
-        return;
-    }
-    FLOW_TRACE(ModuleInfo, "Delete VM flows");
-    FlowEntryTree fet = vm_it->second->fet;
-    FlowEntryTree::iterator fet_it;
-    for (fet_it = fet.begin(); fet_it != fet.end(); ++fet_it) {
-        Delete((*fet_it)->key(), true);
-    }
-}
-
-uint32_t FlowTable::VmFlowCount(const VmEntry *vm) {
-    VmFlowTree::iterator it = vm_flow_tree_.find(vm);
-    if (it != vm_flow_tree_.end()) {
-        VmFlowInfo *vm_flow_info = it->second;
-        return vm_flow_info->fet.size();
-    }
-
-    return 0;
-}
-
-uint32_t FlowTable::VmLinkLocalFlowCount(const VmEntry *vm) {
-    VmFlowTree::iterator it = vm_flow_tree_.find(vm);
-    if (it != vm_flow_tree_.end()) {
-        VmFlowInfo *vm_flow_info = it->second;
-        return vm_flow_info->linklocal_flow_count;
-    }
-
-    return 0;
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -533,6 +456,9 @@ void FlowTable::RevaluateInterface(FlowEntry *flow) {
 
 void FlowTable::RevaluateVn(FlowEntry *flow) {
     const VnEntry *vn = flow->vn_entry();
+    if (vn == NULL)
+        return;
+
     // Revaluate flood unknown-unicast flag. If flow has UnknownUnicastFlood and
     // VN doesnt allow it, make Short Flow
     if (vn->flood_unknown_unicast() == false &&
@@ -704,7 +630,7 @@ void FlowTable::RevaluateRoute(FlowEntry *flow, const AgentRoute *route) {
         sg_changed = true;
     }
 
-    if (RevaluateSgList(rflow, route, sg_list)) {
+    if (rflow && RevaluateSgList(rflow, route, sg_list)) {
         sg_changed = true;
     }
 
@@ -745,8 +671,7 @@ void FlowTable::RevaluateFlow(FlowEntry *flow) {
     }
 
     if (flow->set_pending_recompute(true)) {
-        agent_->pkt()->pkt_handler()->SendMessage(PktHandler::FLOW,
-                                                  new FlowTaskMsg(flow));
+        agent_->pkt()->get_flow_proto()->MessageRequest(new FlowTaskMsg(flow));
     }
 }
 
@@ -755,6 +680,18 @@ void FlowTable::RevaluateFlow(FlowEntry *flow) {
 void FlowTable::DeleteMessage(FlowEntry *flow) {
     Delete(flow->key(), true);
     DeleteFlowInfo(flow);
+}
+
+void FlowTable::EvictFlow(FlowEntry *flow) {
+    FlowEntry *reverse_flow = flow->reverse_flow_entry();
+    Delete(flow->key(), false);
+    DeleteFlowInfo(flow);
+
+    // Reverse flow unlinked with forward flow. Make it short-flow
+    if (reverse_flow && reverse_flow->deleted() == false) {
+        reverse_flow->MakeShortFlow(FlowEntry::SHORT_NO_REVERSE_FLOW);
+        UpdateKSync(reverse_flow, true);
+    }
 }
 
 // Handle events from Flow Management module for a flow
@@ -789,6 +726,7 @@ bool FlowTable::FlowResponseHandler(const FlowEvent *resp) {
         }
 
         const VnEntry *vn = dynamic_cast<const VnEntry *>(entry);
+        // TODO: check if the following need not be done for short flows
         if (vn && (deleted_flow == false)) {
             RevaluateVn(flow);
             break;
@@ -946,6 +884,7 @@ void FlowEntryFreeList::Grow() {
 }
 
 FlowEntry *FlowEntryFreeList::Allocate(const FlowKey &key) {
+    table_->ConcurrencyCheck();
     FlowEntry *flow = NULL;
     if (free_list_.size() == 0) {
         flow = new FlowEntry(table_);
@@ -967,6 +906,7 @@ FlowEntry *FlowEntryFreeList::Allocate(const FlowKey &key) {
 }
 
 void FlowEntryFreeList::Free(FlowEntry *flow) {
+    table_->ConcurrencyCheck();
     total_free_++;
     flow->Reset();
     free_list_.push_back(*flow);

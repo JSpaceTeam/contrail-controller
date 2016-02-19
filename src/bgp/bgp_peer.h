@@ -30,7 +30,6 @@ class BgpPeerInfo;
 class BgpServer;
 class BgpSession;
 class RoutingInstance;
-class StateMachine;
 class BgpSession;
 class BgpPeerInfo;
 class BgpNeighborResp;
@@ -383,7 +382,6 @@ private:
     bool passive_;
     bool resolve_paths_;
 
-    boost::scoped_ptr<StateMachine> state_machine_;
     uint64_t membership_req_pending_;
     bool defer_close_;
     bool vpn_tables_registered_;
@@ -398,6 +396,7 @@ private:
     std::vector<std::string> negotiated_families_;
     BgpProto::BgpPeerType peer_type_;
     RibExportPolicy policy_;
+    boost::scoped_ptr<StateMachine> state_machine_;
     boost::scoped_ptr<PeerClose> peer_close_;
     boost::scoped_ptr<PeerStats> peer_stats_;
     boost::scoped_ptr<DeleteActor> deleter_;

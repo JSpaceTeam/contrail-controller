@@ -13,6 +13,7 @@
 #include "cmn/agent_cmn.h"
 #include "init/agent_param.h"
 #include "oper/interface_common.h"
+#include "oper/metadata_ip.h"
 #include "oper/nexthop.h"
 #include "oper/route_common.h"
 #include "oper/path_preference.h"
@@ -21,6 +22,7 @@
 #include "oper/global_vrouter.h"
 #include "oper/operdb_init.h"
 #include "oper/tunnel_nh.h"
+#include "oper/bgp_as_service.h"
 
 #include "filter/packet_header.h"
 #include "filter/acl.h"
@@ -28,12 +30,15 @@
 #include "pkt/proto.h"
 #include "pkt/proto_handler.h"
 #include "pkt/pkt_handler.h"
-#include "pkt/flow_table.h"
+#include "pkt/flow_mgmt.h"
 #include "pkt/flow_proto.h"
 #include "pkt/pkt_sandesh_flow.h"
 #include "cmn/agent_stats.h"
 #include <vrouter/ksync/flowtable_ksync.h>
 #include <vrouter/ksync/ksync_init.h>
+
+const Ip4Address PktFlowInfo::kDefaultIpv4;
+const Ip6Address PktFlowInfo::kDefaultIpv6;
 
 static void LogError(const PktInfo *pkt, const char *str) {
     if (pkt->family == Address::INET) {
@@ -185,7 +190,8 @@ static bool IsVgwOrVmInterface(const Interface *intf) {
 // This is to avoid routing across fabric interface itself
 static bool NhDecode(const NextHop *nh, const PktInfo *pkt, PktFlowInfo *info,
                      PktControlInfo *in, PktControlInfo *out,
-                     bool force_vmport) {
+                     bool force_vmport,
+                     const EcmpLoadBalance &ecmp_load_balance) {
     bool ret = true;
 
     if (!nh->IsActive())
@@ -217,7 +223,8 @@ static bool NhDecode(const NextHop *nh, const PktInfo *pkt, PktFlowInfo *info,
             if (info->out_component_nh_idx ==
                 CompositeNH::kInvalidComponentNHIdx ||
                 (comp_nh->GetNH(info->out_component_nh_idx) == NULL)) {
-                info->out_component_nh_idx = comp_nh->hash(pkt->hash());
+                info->out_component_nh_idx = comp_nh->hash(pkt->
+                                             hash(ecmp_load_balance));
             }
             nh = comp_nh->GetNH(info->out_component_nh_idx);
             // TODO: Should we re-hash here?
@@ -392,7 +399,8 @@ static bool RouteToOutInfo(const AgentRoute *rt, const PktInfo *pkt,
         return false;
     }
 
-    return NhDecode(nh, pkt, info, in, out, false);
+    return NhDecode(nh, pkt, info, in, out, false,
+                    path->ecmp_load_balance());
 }
 
 static const VnEntry *InterfaceToVn(const Interface *intf) {
@@ -414,7 +422,13 @@ static bool IntfHasFloatingIp(PktFlowInfo *pkt_info, const Interface *intf,
     return static_cast<const VmInterface *>(intf)->HasFloatingIp(family);
 }
 
-static bool IsLinkLocalRoute(Agent *agent, const AgentRoute *rt) {
+static bool IsLinkLocalRoute(Agent *agent, const AgentRoute *rt,
+                             uint32_t sport, uint32_t dport) {
+    //Local CN and BGP has been allowed for testing purpose.
+    if ((sport == BgpAsAService::DefaultBgpPort) ||
+        (dport == BgpAsAService::DefaultBgpPort))
+        return false;
+
     const AgentPath *path = rt->GetActivePath();
     if (path && path->peer() == agent->link_local_peer())
         return true;
@@ -422,16 +436,50 @@ static bool IsLinkLocalRoute(Agent *agent, const AgentRoute *rt) {
     return false;
 }
 
-static const string *RouteToVn(const AgentRoute *rt) {
+bool PktFlowInfo::IsBgpRouterServiceRoute(const AgentRoute *in_rt,
+                                          const AgentRoute *out_rt,
+                                          const Interface *intf,
+                                          uint32_t sport,
+                                          uint32_t dport) {
+    if (bgp_router_service_flow)
+        return true;
+
+    if (intf == NULL || in_rt == NULL || out_rt == NULL)
+        return false;
+
+    if ((sport != BgpAsAService::DefaultBgpPort) &&
+        (dport != BgpAsAService::DefaultBgpPort))
+        return false;
+
+    if (intf->type() == Interface::VM_INTERFACE) {
+        const VmInterface *vm_intf =
+            dynamic_cast<const VmInterface *>(intf);
+        const InetUnicastRouteEntry *in_inet_rt =
+            dynamic_cast<const InetUnicastRouteEntry *>(in_rt);
+        const InetUnicastRouteEntry *out_inet_rt =
+            dynamic_cast<const InetUnicastRouteEntry *>(out_rt);
+        if (in_inet_rt == NULL || out_inet_rt == NULL)
+            return false;
+        if (agent->oper_db()->bgp_as_a_service()->
+            IsBgpService(vm_intf, in_inet_rt->addr(), out_inet_rt->addr())) {
+            bgp_router_service_flow = true;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static const VnListType *RouteToVn(const AgentRoute *rt) {
     const AgentPath *path = NULL;
     if (rt) {
         path = rt->GetActivePath();
     }
     if (path == NULL) {
-        return &(Agent::NullString());
+        return &(Agent::NullStringList());
     }
 
-    return &path->dest_vn_name();
+    return &path->dest_vn_list();
 }
 
 static void SetInEcmpIndex(const PktInfo *pkt, PktFlowInfo *flow_info,
@@ -515,13 +563,45 @@ static void SetInEcmpIndex(const PktInfo *pkt, PktFlowInfo *flow_info,
     }
 }
 
-static bool RouteAllowNatLookup(Agent *agent, const AgentRoute *rt) {
+bool PktFlowInfo::RouteAllowNatLookupCommon(const AgentRoute *rt,
+                                            uint32_t sport,
+                                            uint32_t dport,
+                                            const Interface *intf) {
     // No NAT for bridge routes
     if (dynamic_cast<const BridgeRouteEntry *>(rt) != NULL)
         return false;
 
-    if (rt != NULL && IsLinkLocalRoute(agent, rt)) {
+    if (rt != NULL && IsLinkLocalRoute(agent, rt, sport, dport)) {
         // skip NAT lookup if found route has link local peer.
+        return false;
+    }
+
+    return true;
+}
+
+bool PktFlowInfo::IngressRouteAllowNatLookup(const AgentRoute *in_rt,
+                                             const AgentRoute *out_rt,
+                                             uint32_t sport,
+                                             uint32_t dport,
+                                             const Interface *intf) {
+    if (RouteAllowNatLookupCommon(out_rt, sport, dport, intf) == false) {
+        return false;
+    }
+
+    if (IsBgpRouterServiceRoute(in_rt, out_rt, intf, sport, dport)) {
+        // skip NAT lookup if found route has link local peer.
+        return false;
+    }
+
+    return true;
+}
+
+bool PktFlowInfo::EgressRouteAllowNatLookup(const AgentRoute *in_rt,
+                                            const AgentRoute *out_rt,
+                                            uint32_t sport,
+                                            uint32_t dport,
+                                            const Interface *intf) {
+    if (RouteAllowNatLookupCommon(out_rt, sport, dport, intf) == false) {
         return false;
     }
 
@@ -557,61 +637,6 @@ void PktFlowInfo::CheckLinkLocal(const PktInfo *pkt) {
             pkt->l3_forwarding = true;
         }
     }
-}
-
-// For link local services, we bind to a local port & use it as NAT source port.
-// The socket is closed when the flow entry is deleted.
-uint32_t PktFlowInfo::LinkLocalBindPort(const VmEntry *vm, uint8_t proto) {
-    if (vm == NULL)
-        return 0;
-    // Do not allow more than max link local flows
-    if (flow_table->linklocal_flow_count() >=
-        agent->params()->linklocal_system_flows())
-        return 0;
-    if (flow_table->VmLinkLocalFlowCount(vm) >=
-        agent->params()->linklocal_vm_flows())
-        return 0;
-
-    if (proto == IPPROTO_TCP) {
-        linklocal_src_port_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    } else if (proto == IPPROTO_UDP) {
-        linklocal_src_port_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    }
-
-    if (linklocal_src_port_fd == -1) {
-        return 0;
-    }
-
-    // allow the socket to be reused upon close
-    int optval = 1;
-    setsockopt(linklocal_src_port_fd, SOL_SOCKET, SO_REUSEADDR,
-               &optval, sizeof(optval));
-
-    struct sockaddr_in address;
-    memset(&address, '0', sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = 0;
-    address.sin_port = 0;
-    struct sockaddr_in bound_to;
-    socklen_t len = sizeof(bound_to);
-    if (bind(linklocal_src_port_fd, (struct sockaddr*) &address,
-             sizeof(address)) == -1) {
-        goto error;
-    }
-
-    if (getsockname(linklocal_src_port_fd, (struct sockaddr*) &bound_to,
-                    &len) == -1) {
-        goto error;
-    }
-
-    return ntohs(bound_to.sin_port);
-
-error:
-    if (linklocal_src_port_fd != kLinkLocalInvalidFd) {
-        close(linklocal_src_port_fd);
-        linklocal_src_port_fd = kLinkLocalInvalidFd;
-    }
-    return 0;
 }
 
 void PktFlowInfo::LinkLocalServiceFromVm(const PktInfo *pkt, PktControlInfo *in,
@@ -696,7 +721,8 @@ void PktFlowInfo::LinkLocalServiceFromHost(const PktInfo *pkt, PktControlInfo *i
     }
 
     // Check if packet is destined to metadata of interface
-    if (pkt->ip_daddr.to_v4() != vm_port->mdata_ip_addr()) {
+    MetaDataIp *mip = vm_port->GetMetaDataIp(pkt->ip_daddr.to_v4());
+    if (mip == NULL) {
         // Force implicit deny
         in->rt_ = NULL;
         out->rt_ = NULL;
@@ -708,8 +734,20 @@ void PktFlowInfo::LinkLocalServiceFromHost(const PktInfo *pkt, PktControlInfo *i
 
     linklocal_flow = true;
     nat_done = true;
-    nat_ip_saddr = Ip4Address(METADATA_IP_ADDR);
-    nat_ip_daddr = vm_port->primary_ip_addr();
+    // Get NAT source/destination IP from MetadataIP retrieved from interface
+    nat_ip_saddr = mip->service_ip();
+    nat_ip_daddr = mip->destination_ip();
+    if (nat_ip_saddr == IpAddress(kDefaultIpv4) ||
+        nat_ip_saddr == IpAddress(kDefaultIpv6) ||
+        nat_ip_daddr == IpAddress(kDefaultIpv4) ||
+        nat_ip_daddr == IpAddress(kDefaultIpv6)) {
+        // Failed to find associated source or destination address
+        // Force implicit deny
+        in->rt_ = NULL;
+        out->rt_ = NULL;
+        return;
+    }
+
     nat_dport = pkt->dport;
     if (pkt->sport == agent->metadata_server_port()) {
         nat_sport = METADATA_NAT_PORT;
@@ -727,6 +765,72 @@ void PktFlowInfo::LinkLocalServiceTranslate(const PktInfo *pkt, PktControlInfo *
         LinkLocalServiceFromVm(pkt, in, out);
     } else {
         LinkLocalServiceFromHost(pkt, in, out);
+    }
+}
+
+void PktFlowInfo::BgpRouterServiceFromVm(const PktInfo *pkt, PktControlInfo *in,
+                                         PktControlInfo *out) {
+
+    // Link local services supported only for IPv4 for now
+    if (pkt->family != Address::INET) {
+        in->rt_ = NULL;
+        out->rt_ = NULL;
+        return;
+    }
+
+    const VmInterface *vm_port =
+        static_cast<const VmInterface *>(in->intf_);
+
+    const VnEntry *vn = static_cast<const VnEntry *>(vm_port->vn());
+    uint32_t sport = 0;
+    IpAddress nat_server = IpAddress();
+
+    if (vn == NULL) {
+        in->rt_ = NULL;
+        out->rt_ = NULL;
+        return;
+    }
+
+    if (agent->oper_db()->bgp_as_a_service()->
+        GetBgpRouterServiceDestination(vm_port,
+                                       pkt->ip_saddr.to_v4(),
+                                       pkt->ip_daddr.to_v4(),
+                                       &nat_server,
+                                       &sport) == false) {
+        return;
+    }
+
+    out->vrf_ = agent->vrf_table()->FindVrfFromName(agent->fabric_vrf_name());
+    dest_vrf = out->vrf_->vrf_id();
+
+    nat_done = true;
+    //Populate NAT
+    nat_ip_saddr = agent->router_id();
+    nat_ip_daddr = nat_server;
+    nat_sport = sport;
+    nat_dport = pkt->dport;
+    if ((nat_ip_daddr == agent->router_id()) &&
+        (nat_ip_daddr == nat_ip_saddr)) {
+        boost::system::error_code ec;
+        //TODO may be use MDATA well known address.
+        nat_ip_saddr = vm_port->mdata_ip_addr();
+    }
+
+    nat_vrf = dest_vrf;
+    nat_dest_vrf = vm_port->vrf_id();
+
+
+    out->rt_ = FlowEntry::GetUcRoute(out->vrf_, nat_server);
+    out->intf_ = agent->vhost_interface();
+    out->nh_ = out->intf_->flow_key_nh()->id();
+    return;
+}
+
+void PktFlowInfo::BgpRouterServiceTranslate(const PktInfo *pkt,
+                                            PktControlInfo *in,
+                                            PktControlInfo *out) {
+    if (in->intf_->type() == Interface::VM_INTERFACE) {
+        BgpRouterServiceFromVm(pkt, in, out);
     }
 }
 
@@ -1050,7 +1154,11 @@ void PktFlowInfo::IngressProcess(const PktInfo *pkt, PktControlInfo *in,
         }
     }
 
-    if (RouteAllowNatLookup(agent, out->rt_)) {
+    if (IngressRouteAllowNatLookup(in->rt_,
+                                   out->rt_,
+                                   pkt->sport,
+                                   pkt->dport,
+                                   in->intf_)) {
         // If interface has floating IP, check if we have more specific route in
         // public VN (floating IP)
         if (IntfHasFloatingIp(this, in->intf_, pkt->family)) {
@@ -1068,9 +1176,17 @@ void PktFlowInfo::IngressProcess(const PktInfo *pkt, PktControlInfo *in,
     }
 
     // Packets needing linklocal service will have route added by LinkLocal peer
-    if ((in->rt_ && IsLinkLocalRoute(agent, in->rt_)) ||
-        (out->rt_ && IsLinkLocalRoute(agent, out->rt_))) {
+    if ((in->rt_ && IsLinkLocalRoute(agent, in->rt_, pkt->sport, pkt->dport)) ||
+        (out->rt_ && IsLinkLocalRoute(agent, out->rt_,
+                                      pkt->sport, pkt->dport))) {
         LinkLocalServiceTranslate(pkt, in, out);
+    }
+
+    //Packets needing bgp router service handling
+    if (IsBgpRouterServiceRoute(in->rt_, out->rt_,
+                                in->intf_, pkt->sport,
+                                pkt->dport)) {
+        BgpRouterServiceTranslate(pkt, in, out);
     }
 
     // If out-interface was not found, get it based on out-route
@@ -1143,7 +1259,8 @@ void PktFlowInfo::EgressProcess(const PktInfo *pkt, PktControlInfo *in,
     if (nh == NULL) {
         return;
     }
-    if (NhDecode(nh, pkt, this, in, out, true) == false) {
+    //Delay hash pick up till route is picked.
+    if (NhDecode(nh, pkt, this, in, out, true, EcmpLoadBalance()) == false) {
         return;
     }
 
@@ -1174,7 +1291,11 @@ void PktFlowInfo::EgressProcess(const PktInfo *pkt, PktControlInfo *in,
         return;
     }
 
-    if (RouteAllowNatLookup(agent, out->rt_)) {
+    if (EgressRouteAllowNatLookup(in->rt_,
+                                  out->rt_,
+                                  pkt->sport,
+                                  pkt->dport,
+                                  out->intf_)) {
         // If interface has floating IP, check if destination is one of the
         // configured floating IP.
         if (IntfHasFloatingIp(this, out->intf_, pkt->family)) {
@@ -1183,6 +1304,12 @@ void PktFlowInfo::EgressProcess(const PktInfo *pkt, PktControlInfo *in,
     }
 
     if (out->rt_) {
+        if (ecmp && out->rt_->GetActivePath()) {
+            const CompositeNH *comp_nh = static_cast<const CompositeNH *>(nh);
+            out_component_nh_idx = comp_nh->hash(pkt->
+                                   hash(out->rt_->GetActivePath()->
+                                        ecmp_load_balance()));
+        }
         if (out->rt_->GetActiveNextHop()->GetType() == NextHop::ARP ||
             out->rt_->GetActiveNextHop()->GetType() == NextHop::RESOLVE) {
             //If a packet came with mpls label pointing to
@@ -1424,18 +1551,17 @@ void PktFlowInfo::GenerateTrafficSeen(const PktInfo *pkt,
 // Apply flow limits for in and out VMs
 void PktFlowInfo::ApplyFlowLimits(const PktControlInfo *in,
                                   const PktControlInfo *out) {
-    // Ignore flow limit checks for MESSAGE processing
-    if (pkt->type == PktType::MESSAGE) {
+    // Ignore flow limit checks for flow-update and short-flows
+    if (short_flow || pkt->type == PktType::MESSAGE) {
         return;
     }
 
-    uint32_t limit = flow_table->agent()->max_vm_flows();
     bool limit_exceeded = false;
-    if (in->vm_ && ((flow_table->VmFlowCount(in->vm_) + 2) > limit)) {
+    if (in->vm_ && ((in->vm_->flow_count() + 2) > agent->max_vm_flows())) {
         limit_exceeded = true;
     }
 
-    if (out->vm_ && ((flow_table->VmFlowCount(out->vm_) + 2) > limit)) {
+    if (out->vm_ && ((out->vm_->flow_count() + 2) > agent->max_vm_flows())) {
         limit_exceeded = true;
     }
 
@@ -1443,37 +1569,80 @@ void PktFlowInfo::ApplyFlowLimits(const PktControlInfo *in,
         agent->stats()->incr_flow_drop_due_to_max_limit();
         short_flow = true;
         short_flow_reason = FlowEntry::SHORT_FLOW_LIMIT;
+        return;
     }
-}
-
-void PktFlowInfo::LinkLocalPortBind(const PktInfo *pkt,
-                                    const PktControlInfo *in,
-                                    const FlowEntry *flow) {
-    // copy the linklocal fd from the flow, required for recompute cases
-    linklocal_src_port_fd = flow->linklocal_src_port_fd();
 
     if (linklocal_bind_local_port == false)
         return;
 
-    nat_sport = flow->linklocal_src_port();
-    if (short_flow)
-        return;
-
-    if (flow->linklocal_src_port_fd() == PktFlowInfo::kLinkLocalInvalidFd) {
-        nat_sport = LinkLocalBindPort(in->vm_, pkt->ip_proto);
+    // Apply limits for link-local flows
+    if (agent->pkt()->get_flow_proto()->linklocal_flow_count() >=
+        agent->params()->linklocal_system_flows()) {
+        limit_exceeded = true;
     }
-    if (!nat_sport) {
+
+    if (in->vm_ && in->vm_->linklocal_flow_count() >=
+        agent->params()->linklocal_vm_flows()) {
+        limit_exceeded = true;
+    }
+
+    if (limit_exceeded) {
         agent->stats()->incr_flow_drop_due_to_max_limit();
         short_flow = true;
         short_flow_reason = FlowEntry::SHORT_LINKLOCAL_SRC_NAT;
+        return;
     }
 
     return;
 }
-    
+
+void PktFlowInfo::LinkLocalPortBind(const PktInfo *pkt,
+                                    const PktControlInfo *in,
+                                    FlowEntry *flow) {
+    assert(flow->in_vm_flow_ref()->fd() == VmFlowRef::kInvalidFd);
+    if (linklocal_bind_local_port == false)
+        return;
+
+    // link-local service flow. Initialize nat-sport to original src-port.
+    // It will be over-ridden if socket could be allocated later
+    nat_sport = pkt->sport;
+
+    // Dont allocate FD for short flows
+    if (short_flow)
+        return;
+
+    if (flow->in_vm_flow_ref()->AllocateFd(agent, flow, pkt->ip_proto) == false) {
+        // Could not allocate FD. Make it short flow
+        agent->stats()->incr_flow_drop_due_to_max_limit();
+        short_flow = true;
+        short_flow_reason = FlowEntry::SHORT_LINKLOCAL_SRC_NAT;
+        return;
+    }
+    nat_sport = flow->in_vm_flow_ref()->port();
+
+    return;
+}
+
+void PktFlowInfo::UpdateEvictedFlowStats(const PktInfo *pkt) {
+    Agent *agent = flow_table->agent();
+    FlowMgmtManager *mgr = agent->pkt()->flow_mgmt_manager();
+    KSyncFlowIndexManager *imgr = agent->ksync()->ksync_flow_index_manager();
+    FlowEntryPtr flow = imgr->FindByIndex(pkt->agent_hdr.cmd_param);
+
+    if (flow.get() && flow->deleted() == false) {
+        mgr->FlowStatsUpdateEvent(flow.get(), pkt->agent_hdr.cmd_param_2,
+                                  pkt->agent_hdr.cmd_param_3,
+                                  pkt->agent_hdr.cmd_param_4);
+    }
+}
+
 void PktFlowInfo::Add(const PktInfo *pkt, PktControlInfo *in,
                       PktControlInfo *out) {
     bool update = false;
+    if (pkt->agent_hdr.cmd == AgentHdr::TRAP_FLOW_MISS) {
+        UpdateEvictedFlowStats(pkt);
+    }
+
     if (pkt->type == PktType::MESSAGE &&
         pkt->agent_hdr.cmd == AgentHdr::TRAP_FLOW_MISS) {
         update = true;
@@ -1492,9 +1661,8 @@ void PktFlowInfo::Add(const PktInfo *pkt, PktControlInfo *in,
     // In case the packet is for a reverse flow of a linklocal flow,
     // link to that flow (avoid creating a new reverse flow entry for the case)
     FlowEntryPtr rflow = flow->reverse_flow_entry();
-    if (rflow && rflow->is_flags_set(FlowEntry::LinkLocalBindLocalSrcPort)) {
-        return;
-    }
+    // rflow for newly allocated entry should always be NULL
+    assert(rflow == NULL);
 
     uint16_t r_sport;
     uint16_t r_dport;
@@ -1511,7 +1679,12 @@ void PktFlowInfo::Add(const PktInfo *pkt, PktControlInfo *in,
     }
 
     // Allocate reverse flow
-    if (nat_done) {
+    if (in->intf_ == out->intf_) {
+        // we are trying to loopback to the same interface,
+        // this is not supported, mark the flow as short flow
+        short_flow = true;
+        short_flow_reason = FlowEntry::SHORT_IPV4_FWD_DIS;
+    } else if (nat_done) {
         FlowKey rkey(out->nh_, nat_ip_daddr, nat_ip_saddr, pkt->ip_proto,
                      r_sport, r_dport);
         rflow = FlowEntry::Allocate(rkey, flow_table);
@@ -1525,18 +1698,27 @@ void PktFlowInfo::Add(const PktInfo *pkt, PktControlInfo *in,
     // If this is message processing, then retain forward and reverse flows
     if (pkt->type == PktType::MESSAGE &&
         flow_entry->is_flags_set(FlowEntry::ReverseFlow)) {
+        // for cases where we need to swap flows rflow should always
+        // be Non-NULL
+        assert(rflow != NULL);
         swap_flows = true;
     }
 
     tcp_ack = pkt->tcp_ack;
     flow->InitFwdFlow(this, pkt, in, out, rflow.get(), agent);
-    rflow->InitRevFlow(this, pkt, out, in, flow.get(), agent);
+    if (rflow != NULL) {
+        rflow->InitRevFlow(this, pkt, out, in, flow.get(), agent);
+    }
 
     flow->GetPolicyInfo();
-    rflow->GetPolicyInfo();
+    if (rflow != NULL) {
+        rflow->GetPolicyInfo();
+    }
 
     flow->ResyncFlow();
-    rflow->ResyncFlow();
+    if (rflow != NULL) {
+        rflow->ResyncFlow();
+    }
 
     /* Fip stats info in not updated in InitFwdFlow and InitRevFlow because
      * both forward and reverse flows are not not linked to each other yet.
@@ -1565,7 +1747,7 @@ void PktFlowInfo::UpdateFipStatsInfo
     r_intf_id = Interface::kInvalidIndex;
     fip = 0;
     r_fip = 0;
-    if (fip_snat && fip_dnat) {
+    if (fip_snat && fip_dnat && rflow != NULL) {
         /* This is the case where Source and Destination VMs (part of
          * same compute node) have floating-IP assigned to each of them from
          * a common VN and then each of these VMs send traffic to other VM by
@@ -1603,7 +1785,9 @@ void PktFlowInfo::UpdateFipStatsInfo
 
     if (fip_snat || fip_dnat) {
         flow->UpdateFipStatsInfo(fip, intf_id, agent);
-        rflow->UpdateFipStatsInfo(r_fip, r_intf_id, agent);
+        if (rflow != NULL) {
+            rflow->UpdateFipStatsInfo(r_fip, r_intf_id, agent);
+        }
     }
 }
 

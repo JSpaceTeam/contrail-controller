@@ -13,6 +13,7 @@
 #include "bgp/bgp_log.h"
 #include "bgp/bgp_peer_membership.h"
 #include "bgp/bgp_sandesh.h"
+#include "bgp/bgp_server.h"
 #include "bgp/bgp_session.h"
 #include "bgp/bgp_session_manager.h"
 #include "bgp/bgp_peer_types.h"
@@ -24,6 +25,7 @@
 #include "bgp/inet6vpn/inet6vpn_table.h"
 #include "bgp/l3vpn/inetvpn_table.h"
 #include "bgp/routing-instance/peer_manager.h"
+#include "bgp/routing-instance/routing_instance.h"
 #include "bgp/rtarget/rtarget_table.h"
 
 using boost::assign::list_of;
@@ -362,7 +364,6 @@ BgpPeer::BgpPeer(BgpServer *server, RoutingInstance *instance,
           admin_down_(config->admin_down()),
           passive_(config->passive()),
           resolve_paths_(config->router_type() == "bgpaas-client"),
-          state_machine_(BgpObjectFactory::Create<StateMachine>(this)),
           membership_req_pending_(0),
           defer_close_(false),
           vpn_tables_registered_(false),
@@ -376,6 +377,7 @@ BgpPeer::BgpPeer(BgpServer *server, RoutingInstance *instance,
           policy_((config->peer_as() == config->local_as()) ?
                       BgpProto::IBGP : BgpProto::EBGP,
                   RibExportPolicy::BGP, config->peer_as(), -1, 0),
+          state_machine_(BgpObjectFactory::Create<StateMachine>(this)),
           peer_close_(new PeerClose(this)),
           peer_stats_(new PeerStats(this)),
           deleter_(new DeleteActor(this)),
@@ -1508,8 +1510,8 @@ string BgpPeer::ToString() const {
 string BgpPeer::ToUVEKey() const {
     ostringstream out;
 
-    // XXX Skip default instance names from the logs and uves.
-    if (true || !rtinstance_->IsDefaultRoutingInstance()) {
+    // XXX Skip master instance names from the logs and uves.
+    if (true || !rtinstance_->IsMasterRoutingInstance()) {
         out << rtinstance_->name() << ":";
     }
     // out << peer_key_.endpoint.address();
@@ -1552,11 +1554,30 @@ BgpAttrPtr BgpPeer::GetMpNlriNexthop(BgpMpNlri *nlri, BgpAttrPtr attr) {
         }
     } else if (nlri->afi == BgpAf::IPv6) {
         if (nlri->safi == BgpAf::Unicast) {
-            Ip6Address::bytes_type bt = { { 0 } };
-            copy(nlri->nexthop.begin(),
-                nlri->nexthop.begin() + sizeof(bt), bt.begin());
-            addr = Ip6Address(bt);
-            update_nh = true;
+            // There could be either 1 or 2 v6 addresses in the nexthop field.
+            // The first one is supposed to be global and the optional second
+            // one, if present, is link local. We will be liberal and find the
+            // global address, whether it's first or second. Further, if the
+            // address is a v4-mapped v6 address, we use the corresponding v4
+            // address as the nexthop.
+            for (int idx = 0; idx < 2; ++idx) {
+                Ip6Address::bytes_type bt = { { 0 } };
+                if ((idx + 1) * sizeof(bt) > nlri->nexthop.size())
+                    break;
+                copy(nlri->nexthop.begin() + idx * sizeof(bt),
+                    nlri->nexthop.begin() + (idx + 1) * sizeof(bt), bt.begin());
+                Ip6Address v6_addr(bt);
+                if (v6_addr.is_v4_mapped()) {
+                    addr = Address::V4FromV4MappedV6(v6_addr);
+                    update_nh = true;
+                    break;
+                }
+                if (!v6_addr.is_link_local()) {
+                    addr = v6_addr;
+                    update_nh = true;
+                    break;
+                }
+            }
         } else if (nlri->safi == BgpAf::Vpn) {
             Ip6Address::bytes_type bt = { { 0 } };
             size_t rdsize = RouteDistinguisher::kSize;
@@ -1698,6 +1719,7 @@ void BgpPeer::FillBgpNeighborFamilyAttributes(BgpNeighborResp *nbr) const {
 
 void BgpPeer::FillNeighborInfo(const BgpSandeshContext *bsc,
     BgpNeighborResp *bnr, bool summary) const {
+    bnr->set_instance_name(rtinstance_->name());
     bnr->set_peer(peer_basename_);
     bnr->set_deleted(IsDeleted());
     bnr->set_deleted_at(UTCUsecToString(deleter_->delete_time_stamp_usecs()));

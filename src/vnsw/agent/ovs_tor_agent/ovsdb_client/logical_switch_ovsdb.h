@@ -48,6 +48,9 @@ private:
         virtual ~ProcessDeleteTableReqTask();
 
         bool Run();
+        std::string Description() const {
+            return "LogicalSwitchTable::ProcessDeleteTableReqTask";
+        }
 
     private:
         LogicalSwitchTable *table_;
@@ -67,6 +70,7 @@ public:
         DEL_REQ,
         ADD_ACK,
         DEL_ACK,
+        DUP_TUNNEL_KEY_ADD,
     };
     LogicalSwitchEntry(OvsdbDBObject *table, const std::string &name);
     LogicalSwitchEntry(OvsdbDBObject *table, const LogicalSwitchEntry *key);
@@ -134,6 +138,9 @@ private:
         virtual ~ProcessDeleteOvsReqTask();
 
         bool Run();
+        std::string Description() const {
+            return "LogicalSwitchEntry::ProcessDeleteOvsReqTask";
+        }
 
     private:
         KSyncEntry::KSyncEntryPtr entry_;

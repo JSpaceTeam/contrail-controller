@@ -108,13 +108,10 @@ void KSyncFlowIndexManager::Add(FlowEntry *flow) {
 
 void KSyncFlowIndexManager::Change(FlowEntry *flow) {
     KSyncFlowIndexEntry *index_entry = flow->ksync_index_entry();
+    // Ignore Change operation if a flow entry is marked deleted
+    // or if it doesnot have state INDEX_SET
     if (flow->deleted() ||
-        (index_entry->state_ != KSyncFlowIndexEntry::INDEX_SET)) {
-        return;
-    }
-
-    // If index not yet assigned for flow, the flow will be written when later
-    if (index_entry->state_ == KSyncFlowIndexEntry::INDEX_UNASSIGNED) {
+        index_entry->state_ != KSyncFlowIndexEntry::INDEX_SET) {
         return;
     }
 
@@ -177,6 +174,17 @@ void KSyncFlowIndexManager::UpdateFlowHandle(FlowEntry *flow) {
     }
 }
 
+void KSyncFlowIndexManager::UpdateKSyncError(FlowEntry *flow) {
+    KSyncFlowIndexEntry *index_entry = flow->ksync_index_entry();
+    if (index_entry->state_ != KSyncFlowIndexEntry::INDEX_UNASSIGNED) {
+        // currently we only deal with index allocation failures
+        // from vrouter
+        return;
+    }
+
+    index_entry->state_ = KSyncFlowIndexEntry::INDEX_FAILED;
+}
+
 void KSyncFlowIndexManager::Release(FlowEntry *flow) {
     FlowEntryPtr wait_flow = ReleaseIndex(flow);
 
@@ -215,6 +223,10 @@ void KSyncFlowIndexManager::Release(FlowEntry *flow) {
         break;
     }
 
+    // Entry has index failure and no further transitions necessary
+    case KSyncFlowIndexEntry::INDEX_FAILED:
+        break;
+
     default:
         assert(0);
     }
@@ -235,6 +247,13 @@ FlowEntryPtr KSyncFlowIndexManager::ReleaseIndex(FlowEntry *flow) {
     index_list_[index].owner_ = NULL;
     wait_flow.swap(index_list_[index].wait_entry_);
     return wait_flow;
+}
+
+FlowEntryPtr KSyncFlowIndexManager::FindByIndex(uint32_t idx) {
+    tbb::mutex::scoped_lock lock(index_list_[idx].mutex_);
+    if (index_list_[idx].owner_.get() != NULL)
+        return index_list_[idx].owner_;
+    return FlowEntryPtr(NULL);
 }
 
 FlowEntryPtr KSyncFlowIndexManager::AcquireIndex(FlowEntry *flow) {

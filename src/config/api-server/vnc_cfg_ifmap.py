@@ -17,31 +17,29 @@ monkey.patch_all()
 import gevent
 import gevent.event
 from gevent.queue import Queue, Empty
-import sys
 import time
 from pprint import pformat
 
-from lxml import etree, objectify
-import cgitb
+from lxml import etree
 import StringIO
-import re
 
 import socket
 from netaddr import IPNetwork
 
 from cfgm_common.uve.vnc_api.ttypes import *
 from cfgm_common import ignore_exceptions
-from cfgm_common.ifmap.client import client, namespaces
+from cfgm_common.ifmap.client import client
 from cfgm_common.ifmap.request import NewSessionRequest, PublishRequest
 from cfgm_common.ifmap.id import Identity
 from cfgm_common.ifmap.operations import PublishUpdateOperation,\
     PublishDeleteOperation
-from cfgm_common.ifmap.response import Response, newSessionResult
+from cfgm_common.ifmap.response import newSessionResult
 from cfgm_common.ifmap.metadata import Metadata
 from cfgm_common.imid import escape
 from cfgm_common.exceptions import ResourceExhaustionError, ResourceExistsError
 from cfgm_common.vnc_cassandra import VncCassandraClient
 from cfgm_common.vnc_kombu import VncKombuClient
+from cfgm_common.utils import cgitb_hook
 
 
 import copy
@@ -62,7 +60,6 @@ from provision_defaults import *
 import cfgm_common.imid
 from cfgm_common.exceptions import *
 from vnc_quota import *
-import gen
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
 from pysandesh.gen_py.process_info.ttypes import ConnectionType as ConnType
@@ -144,7 +141,9 @@ class VncIfmapClient(object):
         my_imid = 'contrail:%s:%s' %(res_type, my_fqn)
         if parent_fqn:
             if parent_type is None:
-                return (None, None)
+                err_msg = "Parent: %s type is none for: %s" % (parent_fqn,
+                                                               my_fqn)
+                return False, (409, err_msg)
             parent_imid = 'contrail:' + parent_type + ':' + parent_fqn
         else: # parent is config-root
             parent_imid = 'contrail:config-root:root'
@@ -276,7 +275,10 @@ class VncIfmapClient(object):
     def _object_read_to_meta_index(self, ifmap_id):
         # metas is a dict where key is meta-name and val is list of dict of
         # form [{'meta':meta}, {'id':id1, 'meta':meta}, {'id':id2, 'meta':meta}]
-        return self._id_to_metas[ifmap_id].copy()
+        metas = {}
+        if ifmap_id in self._id_to_metas:
+            metas = self._id_to_metas[ifmap_id].copy()
+        return metas
     # end _object_read_to_meta_index
 
     def object_update(self, res_type, ifmap_id, new_obj_dict):
@@ -733,16 +735,11 @@ class VncServerCassandraClient(VncCassandraClient):
     def __init__(self, db_client_mgr, cass_srv_list, reset_config, db_prefix,
                       cassandra_credential):
         self._db_client_mgr = db_client_mgr
-        keyspaces = {
-            self._USERAGENT_KEYSPACE_NAME: [(self._USERAGENT_KV_CF_NAME, None)]
-        }
-        if reset_config:
-            reset_config = [self._USERAGENT_KEYSPACE_NAME,
-                            VncCassandraClient._UUID_KEYSPACE_NAME]
-        else:
-            reset_config = []
+        keyspaces = self._UUID_KEYSPACE.copy()
+        keyspaces[self._USERAGENT_KEYSPACE_NAME] = [
+            (self._USERAGENT_KV_CF_NAME, None)]
         super(VncServerCassandraClient, self).__init__(
-            cass_srv_list, db_prefix, keyspaces, self.config_log,
+            cass_srv_list, db_prefix, keyspaces, None, self.config_log,
             generate_url=db_client_mgr.generate_url,
             reset_config=reset_config,credential=cassandra_credential)
         self._useragent_kv_cf = self._cf_dict[self._USERAGENT_KV_CF_NAME]
@@ -752,30 +749,44 @@ class VncServerCassandraClient(VncCassandraClient):
         self._db_client_mgr.config_log(msg, level)
     # end config_log
 
-    def prop_list_update(self, obj_uuid, updates):
+    def prop_collection_update(self, obj_type, obj_uuid, updates):
+        obj_class = self._get_resource_class(obj_type)
         bch = self._obj_uuid_cf.batch()
         for oper_param in updates:
             oper = oper_param['operation']
             prop_name = oper_param['field']
-            if oper == 'add':
-                prop_elem_val = oper_param['value']
-                prop_elem_pos = oper_param.get('position') or str(uuid.uuid4())
-                self._add_to_prop_list(bch, obj_uuid,
-                    prop_name, prop_elem_val, prop_elem_pos)
-            elif oper == 'modify':
-                prop_elem_val = oper_param['value']
-                prop_elem_pos = oper_param['position']
-                # modify is practically an insert so use add
-                self._add_to_prop_list(bch, obj_uuid,
-                    prop_name, prop_elem_val, prop_elem_pos)
-            elif oper == 'delete':
-                prop_elem_pos = oper_param['position']
-                self._delete_from_prop_list(bch, obj_uuid,
-                    prop_name, prop_elem_pos)
+            if prop_name in obj_class.prop_list_fields:
+                if oper == 'add':
+                    prop_elem_val = oper_param['value']
+                    prop_elem_pos = oper_param.get('position') or str(uuid.uuid4())
+                    self._add_to_prop_list(bch, obj_uuid,
+                        prop_name, prop_elem_val, prop_elem_pos)
+                elif oper == 'modify':
+                    prop_elem_val = oper_param['value']
+                    prop_elem_pos = oper_param['position']
+                    # modify is practically an insert so use add
+                    self._add_to_prop_list(bch, obj_uuid,
+                        prop_name, prop_elem_val, prop_elem_pos)
+                elif oper == 'delete':
+                    prop_elem_pos = oper_param['position']
+                    self._delete_from_prop_list(bch, obj_uuid,
+                        prop_name, prop_elem_pos)
+            elif prop_name in obj_class.prop_map_fields:
+                key_name = obj_class.prop_map_field_key_names[prop_name]
+                if oper == 'set':
+                    prop_elem_val = oper_param['value']
+                    position = prop_elem_val[key_name]
+                    self._set_in_prop_map(bch, obj_uuid,
+                        prop_name, prop_elem_val, position)
+                elif oper == 'delete':
+                    position = oper_param['position']
+                    self._delete_from_prop_map(bch, obj_uuid,
+                        prop_name, position)
+        # end for all updates
 
         self.update_last_modified(bch, obj_uuid)
         bch.send()
-    # end prop_list_update
+    # end prop_collection_update
 
     def ref_update(self, obj_type, obj_uuid, ref_type, ref_uuid, ref_data, operation):
         bch = self._obj_uuid_cf.batch()
@@ -789,118 +800,33 @@ class VncServerCassandraClient(VncCassandraClient):
         bch.send()
     # end ref_update
 
-    def _create_prop(self, bch, obj_uuid, prop_name, prop_val):
-        bch.insert(obj_uuid, {'prop:%s' % (prop_name): json.dumps(prop_val)})
-    # end _create_prop
+    def ref_relax_for_delete(self, obj_uuid, ref_uuid):
+        bch = self._obj_uuid_cf.batch()
+        self._relax_ref_for_delete(bch, obj_uuid, ref_uuid)
+        bch.send()
+    # end ref_relax_for_delete
 
-    def _update_prop(self, bch, obj_uuid, prop_name, new_props):
-        if new_props[prop_name] is None:
-            bch.remove(obj_uuid, columns=['prop:' + prop_name])
-        else:
-            bch.insert(
-                obj_uuid,
-                {'prop:' + prop_name: json.dumps(new_props[prop_name])})
-
-        # prop has been accounted for, remove so only new ones remain
-        del new_props[prop_name]
-    # end _update_prop
-
-    def _add_to_prop_list(self, bch, obj_uuid, prop_name,
-                          prop_elem_value, prop_elem_position):
-        bch.insert(obj_uuid,
-            {'propl:%s:%s' %(prop_name, prop_elem_position):
-             json.dumps(prop_elem_value)})
-    # end _add_to_prop_list
-
-    def _delete_from_prop_list(self, bch, obj_uuid, prop_name,
-                               prop_elem_position=None):
-        bch.remove(obj_uuid,
-            columns=['propl:%s:%s' %(prop_name, prop_elem_position)])
-    # end _delete_from_prop_list
-
-    def _create_child(self, bch, parent_type, parent_uuid,
-                      child_type, child_uuid):
-        child_col = {'children:%s:%s' %
-                     (child_type, child_uuid): json.dumps(None)}
-        bch.insert(parent_uuid, child_col)
-
-        parent_col = {'parent:%s:%s' %
-                      (parent_type, parent_uuid): json.dumps(None)}
-        bch.insert(child_uuid, parent_col)
-    # end _create_child
-
-    def _delete_child(self, bch, parent_type, parent_uuid,
-                      child_type, child_uuid):
-        child_col = {'children:%s:%s' %
-                     (child_type, child_uuid): json.dumps(None)}
-        bch.remove(parent_uuid, columns=[
-                   'children:%s:%s' % (child_type, child_uuid)])
-    # end _delete_child
-
-    def _create_ref(self, bch, obj_type, obj_uuid, ref_type,
-                    ref_uuid, ref_data):
-        bch.insert(
-            obj_uuid, {'ref:%s:%s' %
-                  (ref_type, ref_uuid): json.dumps(ref_data)})
-        if obj_type == ref_type:
-            bch.insert(
-                ref_uuid, {'ref:%s:%s' %
-                      (obj_type, obj_uuid): json.dumps(ref_data)})
-        else:
-            bch.insert(
-                ref_uuid, {'backref:%s:%s' %
-                      (obj_type, obj_uuid): json.dumps(ref_data)})
-    # end _create_ref
-
-    def _update_ref(self, bch, obj_type, obj_uuid, ref_type,
-                    old_ref_uuid, new_ref_infos):
-        if ref_type not in new_ref_infos:
-            # update body didn't touch this type, nop
-            return
-
-        if old_ref_uuid not in new_ref_infos[ref_type]:
-            # remove old ref
-            bch.remove(obj_uuid, columns=[
-                       'ref:%s:%s' % (ref_type, old_ref_uuid)])
-            if obj_type == ref_type:
-                bch.remove(old_ref_uuid, columns=[
-                           'ref:%s:%s' % (obj_type, obj_uuid)])
-            else:
-                bch.remove(old_ref_uuid, columns=[
-                           'backref:%s:%s' % (obj_type, obj_uuid)])
-        else:
-            # retain old ref with new ref attr
-            new_ref_data = new_ref_infos[ref_type][old_ref_uuid]
-            bch.insert(
-                obj_uuid,
-                {'ref:%s:%s' %
-                 (ref_type, old_ref_uuid): json.dumps(new_ref_data)})
-            if obj_type == ref_type:
-                bch.insert(
-                    old_ref_uuid, {'ref:%s:%s' % (obj_type, obj_uuid):
-                                   json.dumps(new_ref_data)})
-            else:
-                bch.insert(
-                    old_ref_uuid, {'backref:%s:%s' % (obj_type, obj_uuid):
-                                   json.dumps(new_ref_data)})
-            # uuid has been accounted for, remove so only new ones remain
-            del new_ref_infos[ref_type][old_ref_uuid]
-    # end _update_ref
-
-    def _delete_ref(self, bch, obj_type, obj_uuid, ref_type, ref_uuid):
+    def _relax_ref_for_delete(self, bch, obj_uuid, ref_uuid):
         send = False
         if bch is None:
             send = True
-            bch = self._cassandra_db._obj_uuid_cf.batch()
-        bch.remove(obj_uuid, columns=['ref:%s:%s' % (ref_type, ref_uuid)])
-        if obj_type == ref_type:
-            bch.remove(ref_uuid, columns=['ref:%s:%s' % (obj_type, obj_uuid)])
-        else:
-            bch.remove(ref_uuid, columns=[
-                       'backref:%s:%s' % (obj_type, obj_uuid)])
+            bch = self._obj_uuid_cf.batch()
+        bch.insert(ref_uuid, {'relaxbackref:%s' % (obj_uuid):
+                               json.dumps(None)})
         if send:
             bch.send()
-    # end _delete_ref
+    # end _relax_ref_for_delete
+
+    def get_relaxed_refs(self, obj_uuid):
+        try:
+            relaxed_cols = self._obj_uuid_cf.get(obj_uuid,
+                column_start='relaxbackref:',
+                column_finish='relaxbackref;')
+        except pycassa.NotFoundException:
+            return []
+
+        return [col.split(':')[1] for col in relaxed_cols]
+    # end get_relaxed_refs
 
     def is_latest(self, id, tstamp):
         id_perms_json = self._obj_uuid_cf.get(
@@ -911,13 +837,6 @@ class VncServerCassandraClient(VncCassandraClient):
         else:
             return False
     # end is_latest
-
-    def update_last_modified(self, bch, obj_uuid, id_perms=None):
-        if id_perms is None:
-            id_perms = self.uuid_to_obj_perms(obj_uuid)
-        id_perms['last_modified'] = datetime.datetime.utcnow().isoformat()
-        self._update_prop(bch, obj_uuid, 'id_perms', {'id_perms': id_perms})
-    # end update_last_modified
 
     # Insert new perms. Called on startup when walking DB
     def update_perms2(self, obj_uuid):
@@ -1145,7 +1064,7 @@ class VncServerKombuClient(VncKombuClient):
             trace_msg(trace, 'MessageBusNotifyTraceBuf', self._sandesh)
         except Exception as e:
             string_buf = cStringIO.StringIO()
-            cgitb.Hook(file=string_buf, format="text").handle(sys.exc_info())
+            cgitb_hook(file=string_buf, format="text")
             errmsg = string_buf.getvalue()
             self.config_log(string_buf.getvalue(),
                 level=SandeshLevel.SYS_ERR)
@@ -1229,7 +1148,8 @@ class VncServerKombuClient(VncKombuClient):
     def _dbe_delete_notification(self, obj_info):
         obj_dict = obj_info['obj_dict']
 
-        self.dbe_uve_trace("DELETE", obj_info['type'], obj_info['uuid'], None)
+        self.dbe_uve_trace(
+            "DELETE", obj_info['type'], obj_info['uuid'], obj_dict)
 
         db_client_mgr = self._db_client_mgr
         db_client_mgr._cassandra_db.cache_uuid_to_fq_name_del(obj_dict['uuid'])
@@ -1272,6 +1192,7 @@ class VncZkClient(object):
         client_name = client_pfx + 'api-' + instance_id
         self._subnet_path = zk_path_pfx + self._SUBNET_PATH
         self._fq_name_to_uuid_path = zk_path_pfx + self._FQ_NAME_TO_UUID_PATH
+        self._zk_path_pfx = zk_path_pfx
 
         self._sandesh = sandesh_hdl
         self._reconnect_zk_greenlet = None
@@ -1290,6 +1211,12 @@ class VncZkClient(object):
             self._zk_client.delete_node(self._fq_name_to_uuid_path, True);
         self._subnet_allocators = {}
     # end __init__
+
+    def master_election(self, func, *args):
+        self._zk_client.master_election(
+            self._zk_path_pfx + "/api-server-election", os.getpid(),
+            func, *args)
+    # end master_election
 
     def _reconnect_zk(self):
         self._zk_client.connect()
@@ -1449,16 +1376,19 @@ class VncDbClient(object):
         self._ifmap_db = VncIfmapClient(
             self, ifmap_srv_ip, ifmap_srv_port, uname, passwd, ssl_options,  ifmap_disable=ifmap_disable)
 
-        msg = "Connecting to cassandra on %s" % (cass_srv_list,)
-        self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
-
-        self._cassandra_db = VncServerCassandraClient(
-            self, cass_srv_list, reset_config, db_prefix, cassandra_credential)
-
         msg = "Connecting to zookeeper on %s" % (zk_server_ip)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
         self._zk_db = VncZkClient(api_svr_mgr._args.worker_id, zk_server_ip,
                                   reset_config, db_prefix, self.config_log)
+
+        def cassandra_client_init():
+            msg = "Connecting to cassandra on %s" % (cass_srv_list)
+            self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
+
+            self._cassandra_db = VncServerCassandraClient(
+                self, cass_srv_list, reset_config, db_prefix, cassandra_credential)
+
+        self._zk_db.master_election(cassandra_client_init)
 
         self._msgbus = VncServerKombuClient(self, rabbit_servers,
                                             rabbit_port, self._ifmap_db,
@@ -1683,6 +1613,11 @@ class VncDbClient(object):
                 parent_type = obj_dict.get('parent_type', None)
                 (ok, result) = self._ifmap_db.object_alloc(
                     obj_type, parent_type, obj_dict['fq_name'])
+                if not ok:
+                    self.config_object_error(
+                        obj_uuid, None, obj_type, 'dbe_resync:ifmap_alloc',
+                        result[1])
+                    continue
                 (my_imid, parent_imid) = result
             except Exception as e:
                 self.config_object_error(
@@ -1772,9 +1707,12 @@ class VncDbClient(object):
     def dbe_uve_trace(self, oper, typ, uuid, obj_dict):
         oo = {}
         oo['uuid'] = uuid
-        oo['name'] = self.uuid_to_fq_name(uuid)
+        if oper.upper() == 'DELETE':
+            oo['name'] = obj_dict['fq_name']
+        else:
+            oo['name'] = self.uuid_to_fq_name(uuid)
         oo['value'] = obj_dict
-        oo['type'] = typ
+        oo['type'] = typ.replace('-', '_')
 
         req_id = get_trace_id()
         db_trace = DBRequestTrace(request_id=req_id)
@@ -1804,10 +1742,11 @@ class VncDbClient(object):
         else:
             return
 
-        if oo['value']:
-            cc = ContrailConfig(name=ukey, elements=emap)
+        if oper.upper() == 'DELETE':
+            cc = ContrailConfig(name=ukey, elements=emap, deleted=True)
         else:
-            cc = ContrailConfig(name=ukey, elements={}, deleted=True)
+            cc = ContrailConfig(name=ukey, elements=emap)
+
         cfg_msg = ContrailConfigTrace(data=cc, table=utab,
                                       sandesh=self._sandesh)
         cfg_msg.send(sandesh=self._sandesh)
@@ -1968,6 +1907,9 @@ class VncDbClient(object):
         return (ok, cassandra_result)
     # end dbe_read_multi
 
+    def dbe_get_relaxed_refs(self, obj_id):
+        return self._cassandra_db.get_relaxed_refs(obj_id)
+    # end dbe_get_relaxed_refs
 
     def dbe_is_latest(self, obj_ids, tstamp):
         try:
@@ -2155,21 +2097,21 @@ class VncDbClient(object):
 
     # end uuid_to_obj_perms
 
-    def prop_list_get(self, obj_uuid, obj_fields, position):
-        (ok, cassandra_result) = self._cassandra_db.prop_list_read(
-            obj_uuid, obj_fields, position)
+    def prop_collection_get(self, obj_type, obj_uuid, obj_fields, position):
+        (ok, cassandra_result) = self._cassandra_db.prop_collection_read(
+            obj_type, obj_uuid, obj_fields, position)
         return ok, cassandra_result
-    # end prop_list_get
+    # end prop_collection_get
 
-    def prop_list_update(self, obj_type, obj_uuid, updates):
+    def prop_collection_update(self, obj_type, obj_uuid, updates):
         if not updates:
             return
 
-        self._cassandra_db.prop_list_update(obj_uuid, updates)
+        self._cassandra_db.prop_collection_update(obj_type, obj_uuid, updates)
         self._msgbus.dbe_update_publish(obj_type.replace('_', '-'),
                                         {'uuid':obj_uuid})
         return True, ''
-    # end prop_list_update
+    # end prop_collection_update
 
     def ref_update(self, obj_type, obj_uuid, ref_type, ref_uuid, ref_data,
                    operation):
@@ -2178,6 +2120,10 @@ class VncDbClient(object):
         self._msgbus.dbe_update_publish(obj_type.replace('_', '-'),
                                         {'uuid':obj_uuid})
     # ref_update
+
+    def ref_relax_for_delete(self, obj_uuid, ref_uuid):
+        self._cassandra_db.ref_relax_for_delete(obj_uuid, ref_uuid)
+    # end ref_relax_for_delete
 
     def uuid_to_obj_perms2(self, obj_uuid):
         return self._cassandra_db.uuid_to_obj_perms2(obj_uuid)

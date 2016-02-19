@@ -8,6 +8,7 @@
 
 #include "bgp/bgp_log.h"
 #include "bgp/bgp_route.h"
+#include "bgp/bgp_server.h"
 #include "net/bgp_af.h"
 
 using std::auto_ptr;
@@ -57,6 +58,12 @@ bool BgpMessage::StartReach(const RibOutAttr *roattr, const BgpRoute *route) {
         BgpAttrOriginatorId *originator_id =
             new BgpAttrOriginatorId(attr->originator_id().to_ulong());
         update.path_attributes.push_back(originator_id);
+    }
+
+    if (attr->cluster_list()) {
+        ClusterListSpec *clist =
+            new ClusterListSpec(attr->cluster_list()->cluster_list());
+        update.path_attributes.push_back(clist);
     }
 
     if (attr->as_path()) {

@@ -1242,7 +1242,8 @@ class AnalyticsFixture(fixtures.Fixture):
             start_time=str(generator_obj.flow_start_time),
             end_time=str(generator_obj.flow_end_time),
             select_fields=['UuidKey', 'destvn', 'destip'],
-            where_clause='destip=10.10.10.2 AND destvn=domain1:admin:vn2&> AND vrouter=%s'% vrouter)
+            where_clause='destip=2001:db8::2:1 AND destvn=domain1:admin:vn2&>'+
+                         ' AND vrouter=%s'% vrouter)
         self.logger.info(str(res))
         assert(len(res) == generator_obj.flow_cnt)
         res = vns.post_query(
@@ -1250,7 +1251,8 @@ class AnalyticsFixture(fixtures.Fixture):
             start_time=str(generator_obj.flow_start_time),
             end_time=str(generator_obj.flow_end_time),
             select_fields=['destvn', 'destip'],
-            where_clause='destip=10.10.10.2 AND destvn=domain1:admin:vn2&> AND vrouter=%s'% vrouter)
+            where_clause='destip=2001:db8::2:1 AND destvn=domain1:admin:vn2&>'+
+                         ' AND vrouter=%s'% vrouter)
         self.logger.info(str(res))
         assert(len(res) == generator_obj.num_flow_samples)
         # give non-existent values in the where clause
@@ -1272,6 +1274,33 @@ class AnalyticsFixture(fixtures.Fixture):
             where_clause='destip=20.1.1.10 AND destvn=domain1:admin:vn2&> AND vrouter=%s'% vrouter)
         self.logger.info(str(res))
         assert(len(res) == 0)
+
+        # sourcevn + sourceip AND destvn + destip [ipv4/ipv6]
+        res = vns.post_query(
+            'FlowRecordTable',
+            start_time=str(generator_obj.egress_flow_start_time),
+            end_time=str(generator_obj.egress_flow_end_time),
+            select_fields=['UuidKey', 'sourcevn', 'sourceip',
+                'destvn', 'destip'],
+            where_clause='sourceip=2001:db8::1:2 AND '+
+                'sourcevn=domain1:admin:vn2 AND '+
+                'destip=10.10.10.1 AND destvn=domain1:admin:vn1 AND '+
+                'vrouter=%s'% vrouter,
+            dir=0)
+        self.logger.info(str(res))
+        assert(len(res) == generator_obj.flow_cnt)
+        res = vns.post_query(
+            'FlowSeriesTable',
+            start_time=str(generator_obj.egress_flow_start_time),
+            end_time=str(generator_obj.egress_flow_end_time),
+            select_fields=['sourcevn', 'sourceip', 'destvn', 'destip'],
+            where_clause='sourceip=2001:db8::1:2 AND '+
+                'sourcevn=domain1:admin:vn2 AND '+
+                'destip=10.10.10.1 AND destvn=domain1:admin:vn1 AND '+
+                'vrouter=%s'% vrouter,
+            dir=0)
+        self.logger.info(str(res))
+        assert(len(res) == generator_obj.egress_num_flow_samples)
 
         # sport and protocol
         res = vns.post_query('FlowRecordTable',
@@ -2085,7 +2114,7 @@ class AnalyticsFixture(fixtures.Fixture):
         return True
     # end verify_collector_object_log_after_purge
 
-    @retry(delay=2, tries=5)
+    @retry(delay=5, tries=5)
     def verify_database_purge_status(self, purge_id):
         self.logger.info('verify database purge status: purge_id [%s]' %
                          (purge_id))

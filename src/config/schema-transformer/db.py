@@ -51,27 +51,20 @@ class SchemaTransformerDB(VncCassandraClient):
         self._zkclient = zkclient
 
         if self._args.cluster_id:
-            self._keyspace = '%s_%s' % (self._args.cluster_id, self._KEYSPACE)
             self._zk_path_pfx = self._args.cluster_id + '/'
         else:
-            self._keyspace = self._KEYSPACE
             self._zk_path_pfx = ''
 
         keyspaces = {
-            self._keyspace: [(self._RT_CF, None),
+            self._KEYSPACE: [(self._RT_CF, None),
                              (self._SC_IP_CF, None),
                              (self._SERVICE_CHAIN_CF, None),
                              (self._SERVICE_CHAIN_UUID_CF, None)]}
         cass_server_list = self._args.cassandra_server_list
 
-        if self._args.reset_config:
-            cass_reset_config = [self._keyspace]
-        else:
-            cass_reset_config = []
-
         super(SchemaTransformerDB, self).__init__(
-            cass_server_list, self._args.cluster_id, keyspaces,
-            manager.config_log, reset_config=cass_reset_config)
+            cass_server_list, self._args.cluster_id, keyspaces, None,
+            manager.config_log, reset_config=self._args.reset_config)
 
         SchemaTransformerDB._rt_cf = self._cf_dict[self._RT_CF]
         SchemaTransformerDB._sc_ip_cf = self._cf_dict[self._SC_IP_CF]

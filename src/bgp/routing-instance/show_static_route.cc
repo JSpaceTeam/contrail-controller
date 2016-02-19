@@ -4,8 +4,10 @@
 
 #include "bgp/bgp_show_handler.h"
 
-
+#include "bgp/bgp_config.h"
+#include "bgp/bgp_server.h"
 #include "bgp/bgp_show_handler.h"
+#include "bgp/bgp_table.h"
 #include "bgp/routing-instance/routing_instance.h"
 #include "bgp/routing-instance/static_route.h"
 #include "bgp/routing-instance/static_route_types.h"
@@ -44,9 +46,9 @@ bool BgpShowHandler<ShowStaticRouteReq, ShowStaticRouteReqIterate,
 
     RoutingInstanceMgr::const_name_iterator it =
         rim->name_clower_bound(data->next_entry);
-    StaticRouteEntriesInfo info;
     for (uint32_t iter_count = 0; it != rim->name_cend(); ++it, ++iter_count) {
         RoutingInstance *rinstance = it->second;
+        StaticRouteEntriesInfo info;
         if (FillStaticRouteInfo(Address::INET, data->search_string, info,
                                 rinstance)) {
             data->show_list.push_back(info);

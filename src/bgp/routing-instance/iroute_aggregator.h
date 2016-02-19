@@ -9,19 +9,25 @@
 
 class BgpRoute;
 class RoutingInstance;
+class AggregateRouteEntriesInfo;
 
 class IRouteAggregator {
 public:
     virtual ~IRouteAggregator() { }
 
+    virtual void Initialize() = 0;
     virtual void ProcessAggregateRouteConfig() = 0;
     virtual void UpdateAggregateRouteConfig() = 0;
     virtual void FlushAggregateRouteConfig() = 0;
 
     virtual bool IsAggregateRoute(const BgpRoute *route) const = 0;
     virtual bool IsContributingRoute(const BgpRoute *route) const = 0;
+
+    virtual bool FillAggregateRouteInfo(AggregateRouteEntriesInfo *info,
+        bool summary) const = 0;
+
 private:
-    friend class RouteAggregationTest;
+    friend class RouteAggregatorTest;
 
     // Enable/Disable task triggers
     virtual void DisableRouteAggregateUpdate() = 0;

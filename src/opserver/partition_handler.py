@@ -110,7 +110,7 @@ class UveCacheProcessor(object):
                     host=pi.ip_address, 
                     port=pi.port,
                     password=self._rpass,
-                    db=7)
+                    db=7, socket_timeout=90)
             ppe = lredis.pipeline()
             luves = list(uveparts[pkey])
             for elem in luves:
@@ -335,13 +335,17 @@ class UveStreamPart(gevent.Greenlet):
     def _run(self):
         lredis = None
         pb = None
+        pause = False
         while True:
             try:
+                if pause:
+                    gevent.sleep(2)
+                    pause = False
                 lredis = redis.StrictRedis(
                         host=self._pi.ip_address,
                         port=self._pi.port,
                         password=self._rpass,
-                        db=7)
+                        db=7, socket_timeout=90)
                 pb = lredis.pubsub()
                 inst = self._pi.instance_id
                 part = self._partno
@@ -422,7 +426,7 @@ class UveStreamPart(gevent.Greenlet):
                 if pb is not None:
                     pb.close()
                     pb = None
-                gevent.sleep(2)
+                    pause = True
         return None
 
 class UveStreamer(gevent.Greenlet):
@@ -557,8 +561,12 @@ class PartitionHandler(gevent.Greenlet):
 
     def _run(self):
 	pcount = 0
+        pause = False
         while True:
             try:
+                if pause:
+                    gevent.sleep(2)
+                    pause = False
                 self._logger.error("New KafkaClient %s" % self._topic)
                 self._kfk = KafkaClient(self._brokers , "kc-" + self._topic)
                 try:
@@ -618,7 +626,7 @@ class PartitionHandler(gevent.Greenlet):
                 self._logger.error("%s : traceback %s" % \
                                   (messag, traceback.format_exc()))
                 self.stop_partition()
-                gevent.sleep(2)
+                pause = True
 
         self._logger.error("Stopping %s pcount %d" % (self._topic, pcount))
         partdb = self.stop_partition()

@@ -49,14 +49,15 @@ class RoutingInstance {
 public:
     typedef std::set<RouteTarget> RouteTargetList;
     typedef std::map<std::string, BgpTable *> RouteTableList;
+    typedef std::map<Address::Family, BgpTable *> RouteTableFamilyList;
 
     RoutingInstance(std::string name, BgpServer *server,
                     RoutingInstanceMgr *mgr,
                     const BgpInstanceConfig *config);
     virtual ~RoutingInstance();
 
-    RouteTableList &GetTables() { return vrf_tables_; }
-    const RouteTableList &GetTables() const { return vrf_tables_; }
+    RouteTableList &GetTables() { return vrf_tables_by_name_; }
+    const RouteTableList &GetTables() const { return vrf_tables_by_name_; }
 
     void ProcessRoutingPolicyConfig();
     void UpdateRoutingPolicyConfig();
@@ -64,6 +65,7 @@ public:
     void ProcessStaticRouteConfig();
     void UpdateStaticRouteConfig();
     void FlushStaticRouteConfig();
+    void UpdateAllStaticRoutes();
 
     void ProcessRouteAggregationConfig();
     void UpdateRouteAggregationConfig();
@@ -105,8 +107,8 @@ public:
     void set_index(int index);
     int index() const { return index_; }
     bool always_subscribe() const { return always_subscribe_; }
-    bool IsDefaultRoutingInstance() const {
-        return is_default_;
+    bool IsMasterRoutingInstance() const {
+        return is_master_;
     }
 
     const std::string &name() const { return name_; }
@@ -167,6 +169,8 @@ public:
     bool IsContributingRoute(const BgpTable *table,
                              const BgpRoute *route) const;
 
+    int GetOriginVnForAggregateRoute(Address::Family family) const;
+
 private:
     friend class RoutingInstanceMgr;
     class DeleteActor;
@@ -194,13 +198,14 @@ private:
     std::string name_;
     int index_;
     std::auto_ptr<RouteDistinguisher> rd_;
-    RouteTableList vrf_tables_;
+    RouteTableList vrf_tables_by_name_;
+    RouteTableFamilyList vrf_tables_by_family_;
     RouteTargetList import_;
     RouteTargetList export_;
     BgpServer *server_;
     RoutingInstanceMgr *mgr_;
     const BgpInstanceConfig *config_;
-    bool is_default_;
+    bool is_master_;
     bool always_subscribe_;
     std::string virtual_network_;
     int virtual_network_index_;

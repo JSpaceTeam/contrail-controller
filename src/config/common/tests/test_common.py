@@ -11,8 +11,8 @@ from pprint import pformat
 import coverage
 import fixtures
 import testtools
-from testtools import content, content_type
-from flexmock import flexmock, Mock
+from testtools import content
+from flexmock import flexmock
 from webtest import TestApp
 import contextlib
 import elasticsearch
@@ -20,12 +20,12 @@ from elasticsearch import client
 from vnc_api.vnc_api import *
 import cfgm_common.vnc_cpu_info
 import cfgm_common.ifmap.client as ifmap_client
-import cfgm_common.ifmap.response as ifmap_response
 import kombu
 import discoveryclient.client as disc_client
 import cfgm_common.zkclient
-from cfgm_common.uve.vnc_api.ttypes import (VncApiConfigLog, VncApiError)
+from cfgm_common.uve.vnc_api.ttypes import VncApiConfigLog
 from cfgm_common import imid
+from cfgm_common.utils import cgitb_hook
 
 from test_utils import *
 import bottle
@@ -256,6 +256,21 @@ def flexmocks(mocks):
             setattr(cls, method_name, method)
 # end flexmocks
 
+@contextlib.contextmanager
+def flexmocks(mocks):
+    orig_values = {}
+    try:
+        for cls, method_name, val in mocks:
+            kwargs = {method_name: val}
+            # save orig cls.method_name
+            orig_values[(cls, method_name)] = getattr(cls, method_name)
+            flexmock(cls, **kwargs)
+        yield
+    finally:
+        for (cls, method_name), method in orig_values.items():
+            setattr(cls, method_name, method)
+# end flexmocks
+
 def setup_extra_flexmock(mocks):
     for (cls, method_name, val) in mocks:
         kwargs = {method_name: val}
@@ -293,6 +308,33 @@ def patch(target_obj, target_method_name, patched):
         setattr(target_obj, target_method_name, orig_method)
 #end patch
 
+@contextlib.contextmanager
+def patch_imports(imports):
+    # save original, patch and restore
+    orig_modules = {}
+    mocked_modules = []
+    try:
+        for import_str, fake in imports:
+           cur_module = None
+           for mod_part in import_str.split('.'):
+               if not cur_module:
+                   cur_module = mod_part
+               else:
+                   cur_module += "." + mod_part
+               if cur_module in sys.modules:
+                   orig_modules[cur_module] = sys.modules[cur_module]
+               else:
+                   mocked_modules.append(cur_module)
+               sys.modules[cur_module] = fake
+        yield
+    finally:
+        for mod_name, mod in orig_modules.items():
+            sys.modules[mod_name] = mod
+        for mod_name in mocked_modules:
+            del sys.modules[mod_name]
+
+#end patch_import
+
 cov_handle = None
 class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
     _HTTP_HEADERS =  {
@@ -308,8 +350,7 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
         (ifmap_client.client, 'call_async_result', FakeIfmapClient.call_async_result),
 
         (pycassa.system_manager.Connection, '__init__',stub),
-        (pycassa.system_manager.SystemManager, 'create_keyspace',stub),
-        (pycassa.system_manager.SystemManager, 'create_column_family',stub),
+        (pycassa.system_manager.SystemManager, '__new__',FakeSystemManager),
         (pycassa.ConnectionPool, '__init__',stub),
         (pycassa.ColumnFamily, '__new__',FakeCF),
         (pycassa.util, 'convert_uuid_to_time',Fake_uuid_to_time),
@@ -319,7 +360,6 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
         (disc_client.DiscoveryClient, 'publish',stub),
         (disc_client.DiscoveryClient, 'subscribe',stub),
         (disc_client.DiscoveryClient, 'syslog',stub),
-        (disc_client.DiscoveryClient, 'def_pub',stub),
 
         (kazoo.client.KazooClient, '__new__',FakeKazooClient),
         (kazoo.handlers.gevent.SequentialGeventHandler, '__init__',stub),
@@ -345,6 +385,8 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
 
         super(TestCase, self).__init__(*args, **kwargs)
         self.addOnException(self._add_detailed_traceback)
+        # list of sockets allocated from system for test case
+        self._allocated_sockets = []
 
     def _add_detailed_traceback(self, exc_info):
         import cgitb
@@ -352,7 +394,7 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
         from cStringIO  import StringIO
 
         tmp_file = StringIO()
-        cgitb.Hook(format="text", file=tmp_file).handle(exc_info)
+        cgitb_hook(format="text", file=tmp_file, info=exc_info)
         tb_str = tmp_file.getvalue()
         tmp_file.close()
         self.addDetail('detailed-traceback', content.text_content(tb_str))
@@ -429,6 +471,9 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
     def _create_test_object(self):
         return self._create_test_objects()[0]
 
+    def _delete_test_object(self, obj):
+        self._vnc_lib.virtual_network_delete(id=obj.uuid)
+
     def ifmap_has_ident(self, obj=None, id=None):
         if obj:
             _type = obj.get_type()
@@ -442,6 +487,9 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
             return True
 
         return False
+
+    def ifmap_doesnt_have_ident(self, obj=None, id=None):
+        return not self.ifmap_has_ident(obj, id)
 
     def assertTill(self, expr_or_cb, *cb_args, **cb_kwargs):
         tries = 0
@@ -476,9 +524,9 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
             self._config_knobs.extend(extra_config_knobs)
 
         self._api_server_ip = socket.gethostbyname(socket.gethostname())
-        self._api_server_port = get_free_port()
-        http_server_port = get_free_port()
-        self._api_admin_port = get_free_port()
+        self._api_server_port = get_free_port(self._allocated_sockets)
+        http_server_port = get_free_port(self._allocated_sockets)
+        self._api_admin_port = get_free_port(self._allocated_sockets)
         self._api_svr_greenlet = gevent.spawn(launch_api_server,
                                      self.id(),
                                      self._api_server_ip, self._api_server_port,
@@ -507,7 +555,10 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
         FakeKombu.reset()
         FakeIfmapClient.reset()
         CassandraCFs.reset()
+        FakeKazooClient.reset()
         FakeExtensionManager.reset()
+        for sock in self._allocated_sockets:
+            sock.close()
         #cov_handle.stop()
         #cov_handle.report(file=open('covreport.txt', 'w'))
     # end cleanUp
@@ -535,9 +586,21 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
         return vn_obj
     # end create_virtual_network
 
-    def _create_service(self, vn1_name, vn2_name, si_name, auto_policy, **kwargs):
-        sti = [ServiceTemplateInterfaceType(
-            'left'), ServiceTemplateInterfaceType('right')]
+    def _create_service(self, vn_list, si_name, auto_policy, **kwargs):
+        sa_set = None
+        if kwargs.get('service_virtualization_type') == 'physical-device':
+            pr = PhysicalRouter(si_name)
+            self._vnc_lib.physical_router_create(pr)
+            sa_set = ServiceApplianceSet('sa_set-'+si_name)
+            self._vnc_lib.service_appliance_set_create(sa_set)
+            sa = ServiceAppliance('sa-'+si_name, parent_obj=sa_set)
+            for if_type, _ in vn_list:
+               attr = ServiceApplianceInterfaceType(interface_type=if_type)
+               pi = PhysicalInterface('pi-'+si_name+if_type, parent_obj=pr)
+               self._vnc_lib.physical_interface_create(pi)
+               sa.add_physical_interface(pi, attr)
+            self._vnc_lib.service_appliance_create(sa)
+        sti = [ServiceTemplateInterfaceType(k) for k, _ in vn_list]
         st_prop = ServiceTemplateType(
             flavor='medium',
             image_name='junk',
@@ -546,14 +609,16 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
         service_template = ServiceTemplate(
             name=si_name + 'template',
             service_template_properties=st_prop)
+        if sa_set:
+            service_template.add_service_appliance_set(sa_set)
         self._vnc_lib.service_template_create(service_template)
         scale_out = ServiceScaleOutType()
         if kwargs.get('service_mode') == 'in-network':
-            if_list = [ServiceInstanceInterfaceType(virtual_network=vn1_name),
-                       ServiceInstanceInterfaceType(virtual_network=vn2_name)]
-            si_props = ServiceInstanceType(
-                auto_policy=auto_policy, interface_list=if_list,
-                scale_out=scale_out)
+            if_list = [ServiceInstanceInterfaceType(virtual_network=vn)
+                       for _, vn in vn_list]
+            si_props = ServiceInstanceType(auto_policy=auto_policy,
+                                           interface_list=if_list,
+                                           scale_out=scale_out)
         else:
             if_list = [ServiceInstanceInterfaceType(),
                        ServiceInstanceInterfaceType()]
@@ -563,6 +628,21 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
             name=si_name, service_instance_properties=si_props)
         service_instance.add_service_template(service_template)
         self._vnc_lib.service_instance_create(service_instance)
+
+        if kwargs.get('version') == 2:
+            proj = Project()
+            pt = PortTuple('pt-'+si_name, parent_obj=service_instance)
+            self._vnc_lib.port_tuple_create(pt)
+            for if_type, vn_name in vn_list:
+                port = VirtualMachineInterface(si_name+if_type, parent_obj=proj)
+                vmi_props = VirtualMachineInterfacePropertiesType(
+                    service_interface_type=if_type)
+                vn_obj = self._vnc_lib.virtual_network_read(fq_name_str=vn_name)
+                port.set_virtual_machine_interface_properties(vmi_props)
+                port.add_virtual_network(vn_obj)
+                port.add_port_tuple(pt)
+                self._vnc_lib.virtual_machine_interface_create(port)
+
         return service_instance.get_fq_name_str()
 
     def create_network_policy(self, vn1, vn2, service_list=None, mirror_service=None,
@@ -577,10 +657,11 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
         if service_list:
             for service in si_list:
                 service_name_list.append(self._create_service(
-                    vn1_name, vn2_name, service, auto_policy, **kwargs))
+                    [('left', vn1_name), ('right', vn2_name)], service,
+                     auto_policy, **kwargs))
         if mirror_service:
             mirror_si = self._create_service(
-		vn1_name, vn2_name, mirror_service, False,
+                [('left', vn1_name), ('right', vn2_name)], mirror_service, False,
                 service_mode='transparent', service_type='analyzer')
         action_list = ActionListType()
         if mirror_service:

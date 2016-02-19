@@ -7,6 +7,7 @@
 #include "base/os.h"
 #include "test/test_cmn_util.h"
 #include "test/test_init.h"
+#include "oper/ecmp_load_balance.h"
 #include "oper/mirror_table.h"
 #include "oper/physical_device_vn.h"
 #include "uve/test/vn_uve_table_test.h"
@@ -523,7 +524,7 @@ void IntfCfgAdd(int intf_id, const string &name, const string ipaddr,
     CfgIntKey *key = new CfgIntKey(MakeUuid(intf_id));
     CfgIntData *data = new CfgIntData();
     boost::system::error_code ec;
-    IpAddress ip = Ip4Address::from_string(ipaddr, ec);
+    Ip4Address ip = Ip4Address::from_string(ipaddr, ec);
     char vm_name[MAX_TESTNAME_LEN];
     sprintf(vm_name, "vm%d", vm_id);
     Ip6Address ip6 = Ip6Address();
@@ -1411,13 +1412,14 @@ bool BridgeTunnelRouteAdd(const Peer *peer, const string &vm_vrf,
                           TunnelType::TypeBmap bmap, const Ip4Address &server_ip,
                           uint32_t label, MacAddress &remote_vm_mac,
                           const IpAddress &vm_addr, uint8_t plen) {
+    VnListType vn_list;
     ControllerVmRoute *data =
         ControllerVmRoute::MakeControllerVmRoute(peer,
                               Agent::GetInstance()->fabric_vrf_name(),
                               Agent::GetInstance()->router_id(),
                               vm_vrf, server_ip,
-                              bmap, label, "", SecurityGroupList(),
-                              PathPreference(), false);
+                              bmap, label, vn_list, SecurityGroupList(),
+                              PathPreference(), false, EcmpLoadBalance());
     EvpnAgentRouteTable::AddRemoteVmRouteReq(peer, vm_vrf, remote_vm_mac,
                                         vm_addr, 0, data);
     return true;
@@ -1446,9 +1448,12 @@ bool EcmpTunnelRouteAdd(const Peer *peer, const string &vrf_name, const Ip4Addre
                                         comp_nh_list, vrf_name));
     nh_req.data.reset(new CompositeNHData());
 
+    VnListType vn_list;
+    vn_list.insert(vn_name);
     ControllerEcmpRoute *data =
-        new ControllerEcmpRoute(peer, vm_ip, plen, vn_name, -1, false, vrf_name,
-                                sg, path_preference, TunnelType::MplsType(), nh_req);
+        new ControllerEcmpRoute(peer, vm_ip, plen, vn_list, -1, false, vrf_name,
+                                sg, path_preference, TunnelType::MplsType(),
+                                EcmpLoadBalance(), nh_req);
     InetUnicastAgentRouteTable::AddRemoteVmRouteReq(peer, vrf_name, vm_ip, plen, data);
 }
 
@@ -1457,13 +1462,15 @@ bool Inet6TunnelRouteAdd(const Peer *peer, const string &vm_vrf, const Ip6Addres
                          uint32_t label, const string &dest_vn_name,
                          const SecurityGroupList &sg,
                          const PathPreference &path_preference) {
+    VnListType vn_list;
+    vn_list.insert(dest_vn_name);
     ControllerVmRoute *data =
         ControllerVmRoute::MakeControllerVmRoute(peer,
                               Agent::GetInstance()->fabric_vrf_name(),
                               Agent::GetInstance()->router_id(),
                               vm_vrf, server_ip,
-                              bmap, label, dest_vn_name, sg,
-                              path_preference, false);
+                              bmap, label, vn_list, sg,
+                              path_preference, false, EcmpLoadBalance());
     InetUnicastAgentRouteTable::AddRemoteVmRouteReq(peer, vm_vrf,
                                         vm_addr, plen, data);
     return true;
@@ -1503,13 +1510,15 @@ bool Inet4TunnelRouteAdd(const Peer *peer, const string &vm_vrf, const Ip4Addres
                          uint32_t label, const string &dest_vn_name,
                          const SecurityGroupList &sg,
                          const PathPreference &path_preference) {
+    VnListType vn_list;
+    vn_list.insert(dest_vn_name);
     ControllerVmRoute *data =
         ControllerVmRoute::MakeControllerVmRoute(peer,
                               Agent::GetInstance()->fabric_vrf_name(),
                               Agent::GetInstance()->router_id(),
                               vm_vrf, server_ip,
-                              bmap, label, dest_vn_name, sg,
-                              path_preference, false);
+                              bmap, label, vn_list, sg,
+                              path_preference, false, EcmpLoadBalance());
     InetUnicastAgentRouteTable::AddRemoteVmRouteReq(peer, vm_vrf,
                                         vm_addr, plen, data);
     return true;
@@ -1529,13 +1538,16 @@ bool Inet4TunnelRouteAdd(const Peer *peer, const string &vm_vrf, char *vm_addr,
 bool TunnelRouteAdd(const char *server, const char *vmip, const char *vm_vrf,
                     int label, const char *vn, TunnelType::TypeBmap bmap) {
     boost::system::error_code ec;
+    VnListType vn_list;
+    if (vn) vn_list.insert(vn);
     ControllerVmRoute *data =
         ControllerVmRoute::MakeControllerVmRoute(bgp_peer_,
                               Agent::GetInstance()->fabric_vrf_name(),
                               Agent::GetInstance()->router_id(),
                               vm_vrf, Ip4Address::from_string(server, ec),
-                              TunnelType::AllType(), label, vn,
-                              SecurityGroupList(), PathPreference(), false);
+                              TunnelType::AllType(), label, vn_list,
+                              SecurityGroupList(), PathPreference(), false,
+                              EcmpLoadBalance());
     InetUnicastAgentRouteTable::AddRemoteVmRouteReq(bgp_peer_, vm_vrf,
                                         Ip4Address::from_string(vmip, ec),
                                         32, data);
@@ -1554,11 +1566,12 @@ bool AddArp(const char *ip, const char *mac_str, const char *ifname) {
     PhysicalInterfaceKey key(ifname);
     intf = static_cast<Interface *>(Agent::GetInstance()->interface_table()->FindActiveEntry(&key));
     boost::system::error_code ec;
+    VnListType vn_list;
     InetUnicastAgentRouteTable::ArpRoute(DBRequest::DB_ENTRY_ADD_CHANGE,
                               Agent::GetInstance()->fabric_vrf_name(),
                               Ip4Address::from_string(ip, ec), mac,
                               Agent::GetInstance()->fabric_vrf_name(),
-                              *intf, true, 32, false, "", SecurityGroupList());
+                              *intf, true, 32, false, vn_list, SecurityGroupList());
 
     return true;
 }
@@ -1569,11 +1582,12 @@ bool DelArp(const string &ip, const char *mac_str, const string &ifname) {
     PhysicalInterfaceKey key(ifname);
     intf = static_cast<Interface *>(Agent::GetInstance()->interface_table()->FindActiveEntry(&key));
     boost::system::error_code ec;
+    VnListType vn_list;
     InetUnicastAgentRouteTable::ArpRoute(DBRequest::DB_ENTRY_DELETE,
                               Agent::GetInstance()->fabric_vrf_name(),
                               Ip4Address::from_string(ip, ec),
                               mac, Agent::GetInstance()->fabric_vrf_name(), *intf,
-                              false, 32, false, "", SecurityGroupList());
+                              false, 32, false, vn_list, SecurityGroupList());
     return true;
 }
 
@@ -1673,6 +1687,28 @@ void DelVn(const char *name) {
     DelNode("virtual-network", name);
 }
 
+void AddSriovPort(const char *name, int id) {
+    std::stringstream str;
+    str << "<virtual-machine-interface-mac-addresses>" << endl;
+    str << "    <mac-address>00:00:00:00:00:" << id << "</mac-address>"
+        << endl;
+    str << "</virtual-machine-interface-mac-addresses>" << endl;
+    str << "<display-name> " << name << "</display-name>" << endl;
+
+    //vnic type as direct makes the port sriov
+    str << "<virtual-machine-interface-bindings>";
+    str << "<key-value-pair>";
+    str << "<key>vnic_type</key>";
+    str << "<value>direct</value>";
+    str << "</key-value-pair>";
+    str << "</virtual-machine-interface-bindings>";
+
+    char buff[4096];
+    strcpy(buff, str.str().c_str());
+    AddNode("virtual-machine-interface", name, id, buff);
+
+}
+
 void AddPort(const char *name, int id, const char *attr) {
     std::stringstream str;
     str << "<virtual-machine-interface-mac-addresses>" << endl;
@@ -1683,8 +1719,6 @@ void AddPort(const char *name, int id, const char *attr) {
 
     char buff[4096];
     strcpy(buff, str.str().c_str());
-    if (attr != NULL)
-        strcat(buff, attr);
     AddNode("virtual-machine-interface", name, id, buff);
 }
 
@@ -2029,15 +2063,23 @@ void DeleteLogicalInterface(const char *name) {
     DelNode("logical-interface", name);
 }
 
-void AddVmPortVrf(const char *name, const string &ip, uint16_t tag) {
-    char buff[256];
+void AddVmPortVrf(const char *name, const string &ip, uint16_t tag,
+                  const string &v6_ip) {
+    char buff[1024];
     int len = 0;
 
     len += sprintf(buff + len,   "<direction>both</direction>");
     len += sprintf(buff + len,   "<vlan-tag>%d</vlan-tag>", tag);
     len += sprintf(buff + len,   "<src-mac>02:00:00:00:00:02</src-mac>");
     len += sprintf(buff + len,   "<dst-mac>02:00:00:00:00:01</dst-mac>");
-    len += sprintf(buff + len,   "<service-chain-address>%s</service-chain-address>", ip.c_str());
+    len += sprintf(buff + len,
+                   "<service-chain-address>%s</service-chain-address>",
+                   ip.c_str());
+    if (!v6_ip.empty()) {
+        len += sprintf(buff + len,
+                   "<ipv6-service-chain-address>%s</ipv6-service-chain-address>",
+                    v6_ip.c_str());
+    }
     AddLinkNode("virtual-machine-interface-routing-instance", name, buff);
 }
 
@@ -2796,7 +2838,7 @@ bool FlowDelete(const string &vrf_name, const char *sip, const char *dip,
         return false;
     }
 
-    int task_id = TaskScheduler::GetInstance()->GetTaskId("db::DBTable");
+    int task_id = TaskScheduler::GetInstance()->GetTaskId(kTaskFlowEvent);
     std::auto_ptr<TaskTrigger> trigger_
         (new TaskTrigger(boost::bind(FlowDeleteTrigger, key), task_id, 0));
     trigger_->Set();
@@ -2870,13 +2912,13 @@ bool FlowGetNat(const string &vrf_name, const char *sip, const char *dip,
         return false;
     }
 
-    EXPECT_STREQ(svn.c_str(), entry->data().source_vn.c_str());
-    if (svn.compare(entry->data().source_vn) != 0) {
+    EXPECT_TRUE(VnMatch(entry->data().source_vn_list, svn));
+    if (!VnMatch(entry->data().source_vn_list, svn)) {
         return false;
     }
 
-    EXPECT_STREQ(dvn.c_str(), entry->data().dest_vn.c_str());
-    if (dvn.compare(entry->data().dest_vn) != 0) {
+    EXPECT_TRUE(VnMatch(entry->data().dest_vn_list, dvn));
+    if (!VnMatch(entry->data().dest_vn_list, dvn)) {
         return false;
     }
 
@@ -3037,13 +3079,13 @@ bool FlowGet(const string &vrf_name, const char *sip, const char *dip,
         return false;
     }
 
-    EXPECT_STREQ(svn.c_str(), entry->data().source_vn.c_str());
-    if (svn.compare(entry->data().source_vn) != 0) {
+    EXPECT_TRUE(VnMatch(entry->data().source_vn_list, svn));
+    if (!VnMatch(entry->data().source_vn_list, svn)) {
         return false;
     }
 
-    EXPECT_STREQ(dvn.c_str(), entry->data().dest_vn.c_str());
-    if (dvn.compare(entry->data().dest_vn) != 0) {
+    EXPECT_TRUE(VnMatch(entry->data().dest_vn_list, dvn));
+    if (!VnMatch(entry->data().dest_vn_list, dvn)) {
         return false;
     }
 
@@ -3774,4 +3816,13 @@ void AddStaticPreference(std::string intf_name, int intf_id,
     AddNode("virtual-machine-interface", intf_name.c_str(),
             intf_id, cbuf);
     client->WaitForIdle();
+}
+
+bool VnMatch(VnListType &vn_list, std::string &vn) {
+    for (VnListType::iterator it = vn_list.begin();
+         it != vn_list.end(); ++it) {
+        if (*it == vn)
+            return true;
+    }
+    return false;
 }

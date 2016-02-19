@@ -1000,7 +1000,9 @@ TEST_F(IntfTest, VmPortFloatingIp_1) {
     InetUnicastRouteEntry *rt =
         RouteGet("vrf1", Ip4Address::from_string("2.2.2.2"), 32);
     if (rt) {
-        EXPECT_STREQ(rt->GetActivePath()->dest_vn_name().c_str(), "vn2");
+        VnListType vn_list;
+        vn_list.insert("vn2");
+        EXPECT_TRUE(rt->GetActivePath()->dest_vn_list() == vn_list);
         EXPECT_TRUE(rt->GetActivePath()->path_preference().dependent_ip() ==
                     Ip4Address::from_string("1.1.1.1"));
     }
@@ -1219,6 +1221,65 @@ TEST_F(IntfTest, VmPortFloatingIpResync_1) {
     client->WaitForIdle();
     ConfigDel(1);
     client->WaitForIdle();
+}
+
+TEST_F(IntfTest, VmPortFloatingIpEvpn_1) {
+    struct PortInfo input[] = {
+        {"vnet1", 1, "1.1.1.10", "00:00:00:01:01:01", 1, 1},
+    };
+
+    client->Reset();
+    CreateVmportEnv(input, 1);
+    client->WaitForIdle();
+    EXPECT_TRUE(VmPortActive(input, 0));
+
+    AddVn("default-project:vn2", 2);
+    AddVrf("default-project:vn2:vn2", 2);
+    AddLink("virtual-network", "default-project:vn2", "routing-instance",
+            "default-project:vn2:vn2");
+    //Add floating IP for vnet1
+    AddFloatingIpPool("fip-pool1", 1);
+    AddFloatingIp("fip1", 1, "2.1.1.100", "1.1.1.10");
+    AddLink("floating-ip", "fip1", "floating-ip-pool", "fip-pool1");
+    AddLink("floating-ip-pool", "fip-pool1", "virtual-network",
+            "default-project:vn2");
+    client->WaitForIdle();
+    AddLink("virtual-machine-interface", "vnet1", "floating-ip", "fip1");
+    client->WaitForIdle();
+    Ip4Address floating_ip = Ip4Address::from_string("2.1.1.100");
+    EXPECT_TRUE(RouteFind("default-project:vn2:vn2", floating_ip, 32));
+    EXPECT_TRUE(VmPortFloatingIpCount(1, 1));
+
+    //Change Encap
+    AddEncapList("VXLAN", "MPLSoUDP", "MPLSoGRE");
+    client->WaitForIdle();
+
+    //Delete config for vnet1, forcing interface to deactivate
+    //verify that route and floating ip map gets cleaned up
+    DelNode("virtual-machine-interface", input[0].name);
+    client->WaitForIdle();
+    EXPECT_FALSE(RouteFind("default-project:vn2:vn2", floating_ip, 32));
+    // Interface not deleted till config is deleted
+    EXPECT_TRUE(VmPortFind(1));
+
+    //Clean up
+    DelLink("virtual-network", "default-project:vn2", "routing-instance",
+            "default-project:vn2:vn2");
+    DelLink("floating-ip", "fip1", "floating-ip-pool", "fip-pool1");
+    DelLink("floating-ip-pool", "fip-pool1",
+            "virtual-network", "default-project:vn2");
+    DelLink("virtual-machine-interface", "vnet1", "floating-ip", "fip1");
+    DelFloatingIp("fip1");
+    DelFloatingIpPool("fip-pool1");
+    client->WaitForIdle();
+    DelLink("virtual-network", "vn2", "routing-instance",
+            "default-project:vn2:vn2");
+    DelVrf("default-project:vn2:vn2");
+    DelVn("default-project:vn2");
+    DeleteVmportEnv(input, 1, true);
+    client->WaitForIdle();
+    EXPECT_FALSE(VrfFind("vrf1"));
+    EXPECT_FALSE(VrfFind("default-project:vn2:vn2", true));
 }
 
 TEST_F(IntfTest, VmPortFloatingIpDelete_1) {
@@ -1579,7 +1640,7 @@ TEST_F(IntfTest, IntfActivateDeactivate_2) {
 //   layer3 nexthop are absent
 //2> Add instance IP and make sure layer3 nexthop are added
 //3> Delete instance ip and layer3 nexthop are deleted
-TEST_F(IntfTest, IntfActivateDeactivate_5) {
+TEST_F(IntfTest, DISABLED_IntfActivateDeactivate_5) {
     struct PortInfo input[] = {
         {"vnet1", 1, "0.0.0.0", "00:00:00:01:01:01", 1, 1},
     };
@@ -1858,7 +1919,7 @@ TEST_F(IntfTest, VmPortServiceVlanAdd_2) {
     NovaDel(1);
     ConfigDel(1);
     client->WaitForIdle();
-    EXPECT_TRUE(VmPortFindRetDel(1) == false);
+    EXPECT_TRUE(VmPortFind(1) == false);
 
     //Cleanup
     DelNode("virtual-machine-interface", input[0].name);
@@ -1873,6 +1934,7 @@ TEST_F(IntfTest, VmPortServiceVlanAdd_2) {
     DelVn("vn2");
     DeleteVmportEnv(input, 1, true);
     client->WaitForIdle();
+    EXPECT_TRUE(VmPortFindRetDel(1) == false);
     EXPECT_FALSE(VrfFind("vrf1"));
     EXPECT_FALSE(VrfFind("vrf2"));
 }
@@ -2100,6 +2162,163 @@ TEST_F(IntfTest, IntfStaticRouteWithCommunityWithNexthop) {
    client->WaitForIdle();
    EXPECT_FALSE(VmPortFind(1));
 }
+
+// Update the communities on static route config
+// No community to valid list of communities
+TEST_F(IntfTest, UpdateIntfStaticRouteCommunity_0) {
+    struct PortInfo input[] = {
+        {"vnet1", 1, "1.1.1.10", "00:00:00:01:01:01", 1, 1},
+    };
+
+    client->Reset();
+    CreateVmportEnv(input, 1);
+    client->WaitForIdle();
+    EXPECT_TRUE(VmPortActive(input, 0));
+
+   //Add a static route
+   struct TestIp4Prefix static_route[] = {
+       { Ip4Address::from_string("24.1.1.0"), 24},
+       { Ip4Address::from_string("16.1.1.0"), 16},
+   };
+
+   AddInterfaceRouteTable("static_route", 1, static_route, 2);
+   AddLink("virtual-machine-interface", "vnet1",
+           "interface-route-table", "static_route");
+   client->WaitForIdle();
+   EXPECT_TRUE(RouteFind("vrf1", static_route[0].addr_,
+                         static_route[0].plen_));
+   EXPECT_TRUE(RouteFind("vrf1", static_route[1].addr_,
+                         static_route[1].plen_));
+   InetUnicastRouteEntry *rt =
+        RouteGet("vrf1", static_route[0].addr_, static_route[0].plen_);
+   EXPECT_TRUE(rt != NULL);
+   const AgentPath *path = rt->GetActivePath();
+   EXPECT_TRUE(path != NULL);
+   EXPECT_EQ(path->communities().size(), 0);
+
+   DoInterfaceSandesh("vnet1");
+   client->WaitForIdle();
+
+
+   // Update the communities
+   std::vector<std::string> update_communities =
+       list_of("no-reoriginate")("64512:8888");
+   AddInterfaceRouteTable("static_route", 1, static_route, 2,
+                          NULL, update_communities);
+   AddLink("virtual-machine-interface", "vnet1",
+           "interface-route-table", "static_route");
+   client->WaitForIdle();
+
+   EXPECT_TRUE(RouteFind("vrf1", static_route[0].addr_,
+                         static_route[0].plen_));
+   EXPECT_TRUE(RouteFind("vrf1", static_route[1].addr_,
+                         static_route[1].plen_));
+   rt = RouteGet("vrf1", static_route[0].addr_, static_route[0].plen_);
+   EXPECT_TRUE(rt != NULL);
+   path = rt->GetActivePath();
+   EXPECT_TRUE(path != NULL);
+   EXPECT_EQ(path->communities().size(), 2);
+   EXPECT_EQ(path->communities(), update_communities);
+
+   DoInterfaceSandesh("vnet1");
+   client->WaitForIdle();
+
+   //Delete the link between interface and route table
+   DelLink("virtual-machine-interface", "vnet1",
+           "interface-route-table", "static_route");
+   client->WaitForIdle();
+   EXPECT_FALSE(RouteFind("vrf1", static_route[0].addr_,
+                          static_route[0].plen_));
+   EXPECT_FALSE(RouteFind("vrf1", static_route[1].addr_,
+                          static_route[1].plen_));
+   DoInterfaceSandesh("vnet1");
+   client->WaitForIdle();
+
+   DelLink("virtual-machine-interface", "vnet1",
+           "interface-route-table", "static_route");
+   DeleteVmportEnv(input, 1, true);
+   client->WaitForIdle();
+   EXPECT_FALSE(VmPortFind(1));
+}
+
+// Update the communities on static route config
+TEST_F(IntfTest, UpdateIntfStaticRouteCommunity_1) {
+    struct PortInfo input[] = {
+        {"vnet1", 1, "1.1.1.10", "00:00:00:01:01:01", 1, 1},
+    };
+
+    client->Reset();
+    CreateVmportEnv(input, 1);
+    client->WaitForIdle();
+    EXPECT_TRUE(VmPortActive(input, 0));
+
+   //Add a static route
+   struct TestIp4Prefix static_route[] = {
+       { Ip4Address::from_string("24.1.1.0"), 24},
+       { Ip4Address::from_string("16.1.1.0"), 16},
+   };
+
+   std::vector<std::string> communities = list_of("no-advertise")("64512:9999");
+   AddInterfaceRouteTable("static_route", 1, static_route, 2, NULL, communities);
+   AddLink("virtual-machine-interface", "vnet1",
+           "interface-route-table", "static_route");
+   client->WaitForIdle();
+   EXPECT_TRUE(RouteFind("vrf1", static_route[0].addr_,
+                         static_route[0].plen_));
+   EXPECT_TRUE(RouteFind("vrf1", static_route[1].addr_,
+                         static_route[1].plen_));
+   InetUnicastRouteEntry *rt =
+        RouteGet("vrf1", static_route[0].addr_, static_route[0].plen_);
+   EXPECT_TRUE(rt != NULL);
+   const AgentPath *path = rt->GetActivePath();
+   EXPECT_TRUE(path != NULL);
+   EXPECT_EQ(path->communities().size(), 2);
+   EXPECT_EQ(path->communities(), communities);
+
+   DoInterfaceSandesh("vnet1");
+   client->WaitForIdle();
+
+   // Update the communities
+   std::vector<std::string> update_communities =
+       list_of("no-reoriginate")("64512:8888");
+   AddInterfaceRouteTable("static_route", 1, static_route, 2,
+                          NULL, update_communities);
+   AddLink("virtual-machine-interface", "vnet1",
+           "interface-route-table", "static_route");
+   client->WaitForIdle();
+
+   EXPECT_TRUE(RouteFind("vrf1", static_route[0].addr_,
+                         static_route[0].plen_));
+   EXPECT_TRUE(RouteFind("vrf1", static_route[1].addr_,
+                         static_route[1].plen_));
+   rt = RouteGet("vrf1", static_route[0].addr_, static_route[0].plen_);
+   EXPECT_TRUE(rt != NULL);
+   path = rt->GetActivePath();
+   EXPECT_TRUE(path != NULL);
+   EXPECT_EQ(path->communities().size(), 2);
+   EXPECT_EQ(path->communities(), update_communities);
+
+   DoInterfaceSandesh("vnet1");
+   client->WaitForIdle();
+
+   //Delete the link between interface and route table
+   DelLink("virtual-machine-interface", "vnet1",
+           "interface-route-table", "static_route");
+   client->WaitForIdle();
+   EXPECT_FALSE(RouteFind("vrf1", static_route[0].addr_,
+                          static_route[0].plen_));
+   EXPECT_FALSE(RouteFind("vrf1", static_route[1].addr_,
+                          static_route[1].plen_));
+   DoInterfaceSandesh("vnet1");
+   client->WaitForIdle();
+
+   DelLink("virtual-machine-interface", "vnet1",
+           "interface-route-table", "static_route");
+   DeleteVmportEnv(input, 1, true);
+   client->WaitForIdle();
+   EXPECT_FALSE(VmPortFind(1));
+}
+
 //Add static route, deactivate interface and make static routes are deleted
 TEST_F(IntfTest, IntfStaticRoute_1) {
     struct PortInfo input[] = {

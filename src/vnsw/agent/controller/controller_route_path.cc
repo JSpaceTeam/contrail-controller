@@ -9,6 +9,7 @@
 #include <route/route.h>
 
 #include <cmn/agent_cmn.h>
+#include <oper/ecmp_load_balance.h>
 #include <oper/route_common.h>
 #include <oper/vrf.h>
 #include <oper/tunnel_nh.h>
@@ -66,12 +67,14 @@ bool ControllerEcmpRoute::AddChangePath(Agent *agent, AgentPath *path,
     CompositeNHKey *comp_key = static_cast<CompositeNHKey *>(nh_req_.key.get());
     //Reorder the component NH list, and add a reference to local composite mpls
     //label if any
-    path->ReorderCompositeNH(agent, comp_key);
-    return InetUnicastRouteEntry::ModifyEcmpPath(dest_addr_, plen_, vn_name_,
+    if (path->ReorderCompositeNH(agent, comp_key) == false)
+        return false;
+    return InetUnicastRouteEntry::ModifyEcmpPath(dest_addr_, plen_, vn_list_,
                                                  label_, local_ecmp_nh_,
                                                  vrf_name_, sg_list_,
                                                  path_preference_,
                                                  tunnel_bmap_,
+                                                 ecmp_load_balance_,
                                                  nh_req_, agent, path);
 }
 
@@ -82,10 +85,11 @@ ControllerVmRoute *ControllerVmRoute::MakeControllerVmRoute(const Peer *peer,
                                          const Ip4Address &tunnel_dest,
                                          TunnelType::TypeBmap bmap,
                                          uint32_t label,
-                                         const string &dest_vn_name,
+                                         const VnListType &dest_vn_list,
                                          const SecurityGroupList &sg_list,
                                          const PathPreference &path_preference,
-                                         bool ecmp_suppressed) {
+                                         bool ecmp_suppressed,
+                                         const EcmpLoadBalance &ecmp_load_balance) {
     // Make Tunnel-NH request
     DBRequest nh_req(DBRequest::DB_ENTRY_ADD_CHANGE);
     nh_req.key.reset(new TunnelNHKey(default_vrf, router_id, tunnel_dest, false,
@@ -95,8 +99,9 @@ ControllerVmRoute *ControllerVmRoute::MakeControllerVmRoute(const Peer *peer,
     // Make route request pointing to Tunnel-NH created above
     ControllerVmRoute *data =
         new ControllerVmRoute(peer, default_vrf, tunnel_dest, label,
-                              dest_vn_name, bmap, sg_list, path_preference,
-                              nh_req, ecmp_suppressed);
+                              dest_vn_list, bmap, sg_list, path_preference,
+                              nh_req, ecmp_suppressed,
+                              ecmp_load_balance);
     return data;
 }
 
@@ -205,8 +210,8 @@ bool ControllerVmRoute::AddChangePath(Agent *agent, AgentPath *path,
         }
     }
 
-    if (path->dest_vn_name() != dest_vn_name_) {
-        path->set_dest_vn_name(dest_vn_name_);
+    if (path->dest_vn_list() != dest_vn_list_) {
+        path->set_dest_vn_list(dest_vn_list_);
         ret = true;
     }
 
@@ -237,6 +242,11 @@ bool ControllerVmRoute::AddChangePath(Agent *agent, AgentPath *path,
         ret = true;
     }
 
+    if (ecmp_load_balance_ != path->ecmp_load_balance()) {
+        path->set_ecmp_load_balance(ecmp_load_balance_);
+        ret = true;
+    }
+
     return ret;
 }
 
@@ -244,15 +254,16 @@ ControllerLocalVmRoute::ControllerLocalVmRoute(const VmInterfaceKey &intf,
                                                uint32_t mpls_label,
                                                uint32_t vxlan_id,
                                                bool force_policy,
-                                               const string &vn_name,
+                                               const VnListType &vn_list,
                                                uint8_t flags,
                                                const SecurityGroupList &sg_list,
                                                const PathPreference &path_preference,
                                                uint64_t sequence_number,
+                                               const EcmpLoadBalance &ecmp_load_balance,
                                                const AgentXmppChannel *channel) :
-    LocalVmRoute(intf, mpls_label, vxlan_id, force_policy, vn_name, flags, sg_list,
+    LocalVmRoute(intf, mpls_label, vxlan_id, force_policy, vn_list, flags, sg_list,
                  CommunityList(),
-                 path_preference, Ip4Address(0)),
+                 path_preference, Ip4Address(0), ecmp_load_balance),
     sequence_number_(sequence_number), channel_(channel) { }
 
 bool ControllerLocalVmRoute::IsPeerValid(const AgentRouteKey *key) const {
@@ -262,12 +273,12 @@ bool ControllerLocalVmRoute::IsPeerValid(const AgentRouteKey *key) const {
 ControllerVlanNhRoute::ControllerVlanNhRoute(const VmInterfaceKey &intf,
                                              uint32_t tag,
                                              uint32_t label,
-                                             const string &dest_vn_name,
+                                             const VnListType &dest_vn_list,
                                              const SecurityGroupList &sg_list,
                                              const PathPreference &path_preference,
                                              uint64_t sequence_number,
                                              const AgentXmppChannel *channel) :
-    VlanNhRoute(intf, tag, label, dest_vn_name, sg_list, path_preference),
+    VlanNhRoute(intf, tag, label, dest_vn_list, sg_list, path_preference),
     sequence_number_(sequence_number), channel_(channel) { }
 
 bool ControllerVlanNhRoute::IsPeerValid(const AgentRouteKey *key) const {
@@ -277,10 +288,10 @@ bool ControllerVlanNhRoute::IsPeerValid(const AgentRouteKey *key) const {
 ControllerInetInterfaceRoute::ControllerInetInterfaceRoute(const InetInterfaceKey &intf,
                                                            uint32_t label,
                                                            int tunnel_bmap,
-                                                           const string &dest_vn_name,
+                                                           const std::set<string> &dest_vn_list,
                                                            uint64_t sequence_number,
                                                            const AgentXmppChannel *channel) :
-    InetInterfaceRoute(intf, label, tunnel_bmap, dest_vn_name),
+    InetInterfaceRoute(intf, label, tunnel_bmap, dest_vn_list),
     sequence_number_(sequence_number), channel_(channel) { }
 
 bool ControllerInetInterfaceRoute::IsPeerValid(const AgentRouteKey *key) const {
@@ -311,8 +322,8 @@ bool ClonedLocalPath::AddChangePath(Agent *agent, AgentPath *path,
         return ret;
     }
 
-    if (path->dest_vn_name() != vn_) {
-        path->set_dest_vn_name(vn_);
+    if (path->dest_vn_list() != vn_list_) {
+        path->set_dest_vn_list(vn_list_);
         ret = true;
     }
     path->set_unresolved(false);

@@ -3,6 +3,7 @@
  */
 
 #include "bgp_log.h"
+#include "bgp/bgp_server.h"
 #include "bgp/routing-instance/routing_instance.h"
 
 SandeshTraceBufferPtr BgpTraceBuf(SandeshTraceBufferCreate(BGP_TRACE_BUF,
@@ -43,9 +44,12 @@ void init() {
 
 void init(std::string log_file, unsigned long log_file_size,
           unsigned long log_file_index, bool enable_syslog,
-          std::string syslog_facility, std::string ident) {
+          std::string syslog_facility, std::string ident,
+          std::string log_level) {
     LoggingInit(log_file, log_file_size, log_file_index,
-                enable_syslog, syslog_facility, ident);
+                enable_syslog, syslog_facility, ident,
+                SandeshLevelTolog4Level(
+                    Sandesh::StringToLevel(log_level)));
     init_common();
 }
 

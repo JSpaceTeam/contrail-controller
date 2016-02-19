@@ -52,11 +52,13 @@ public:
     virtual KSyncEntry *UnresolvedReference();
     bool AllowDeleteStateComp() {return false;}
     virtual void ErrorHandler(int, uint32_t) const;
+    virtual std::string VrouterError(uint32_t error) const;
 private:
     friend class KSyncFlowEntryFreeList;
+    bool IgnoreVrouterError() const;
+
     FlowEntryPtr flow_entry_;
     uint32_t hash_id_;
-    uint32_t old_hash_id_;
     uint32_t old_reverse_flow_id_;
     uint32_t old_action_;
     uint32_t old_component_nh_idx_;
@@ -131,7 +133,8 @@ public:
 
     KSyncEntry *Alloc(const KSyncEntry *key, uint32_t index);
     void Free(KSyncEntry *key);
-    bool DoEventTrace(void) { return false; }
+    //bool DoEventTrace(void) { return false; }
+    bool DoEventTrace(void) { return true; }
     FlowTableKSyncEntry *Find(FlowEntry *key);
     void PreFree(KSyncEntry *entry);
 
@@ -145,6 +148,9 @@ public:
     void GrowFreeList();
     KSyncFlowEntryFreeList *free_list() { return &free_list_; }
 
+    void NetlinkAck(KSyncEntry *entry, KSyncEntry::KSyncEvent event);
+    void GenerateKSyncEvent(FlowTableKSyncEntry *entry,
+                            KSyncEntry::KSyncEvent event);
 private:
     friend class KSyncSandeshContext;
     friend class FlowTable;

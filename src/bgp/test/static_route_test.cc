@@ -22,6 +22,7 @@
 #include "bgp/bgp_factory.h"
 #include "bgp/bgp_log.h"
 #include "bgp/bgp_sandesh.h"
+#include "bgp/bgp_server.h"
 #include "bgp/inet/inet_table.h"
 #include "bgp/inet6/inet6_table.h"
 #include "bgp/origin-vn/origin_vn.h"
@@ -213,6 +214,19 @@ protected:
         parser->Receive(&config_db_, netconf.data(), netconf.length(), 0);
     }
 
+    void DisableResolveTrigger(const string &instance_name) {
+        RoutingInstance *rtinstance =
+            ri_mgr_->GetRoutingInstance(instance_name);
+        rtinstance->static_route_mgr(family_)->DisableResolveTrigger();
+    }
+
+    void EnableResolveTrigger(const string &instance_name) {
+        RoutingInstance *rtinstance =
+            ri_mgr_->GetRoutingInstance(instance_name);
+        if (rtinstance)
+            rtinstance->static_route_mgr(family_)->EnableResolveTrigger();
+    }
+
     void DisableStaticRouteQ(const string &instance_name) {
         RoutingInstance *rtinstance =
             ri_mgr_->GetRoutingInstance(instance_name);
@@ -327,40 +341,43 @@ protected:
         const BgpAttr *attr = path->GetAttr();
         const ExtCommunity *ext_community = attr->ext_community();
         set<string> rtlist;
-        BOOST_FOREACH(const ExtCommunity::ExtCommunityValue &comm,
-                      ext_community->communities()) {
-            if (!ExtCommunity::is_route_target(comm))
-                continue;
-
-            RouteTarget rtarget(comm);
-            rtlist.insert(rtarget.ToString());
+        if (ext_community) {
+            BOOST_FOREACH(const ExtCommunity::ExtCommunityValue &comm,
+                          ext_community->communities()) {
+                if (!ExtCommunity::is_route_target(comm))
+                    continue;
+                RouteTarget rtarget(comm);
+                rtlist.insert(rtarget.ToString());
+            }
         }
         return rtlist;
     }
 
     std::set<std::string> GetTunnelEncapListFromRoute(const BgpPath *path) {
         const ExtCommunity *ext_comm = path->GetAttr()->ext_community();
-        assert(ext_comm);
         std::set<std::string> list;
-        BOOST_FOREACH(const ExtCommunity::ExtCommunityValue &comm,
-                      ext_comm->communities()) {
-            if (!ExtCommunity::is_tunnel_encap(comm))
-                continue;
-            TunnelEncap encap(comm);
-            list.insert(encap.ToXmppString());
+        if  (ext_comm) {
+            BOOST_FOREACH(const ExtCommunity::ExtCommunityValue &comm,
+                          ext_comm->communities()) {
+                if (!ExtCommunity::is_tunnel_encap(comm))
+                    continue;
+                TunnelEncap encap(comm);
+                list.insert(encap.ToXmppString());
+            }
         }
         return list;
     }
 
     std::string GetOriginVnFromRoute(const BgpPath *path) {
         const ExtCommunity *ext_comm = path->GetAttr()->ext_community();
-        assert(ext_comm);
-        BOOST_FOREACH(const ExtCommunity::ExtCommunityValue &comm,
-                      ext_comm->communities()) {
-            if (!ExtCommunity::is_origin_vn(comm))
-                continue;
-            OriginVn origin_vn(comm);
-            return ri_mgr_->GetVirtualNetworkByVnIndex(origin_vn.vn_index());
+        if  (ext_comm) {
+            BOOST_FOREACH(const ExtCommunity::ExtCommunityValue &comm,
+                          ext_comm->communities()) {
+                if (!ExtCommunity::is_origin_vn(comm))
+                    continue;
+                OriginVn origin_vn(comm);
+                return ri_mgr_->GetVirtualNetworkByVnIndex(origin_vn.vn_index());
+            }
         }
         return "unresolved";
     }
@@ -1674,7 +1691,7 @@ TYPED_TEST(StaticRouteTest, LoadBalance) {
 
     // Create non-default load balance attribute
     LoadBalance lb = LoadBalance();
-    lb.SetL2SourceAddress();
+    lb.SetL3SourceAddress(false);
 
     // Add Nexthop Route
     this->AddRoute(NULL, "nat", this->BuildPrefix("192.168.1.254", 32),
@@ -1711,7 +1728,7 @@ TYPED_TEST(StaticRouteTest, LoadBalance) {
     EXPECT_EQ(lb, static_path_lb);
     EXPECT_EQ(this->GetOriginVnFromRoute(static_path), "unresolved");
 
-    lb.SetL2DestinationAddress();
+    lb.SetL3DestinationAddress(false);
     // Update Nexthop Route
     this->AddRoute(NULL, "nat", this->BuildPrefix("192.168.1.254", 32),
                    100, this->BuildNextHopAddress("2.3.4.5"),
@@ -2004,6 +2021,139 @@ TYPED_TEST(StaticRouteTest, DeleteRoutingInstance) {
 }
 
 //
+// Delete the static route config and instance with resolve_trigger disabled
+// Allow the routing instance to get deleted with Resolve trigger
+//
+TYPED_TEST(StaticRouteTest, DeleteRoutingInstance_DisabledResolveTrigger) {
+    vector<string> instance_names = list_of("blue")("nat");
+    multimap<string, string> connections;
+    this->NetworkConfig(instance_names, connections);
+    task_util::WaitForIdle();
+
+    std::auto_ptr<autogen::StaticRouteEntriesType> params =
+        this->GetStaticRouteConfig(
+                "controller/src/bgp/testdata/static_route_1.xml");
+
+    ifmap_test_util::IFMapMsgPropertyAdd(&this->config_db_, "routing-instance",
+                         "nat", "static-route-entries", params.release(), 0);
+    task_util::WaitForIdle();
+
+    // Add Nexthop Route
+    this->AddRoute(NULL, "nat", this->BuildPrefix("192.168.1.254", 32),
+                       100, this->BuildNextHopAddress("2.3.4.5"));
+    task_util::WaitForIdle();
+
+    // Check for Static route
+    TASK_UTIL_WAIT_NE_NO_MSG(
+            this->RouteLookup("blue", this->BuildPrefix("192.168.1.0", 24)),
+            NULL, 1000, 10000, "Wait for Static route in blue..");
+
+    // Disable resolve trigger
+    this->DisableResolveTrigger("nat");
+
+    // Delete the configuration for the nat instance.
+    ifmap_test_util::IFMapMsgPropertyDelete(
+            &this->config_db_, "routing-instance",
+            "nat", "static-route-entries");
+
+    // Delete nexthop route
+    this->DeleteRoute(NULL, "nat", this->BuildPrefix("192.168.1.254", 32));
+    task_util::WaitForIdle();
+
+    // Check for Static route
+    TASK_UTIL_WAIT_EQ_NO_MSG(
+            this->RouteLookup("blue", this->BuildPrefix("192.168.1.0", 24)),
+            NULL, 1000, 10000, "Wait for Static route in blue..");
+
+    ifmap_test_util::IFMapMsgUnlink(
+            &this->config_db_, "routing-instance", "nat",
+            "virtual-network", "nat", "virtual-network-routing-instance");
+    ifmap_test_util::IFMapMsgUnlink(&this->config_db_, "routing-instance",
+            "nat", "route-target", "target:64496:2", "instance-target");
+    ifmap_test_util::IFMapMsgNodeDelete(
+        &this->config_db_, "virtual-network", "nat");
+    ifmap_test_util::IFMapMsgNodeDelete(
+        &this->config_db_, "routing-instance", "nat");
+    ifmap_test_util::IFMapMsgNodeDelete(
+        &this->config_db_, "route-target", "target:64496:2");
+    task_util::WaitForIdle();
+
+    this->EnableResolveTrigger("nat");
+}
+
+//
+// Delete the static route config and instance with resolve_trigger disabled
+// Routing instance is not destroyed when the task trigger is enabled.
+// Verify that enabling the task trigger ignores the deleted routing instance
+//
+TYPED_TEST(StaticRouteTest, DeleteRoutingInstance_DisabledResolveTrigger_1) {
+    vector<string> instance_names = list_of("blue")("nat");
+    multimap<string, string> connections;
+    this->NetworkConfig(instance_names, connections);
+    task_util::WaitForIdle();
+
+    std::auto_ptr<autogen::StaticRouteEntriesType> params =
+        this->GetStaticRouteConfig(
+                "controller/src/bgp/testdata/static_route_1.xml");
+
+    ifmap_test_util::IFMapMsgPropertyAdd(&this->config_db_, "routing-instance",
+                         "nat", "static-route-entries", params.release(), 0);
+    task_util::WaitForIdle();
+
+    // Add Nexthop Route
+    this->AddRoute(NULL, "nat", this->BuildPrefix("192.168.1.254", 32),
+                       100, this->BuildNextHopAddress("2.3.4.5"));
+    task_util::WaitForIdle();
+
+    // Check for Static route
+    TASK_UTIL_WAIT_NE_NO_MSG(
+            this->RouteLookup("blue", this->BuildPrefix("192.168.1.0", 24)),
+            NULL, 1000, 10000, "Wait for Static route in blue..");
+
+    // Disable resolve trigger
+    this->DisableResolveTrigger("nat");
+
+    // Delete the configuration for the nat instance.
+    ifmap_test_util::IFMapMsgPropertyDelete(
+            &this->config_db_, "routing-instance",
+            "nat", "static-route-entries");
+
+    // Check for Static route
+    TASK_UTIL_WAIT_EQ_NO_MSG(
+            this->RouteLookup("blue", this->BuildPrefix("192.168.1.0", 24)),
+            NULL, 1000, 10000, "Wait for Static route in blue..");
+
+    // Delete the nat routing instance
+    ifmap_test_util::IFMapMsgUnlink(
+            &this->config_db_, "routing-instance", "nat",
+            "virtual-network", "nat", "virtual-network-routing-instance");
+    ifmap_test_util::IFMapMsgUnlink(&this->config_db_, "routing-instance",
+            "nat", "route-target", "target:64496:2", "instance-target");
+    ifmap_test_util::IFMapMsgNodeDelete(
+        &this->config_db_, "virtual-network", "nat");
+    ifmap_test_util::IFMapMsgNodeDelete(
+        &this->config_db_, "routing-instance", "nat");
+    ifmap_test_util::IFMapMsgNodeDelete(
+        &this->config_db_, "route-target", "target:64496:2");
+    task_util::WaitForIdle();
+
+    RoutingInstance *nat_inst = this->ri_mgr_->GetRoutingInstance("nat");
+    TASK_UTIL_WAIT_EQ_NO_MSG(nat_inst->deleted(),
+            true, 1000, 10000, "Wait for nat instance to be marked deleted");
+    //
+    // Since the nexthop route is not yet deleted, routing instance is
+    // not destroyed
+    //
+    this->EnableResolveTrigger("nat");
+
+    // Delete nexthop route
+    this->DeleteRoute(NULL, "nat", this->BuildPrefix("192.168.1.254", 32));
+    task_util::WaitForIdle();
+    TASK_UTIL_WAIT_EQ_NO_MSG(this->ri_mgr_->GetRoutingInstance("nat"),
+            NULL, 1000, 10000, "Wait for nat instance to get destroyed");
+}
+
+//
 // Add the routing instance that imports the static route after the static
 // route has already been added. Objective is to check that the static route
 // is replicated to the table in the new instance without any triggers to
@@ -2047,6 +2197,144 @@ TYPED_TEST(StaticRouteTest, AddRoutingInstance) {
     // Delete nexthop route
     this->DeleteRoute(NULL, "nat", this->BuildPrefix("192.168.1.254", 32));
     task_util::WaitForIdle();
+}
+
+//
+// Validate static route functionality in VN's default routing instance
+//
+// 1. Configure VN's default routing instance with static route property
+// 2. Add the nexthop route in the same instance
+// 3. Validate the static route in the VN's default routing instance
+//
+TYPED_TEST(StaticRouteTest, DefaultRoutingInstance) {
+    vector<string> instance_names = list_of("blue");
+    multimap<string, string> connections;
+    this->NetworkConfig(instance_names, connections);
+    task_util::WaitForIdle();
+
+    std::auto_ptr<autogen::StaticRouteEntriesType> params =
+        this->GetStaticRouteConfig(
+                "controller/src/bgp/testdata/static_route_12.xml");
+
+    ifmap_test_util::IFMapMsgPropertyAdd(&this->config_db_, "routing-instance",
+                         "blue", "static-route-entries", params.release(), 0);
+    task_util::WaitForIdle();
+
+    // Check for Static route
+    TASK_UTIL_WAIT_EQ_NO_MSG(this->RouteLookup("blue",
+                             this->BuildPrefix("192.168.1.0", 24)),
+                             NULL, 1000, 10000,
+                             "Wait for Static route in blue..");
+
+    // Add Nexthop Route
+    set<string> encap = list_of("gre")("udp");
+    this->AddRoute(NULL, "blue",
+                   this->BuildPrefix("192.168.1.254", 32), 100,
+                   this->BuildNextHopAddress("2.3.4.5"), encap);
+    task_util::WaitForIdle();
+
+    // Check for Static route
+    TASK_UTIL_WAIT_NE_NO_MSG(this->RouteLookup("blue",
+                             this->BuildPrefix("192.168.1.0", 24)),
+                             NULL, 1000, 10000,
+                             "Wait for Static route in blue..");
+
+    BgpRoute *static_rt =
+        this->RouteLookup("blue", this->BuildPrefix("192.168.1.0", 24));
+    const BgpPath *static_path = static_rt->BestPath();
+    BgpAttrPtr attr = static_path->GetAttr();
+    EXPECT_EQ(this->BuildNextHopAddress("2.3.4.5"),
+              this->GetNextHopAddress(attr));
+    EXPECT_EQ(0, this->GetRTargetFromPath(static_path).size());
+    EXPECT_EQ(encap, this->GetTunnelEncapListFromRoute(static_path));
+    EXPECT_EQ(this->GetOriginVnFromRoute(static_path), "blue");
+    EXPECT_TRUE(attr->as_path() == NULL);
+    EXPECT_TRUE(attr->community() != NULL);
+    EXPECT_TRUE(attr->community()->ContainsValue(CommunityType::AcceptOwnNexthop));
+
+    this->VerifyStaticRouteSandesh("blue");
+
+    // Delete nexthop route
+    this->DeleteRoute(NULL, "blue", this->BuildPrefix("192.168.1.254", 32));
+    task_util::WaitForIdle();
+
+    // Check for Static route
+    TASK_UTIL_WAIT_EQ_NO_MSG(
+            this->RouteLookup("blue", this->BuildPrefix("192.168.1.0", 24)),
+            NULL, 1000, 10000, "Wait for Static route in blue..");
+}
+
+//
+// Verify that a change in VN index is reflected in static routes for VN's
+// default routing instance.
+//
+TYPED_TEST(StaticRouteTest, VirtualNetworkIndexChange) {
+    vector<string> instance_names = list_of("blue");
+    multimap<string, string> connections;
+    this->NetworkConfig(instance_names, connections);
+    task_util::WaitForIdle();
+
+    autogen::VirtualNetwork::NtProperty *blue_vni_0 =
+        new autogen::VirtualNetwork::NtProperty;
+    blue_vni_0->data = 0;
+    ifmap_test_util::IFMapMsgPropertyAdd(&this->config_db_,
+        "virtual-network", "blue", "virtual-network-network-id", blue_vni_0);
+    task_util::WaitForIdle();
+
+    std::auto_ptr<autogen::StaticRouteEntriesType> params =
+        this->GetStaticRouteConfig(
+                "controller/src/bgp/testdata/static_route_12.xml");
+
+    ifmap_test_util::IFMapMsgPropertyAdd(&this->config_db_, "routing-instance",
+                         "blue", "static-route-entries", params.release(), 0);
+    task_util::WaitForIdle();
+
+    // Add Nexthop Route
+    this->AddRoute(NULL, "blue",
+                   this->BuildPrefix("192.168.1.254", 32), 100,
+                   this->BuildNextHopAddress("2.3.4.5"));
+    task_util::WaitForIdle();
+
+    // Check for Static route
+    TASK_UTIL_WAIT_NE_NO_MSG(this->RouteLookup("blue",
+                             this->BuildPrefix("192.168.1.0", 24)),
+                             NULL, 1000, 10000,
+                             "Wait for Static route in blue..");
+
+    BgpRoute *static_rt =
+        this->RouteLookup("blue", this->BuildPrefix("192.168.1.0", 24));
+    const BgpPath *static_path = static_rt->BestPath();
+    BgpAttrPtr attr = static_path->GetAttr();
+    EXPECT_EQ(0, this->GetRTargetFromPath(static_path).size());
+    EXPECT_EQ(this->GetOriginVnFromRoute(static_path), "unresolved");
+
+    autogen::VirtualNetwork::NtProperty *blue_vni_1 =
+        new autogen::VirtualNetwork::NtProperty;
+    blue_vni_1->data = 1;
+    ifmap_test_util::IFMapMsgPropertyAdd(&this->config_db_,
+        "virtual-network", "blue", "virtual-network-network-id", blue_vni_1);
+    task_util::WaitForIdle();
+
+    // Check for Static route
+    TASK_UTIL_WAIT_NE_NO_MSG(this->RouteLookup("blue",
+                             this->BuildPrefix("192.168.1.0", 24)),
+                             NULL, 1000, 10000,
+                             "Wait for Static route in blue..");
+
+    static_rt = this->RouteLookup("blue", this->BuildPrefix("192.168.1.0", 24));
+    static_path = static_rt->BestPath();
+    attr = static_path->GetAttr();
+    EXPECT_EQ(0, this->GetRTargetFromPath(static_path).size());
+    EXPECT_EQ(this->GetOriginVnFromRoute(static_path), "blue");
+
+    // Delete nexthop route
+    this->DeleteRoute(NULL, "blue", this->BuildPrefix("192.168.1.254", 32));
+    task_util::WaitForIdle();
+
+    // Check for Static route
+    TASK_UTIL_WAIT_EQ_NO_MSG(
+            this->RouteLookup("blue", this->BuildPrefix("192.168.1.0", 24)),
+            NULL, 1000, 10000, "Wait for Static route in blue..");
 }
 
 // Sandesh introspect test

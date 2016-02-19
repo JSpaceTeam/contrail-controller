@@ -17,8 +17,10 @@ class EventManager;
 
 class InstanceTask {
  public:
-    typedef boost::function<void(InstanceTask *task, const std::string errors)>
-        OnErrorCallback;
+    typedef boost::function<void(InstanceTask *task, const std::string &msg)>
+        OnDataCallback;
+    typedef boost::function<void(InstanceTask *task,
+            const boost::system::error_code &ec)>OnExitCallback;
 
     InstanceTask();
     virtual ~InstanceTask() {}
@@ -41,22 +43,27 @@ class InstanceTask {
         return start_time_;
     }
 
-    void set_on_error_cb(OnErrorCallback cb) {
-        on_error_cb_ = cb;
+    void set_on_data_cb(OnDataCallback cb) {
+        on_data_cb_ = cb;
+    }
+
+    void set_on_exit_cb(OnExitCallback cb) {
+        on_exit_cb_ = cb;
     }
 
  protected:
     bool is_running_;
     time_t start_time_;
-    OnErrorCallback on_error_cb_;
+    OnDataCallback on_data_cb_;
+    OnExitCallback on_exit_cb_;
 };
 
 class InstanceTaskExecvp : public InstanceTask {
  public:
     static const size_t kBufLen = 4096;
 
-    InstanceTaskExecvp(const std::string &cmd,
-        int cmd_type, EventManager *evm);
+    InstanceTaskExecvp(const std::string &name, const std::string &cmd,
+                       int cmd_type, EventManager *evm);
 
     bool Run();
     void Stop();
@@ -66,25 +73,34 @@ class InstanceTaskExecvp : public InstanceTask {
         return pid_;
     }
 
+    void set_cmd(std::string cmd) {
+        cmd_ = cmd;
+    }
+
     const std::string &cmd() const {
         return cmd_;
     }
 
     int cmd_type() const {
-            return cmd_type_;
+        return cmd_type_;
+    }
+
+    void set_pipe_stdout(bool pipe) {
+        pipe_stdout_ = pipe;
     }
 
  private:
-    void ReadErrors(const boost::system::error_code &ec, size_t read_bytes);
+    void ReadData(const boost::system::error_code &ec, size_t read_bytes);
 
-    const std::string cmd_;
-    boost::asio::posix::stream_descriptor errors_;
-    std::stringstream errors_data_;
+    const std::string name_;
+    std::string cmd_;
+    boost::asio::posix::stream_descriptor input_;
     char rx_buff_[kBufLen];
     AgentSignal::SignalChildHandler sig_handler_;
 
     pid_t pid_;
     int cmd_type_;
+    bool pipe_stdout_;
 };
 
 class InstanceTaskMethod : public InstanceTask {

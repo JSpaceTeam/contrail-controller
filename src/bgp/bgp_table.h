@@ -12,9 +12,7 @@
 #include <vector>
 
 #include "base/lifetime.h"
-#include "bgp/bgp_path.h"
 #include "bgp/bgp_ribout.h"
-#include "bgp/bgp_update.h"
 #include "db/db_table_walker.h"
 #include "route/table.h"
 
@@ -26,6 +24,7 @@ class PathResolver;
 class Route;
 class RoutingInstance;
 class SchedulingGroupManager;
+class UpdateInfoSList;
 struct UpdateInfo;
 
 class BgpTable : public RouteTable {
@@ -85,6 +84,7 @@ public:
     virtual Address::Family family() const = 0;
     virtual bool IsVpnTable() const { return false; }
     virtual bool IsRoutingPolicySupported() const { return false; }
+    virtual bool IsRouteAggregationSupported() const { return false; }
     virtual std::auto_ptr<DBEntry> AllocEntryStr(
         const std::string &key) const = 0;
 
@@ -110,6 +110,7 @@ public:
     BgpServer *server();
     const BgpServer *server() const;
     PathResolver *path_resolver() { return path_resolver_; }
+    const PathResolver *path_resolver() const { return path_resolver_; }
 
     virtual void Input(DBTablePartition *root, DBClient *client,
                        DBRequest *req);
@@ -130,6 +131,12 @@ public:
     const uint64_t GetInfeasiblePathCount() const {
         return infeasible_path_count_;
     }
+
+    // Check whether the route is aggregate route
+    bool IsAggregateRoute(const BgpRoute *route) const;
+
+    // Check whether the route is contributing route to aggregate route
+    bool IsContributingRoute(const BgpRoute *route) const;
 
 private:
     class DeleteActor;

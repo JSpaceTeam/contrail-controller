@@ -12,6 +12,7 @@
 //Forward declaration
 class AgentXmppChannel;
 class AgentRouteData;
+class EcmpLoadBalance;
 class Peer;
 class BgpPeer;
 class TunnelNHKey;
@@ -73,14 +74,15 @@ class ControllerVmRoute : public ControllerPeerPath {
 public:
     ControllerVmRoute(const Peer *peer, const string &vrf_name,
                   const Ip4Address &addr, uint32_t label,
-                  const string &dest_vn_name, int bmap,
+                  const VnListType &dest_vn_list, int bmap,
                   const SecurityGroupList &sg_list,
                   const PathPreference &path_preference,
-                  DBRequest &req, bool ecmp_suppressed):
+                  DBRequest &req, bool ecmp_suppressed,
+                  const EcmpLoadBalance &ecmp_load_balance):
         ControllerPeerPath(peer), server_vrf_(vrf_name), tunnel_dest_(addr),
-        tunnel_bmap_(bmap), label_(label), dest_vn_name_(dest_vn_name),
+        tunnel_bmap_(bmap), label_(label), dest_vn_list_(dest_vn_list),
         sg_list_(sg_list),path_preference_(path_preference),
-        ecmp_suppressed_(ecmp_suppressed)
+        ecmp_suppressed_(ecmp_suppressed), ecmp_load_balance_(ecmp_load_balance)
         {nh_req_.Swap(&req);}
     // Data passed in case of delete from BGP peer, to validate 
     // the request at time of processing.
@@ -100,38 +102,41 @@ public:
                                             const Ip4Address &tunnel_dest,
                                             TunnelType::TypeBmap bmap,
                                             uint32_t label,
-                                            const string &dest_vn_name,
+                                            const VnListType &dest_vn_list,
                                             const SecurityGroupList &sg_list,
-                                            const PathPreference
-                                            &path_preference,
-                                            bool ecmp_suppressed);
+                                            const PathPreference &path_preference,
+                                            bool ecmp_suppressed,
+                                            const EcmpLoadBalance &ecmp_load_balance);
 
 private:
     string server_vrf_;
     Ip4Address tunnel_dest_;
     TunnelType::TypeBmap tunnel_bmap_;
     uint32_t label_;
-    string dest_vn_name_;
+    VnListType dest_vn_list_;
     SecurityGroupList sg_list_;
     PathPreference path_preference_;
     DBRequest nh_req_;
     bool ecmp_suppressed_;
+    EcmpLoadBalance ecmp_load_balance_;
     DISALLOW_COPY_AND_ASSIGN(ControllerVmRoute);
 };
 
 class ControllerEcmpRoute : public ControllerPeerPath {
 public:
     ControllerEcmpRoute(const Peer *peer, const IpAddress &dest_addr,
-                        uint8_t plen, const string &vn_name, uint32_t label,
-                        bool local_ecmp_nh, const string &vrf_name,
-                        SecurityGroupList sg_list,
+                        uint8_t plen, const VnListType &vn_list,
+                        uint32_t label, bool local_ecmp_nh,
+                        const string &vrf_name, SecurityGroupList sg_list,
                         const PathPreference &path_preference,
                         TunnelType::TypeBmap tunnel_bmap,
+                        const EcmpLoadBalance &ecmp_load_balance,
                         DBRequest &nh_req) :
         ControllerPeerPath(peer), dest_addr_(dest_addr), plen_(plen),
-        vn_name_(vn_name), label_(label), local_ecmp_nh_(local_ecmp_nh),
+        vn_list_(vn_list), label_(label), local_ecmp_nh_(local_ecmp_nh),
         vrf_name_(vrf_name), sg_list_(sg_list),
-        path_preference_(path_preference), tunnel_bmap_(tunnel_bmap)
+        path_preference_(path_preference), tunnel_bmap_(tunnel_bmap),
+        ecmp_load_balance_(ecmp_load_balance)
         {nh_req_.Swap(&nh_req);}
 
     virtual ~ControllerEcmpRoute() { }
@@ -143,13 +148,14 @@ public:
 private:
     IpAddress dest_addr_;
     uint8_t plen_;
-    string vn_name_;
+    VnListType vn_list_;
     uint32_t label_;
     bool local_ecmp_nh_;
     string vrf_name_;
     SecurityGroupList sg_list_;
     PathPreference path_preference_;
     TunnelType::TypeBmap tunnel_bmap_;
+    EcmpLoadBalance ecmp_load_balance_;
     DBRequest nh_req_;
     DISALLOW_COPY_AND_ASSIGN(ControllerEcmpRoute);
 };
@@ -163,10 +169,11 @@ class ControllerLocalVmRoute : public LocalVmRoute {
 public:
     ControllerLocalVmRoute(const VmInterfaceKey &intf, uint32_t mpls_label,
                            uint32_t vxlan_id, bool force_policy,
-                           const string &vn_name, uint8_t flags,
+                           const VnListType &vn_list, uint8_t flags,
                            const SecurityGroupList &sg_list,
                            const PathPreference &path_preference,
                            uint64_t sequence_number,
+                           const EcmpLoadBalance &ecmp_load_balance,
                            const AgentXmppChannel *channel);
     virtual ~ControllerLocalVmRoute() { }
     virtual bool IsPeerValid(const AgentRouteKey *key) const;
@@ -185,7 +192,7 @@ private:
 class ControllerInetInterfaceRoute : public InetInterfaceRoute {
 public:
     ControllerInetInterfaceRoute(const InetInterfaceKey &intf, uint32_t label,
-                                 int tunnel_bmap, const string &dest_vn_name,
+                                 int tunnel_bmap, const VnListType &dest_vn_list,
                                  uint64_t sequence_number,
                                  const AgentXmppChannel *channel);
     virtual ~ControllerInetInterfaceRoute() { }
@@ -205,7 +212,8 @@ private:
 class ControllerVlanNhRoute : public VlanNhRoute {
 public:
     ControllerVlanNhRoute(const VmInterfaceKey &intf, uint32_t tag,
-                          uint32_t label, const string &dest_vn_name,
+                          uint32_t label,
+                          const VnListType &dest_vn_list,
                           const SecurityGroupList &sg_list,
                           const PathPreference &path_preference,
                           uint64_t sequence_number,
@@ -231,10 +239,10 @@ private:
 class ClonedLocalPath : public AgentRouteData {
 public:
     ClonedLocalPath(uint64_t seq, const AgentXmppChannel *channel,
-                    uint32_t label, const std::string &vn,
+                    uint32_t label, const VnListType &vn_list,
                     const SecurityGroupList &sg_list):
         AgentRouteData(false), sequence_number_(seq),
-        channel_(channel), mpls_label_(label), vn_(vn), sg_list_(sg_list) {}
+        channel_(channel), mpls_label_(label), vn_list_(vn_list), sg_list_(sg_list) {}
     virtual ~ClonedLocalPath() {}
     virtual bool IsPeerValid(const AgentRouteKey *key) const;
     virtual bool AddChangePath(Agent *agent, AgentPath *path,
@@ -246,7 +254,7 @@ private:
     uint64_t sequence_number_;
     const AgentXmppChannel *channel_;
     uint32_t mpls_label_;
-    const std::string vn_;
+    const VnListType vn_list_;
     const SecurityGroupList sg_list_;
     DISALLOW_COPY_AND_ASSIGN(ClonedLocalPath);
 };

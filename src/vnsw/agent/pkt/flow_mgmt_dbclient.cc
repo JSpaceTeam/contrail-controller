@@ -1,4 +1,5 @@
 #include "pkt/flow_mgmt_dbclient.h"
+#include "oper/ecmp_load_balance.h"
 
 void FlowMgmtDbClient::Init() {
     acl_listener_id_ = agent_->acl_table()->Register
@@ -366,6 +367,7 @@ void FlowMgmtDbClient::VrfNotify(DBTablePartBase *part, DBEntryBase *e) {
         (e->GetState(part->parent(), vrf_listener_id_));
     if (vrf->IsDeleted()) {
         if (state ) {
+            state->deleted_ = true;
             DeleteEvent(vrf, state);
         }
         return;
@@ -384,13 +386,17 @@ void FlowMgmtDbClient::VrfNotify(DBTablePartBase *part, DBEntryBase *e) {
 /////////////////////////////////////////////////////////////////////////////
 void FlowMgmtDbClient::TraceMsg(AgentRoute *entry, const AgentPath *path,
                          const SecurityGroupList &sg_list, bool deleted) {
+    std::vector<std::string> vn_list;
+    if (path) {
+        path->GetDestinationVnList(&vn_list);
+    }
     InetUnicastRouteEntry *inet = dynamic_cast<InetUnicastRouteEntry *>(entry);
     if (inet) {
         FLOW_TRACE(RouteUpdate,
                    inet->vrf()->GetName(),
                    inet->addr().to_string(),
                    inet->plen(),
-                   path ? path->dest_vn_name() : "",
+                   vn_list,
                    inet->IsDeleted(),
                    deleted,
                    sg_list.size(),
@@ -403,7 +409,7 @@ void FlowMgmtDbClient::TraceMsg(AgentRoute *entry, const AgentPath *path,
                    bridge->vrf()->GetName(),
                    bridge->mac().ToString(),
                    bridge->plen(),
-                   path ? path->dest_vn_name() : "",
+                   vn_list,
                    bridge->IsDeleted(),
                    deleted,
                    sg_list.size(),
@@ -521,6 +527,11 @@ void FlowMgmtDbClient::RouteNotify(VrfFlowHandlerState *vrf_state,
         return;
     }
 
+    if (vrf_state->deleted_) {
+        // ignore route add/change for delete notified VRF.
+        return;
+    }
+
     if (route->is_multicast()) {
         return;
     }
@@ -566,6 +577,11 @@ void FlowMgmtDbClient::RouteNotify(VrfFlowHandlerState *vrf_state,
         if (new_route == false) {
             AddEvent(route, state);
         }
+    }
+
+    if (state->ecmp_load_balance_ != path->ecmp_load_balance()) {
+        state->ecmp_load_balance_ = path->ecmp_load_balance();
+        changed = true;
     }
 
     if (changed == true && new_route == false) {

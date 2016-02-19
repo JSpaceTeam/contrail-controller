@@ -13,6 +13,10 @@ FACTORY_STATIC_REGISTER(BgpObjectFactory, EvpnManager, EvpnManager);
 #include "bgp/bgp_export.h"
 FACTORY_STATIC_REGISTER(BgpObjectFactory, BgpExport, BgpExport);
 
+#include "bgp/bgp_lifetime.h"
+FACTORY_STATIC_REGISTER(BgpObjectFactory, BgpLifetimeManager,
+    BgpLifetimeManager);
+
 #include "bgp/bgp_peer.h"
 FACTORY_STATIC_REGISTER(BgpObjectFactory, BgpPeer, BgpPeer);
 
@@ -29,6 +33,7 @@ FACTORY_STATIC_REGISTER(BgpObjectFactory, RibOutUpdates, RibOutUpdates);
 #include "bgp/routing-instance/peer_manager.h"
 FACTORY_STATIC_REGISTER(BgpObjectFactory, PeerManager, PeerManager);
 
+#include "bgp/routing-instance/routing_instance.h"
 FACTORY_STATIC_REGISTER(BgpObjectFactory, RoutingInstance, RoutingInstance);
 FACTORY_STATIC_REGISTER(BgpObjectFactory, RoutingInstanceMgr,
     RoutingInstanceMgr);
@@ -53,7 +58,7 @@ FACTORY_STATIC_REGISTER(BgpObjectFactory, McastTreeManager, McastTreeManager);
 #include "bgp/bgp_message_builder.h"
 FACTORY_STATIC_REGISTER(BgpObjectFactory, BgpMessageBuilder, BgpMessageBuilder);
 
-#include "bgp/routing-instance/route_aggregate.h"
+#include "bgp/routing-instance/route_aggregator.h"
 FACTORY_PARAM_STATIC_REGISTER(BgpObjectFactory, IRouteAggregator,
     Address::INET, RouteAggregatorInet);
 FACTORY_PARAM_STATIC_REGISTER(BgpObjectFactory, IRouteAggregator,

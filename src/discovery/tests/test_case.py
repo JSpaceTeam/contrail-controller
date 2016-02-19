@@ -34,12 +34,11 @@ class DsTestCase(test_common.TestCase):
             (novaclient.client, 'Client',FakeNovaClient.initialize),
 
             (ifmap_client.client, '__init__', FakeIfmapClient.initialize),
-            (ifmap_client.client, 'call', FakeIfmapClient.call),
             (ifmap_client.client, 'call_async_result', FakeIfmapClient.call_async_result),
+            (ifmap_client.client, 'call', FakeIfmapClient.call),
 
             (pycassa.system_manager.Connection, '__init__',stub),
-            (pycassa.system_manager.SystemManager, 'create_keyspace',stub),
-            (pycassa.system_manager.SystemManager, 'create_column_family',stub),
+            (pycassa.system_manager.SystemManager, '__new__',FakeSystemManager),
             (pycassa.ConnectionPool, '__init__',stub),
             (pycassa.ColumnFamily, '__new__',FakeCF),
             (pycassa.util, 'convert_uuid_to_time',Fake_uuid_to_time),
@@ -58,11 +57,17 @@ class DsTestCase(test_common.TestCase):
         ]
 
     def setUp(self, extra_disc_server_config_knobs = None):
+        extra_api_server_config_knobs = [
+            ('DEFAULTS', 'disc_server_dsa_api', '/api/dsa'),
+            ('DEFAULTS', 'log_level', 'SYS_DEBUG'),
+        ]
+        super(DsTestCase, self).setUp(extra_config_knobs = extra_api_server_config_knobs)
+
         self._disc_server_ip = socket.gethostbyname(socket.gethostname())
         self._disc_server_port = get_free_port()
         http_server_port = get_free_port()
         if extra_disc_server_config_knobs:
-            self._disc_server_config_knobs.extend(extra_config_knobs)
+            self._disc_server_config_knobs.extend(extra_disc_server_config_knobs)
 
         test_common.setup_mocks(self.mocks)
 
@@ -76,13 +81,6 @@ class DsTestCase(test_common.TestCase):
         self._disc_server_session.mount("http://", adapter)
         self._disc_server_session.mount("https://", adapter)
 
-        extra_api_server_config_knobs = [
-            ('DEFAULTS', 'disc_server_ip', self._disc_server_ip),
-            ('DEFAULTS', 'disc_server_port', self._disc_server_port),
-            ('DEFAULTS', 'disc_server_dsa_api', '/api/dsa'),
-            ('DEFAULTS', 'log_level', 'SYS_DEBUG'),
-        ]
-        super(DsTestCase, self).setUp(extra_config_knobs = extra_api_server_config_knobs)
 
     def tearDown(self):
         test_common.kill_disc_server(self._disc_server_greenlet)

@@ -28,6 +28,8 @@
 #include <oper/operdb_init.h>
 #include <oper/config_manager.h>
 #include <oper/interface_common.h>
+#include <oper/health_check.h>
+#include <oper/metadata_ip.h>
 #include <oper/multicast.h>
 #include <oper/nexthop.h>
 #include <oper/mirror_table.h>
@@ -39,6 +41,7 @@
 #include <cmn/agent_factory.h>
 
 const std::string Agent::null_string_ = "";
+const std::set<std::string> Agent::null_string_list_;
 const std::string Agent::fabric_vn_name_ =
     "default-domain:default-project:ip-fabric";
 std::string Agent::fabric_vrf_name_ =
@@ -56,6 +59,23 @@ const std::string Agent::xmpp_control_node_connection_name_prefix_ = "control-no
 
 SandeshTraceBufferPtr TaskTraceBuf(SandeshTraceBufferCreate("TaskTrace", 5000));
 Agent *Agent::singleton_;
+
+IpAddress Agent::GetMirrorSourceIp(const IpAddress &dest) {
+    IpAddress sip;
+    if (dest.is_v4()) {
+        if (router_id() == dest) {
+            // If source IP and dest IP are same,
+            // linux kernel will drop the packet.
+            // Hence we will use link local IP address as sip.
+            sip = Ip4Address(METADATA_IP_ADDR);
+        } else {
+            sip = router_id();
+        }
+    } else if (dest.is_v6()) {
+        sip = Ip6Address::v4_mapped(router_id());
+    }
+    return sip;
+}
 
 const string &Agent::GetHostInterfaceName() const {
     // There is single host interface.  Its addressed by type and not name
@@ -115,18 +135,22 @@ void Agent::SetAgentTaskPolicy() {
         "Agent::Uve",
         "Agent::KSync",
         "Agent::PktFlowResponder",
+        kTaskHealthCheck,
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne("db::DBTable", db_exclude_list, 
                      sizeof(db_exclude_list) / sizeof(char *));
 
     const char *flow_table_exclude_list[] = {
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne(kTaskFlowEvent, flow_table_exclude_list,
                      sizeof(flow_table_exclude_list) / sizeof(char *));
 
     const char *flow_exclude_list[] = {
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne(kTaskFlowUpdate, flow_exclude_list, 
@@ -138,6 +162,7 @@ void Agent::SetAgentTaskPolicy() {
         "Agent::StatsCollector",
         "io::ReaderTask",
         "Agent::PktFlowResponder",
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne("sandesh::RecvQueue", sandesh_exclude_list, 
@@ -153,6 +178,7 @@ void Agent::SetAgentTaskPolicy() {
         "db::DBTable",
         "xmpp::StateMachine",
         "bgp::ShowCommand",
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne("bgp::Config", xmpp_config_exclude_list, 
@@ -161,6 +187,7 @@ void Agent::SetAgentTaskPolicy() {
     const char *controller_xmpp_exclude_list[] = {
         "io::ReaderTask",
         "db::DBTable",
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne("Agent::ControllerXmpp", controller_xmpp_exclude_list,
@@ -169,17 +196,27 @@ void Agent::SetAgentTaskPolicy() {
     const char *walk_cancel_exclude_list[] = {
         "Agent::ControllerXmpp",
         "db::DBTable",
+        // For ToR Agent Agent::KSync and Agent::RouteWalker both task tries
+        // to modify route path list inline (out of DB table context) to
+        // manage route exports from dynamic peer before release the peer
+        // which is resulting in parallel access, for now we will avoid this
+        // race by adding task exclusion policy.
+        // TODO(prabhjot): need to remove this task exclusion one dynamic peer
+        // handling is done.
+        "Agent::KSync",
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne("Agent::RouteWalker", walk_cancel_exclude_list,
                      sizeof(walk_cancel_exclude_list) / sizeof(char *));
 
     const char *ksync_exclude_list[] = {
+        kTaskFlowEvent,
+        kTaskFlowUpdate,
         "Agent::StatsCollector",
         "db::DBTable",
         "Agent::PktFlowResponder",
-        kTaskFlowEvent,
-        kTaskFlowUpdate,
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne("Agent::KSync", ksync_exclude_list, 
@@ -187,6 +224,7 @@ void Agent::SetAgentTaskPolicy() {
 
     const char *stats_collector_exclude_list[] = {
         "Agent::PktFlowResponder",
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne("Agent::StatsCollector", stats_collector_exclude_list,
@@ -202,15 +240,16 @@ void Agent::SetAgentTaskPolicy() {
     const char *agent_init_exclude_list[] = {
         "xmpp::StateMachine",
         "http client",
-        "db::DBTable"
+        "db::DBTable",
+        AGENT_SHUTDOWN_TASKNAME
     };
     SetTaskPolicyOne(AGENT_INIT_TASKNAME, agent_init_exclude_list,
                      sizeof(agent_init_exclude_list) / sizeof(char *));
 
     const char *flow_stats_manager_exclude_list[] = {
-        "Agent::FlowTable",
-        "Agent::FlowHandler",
         "Agent::StatsCollector",
+        "Flow::Management",
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne(AGENT_FLOW_STATS_MANAGER_TASK,
@@ -298,6 +337,7 @@ void Agent::CopyConfig(AgentParam *params) {
     tsn_enabled_ = params_->isTsnAgent();
     tor_agent_enabled_ = params_->isTorAgent();
     flow_thread_count_ = params_->flow_thread_count();
+    tbb_keepawake_timeout_ = params_->tbb_keepawake_timeout();
 }
 
 DiscoveryAgentClient *Agent::discovery_client() const {
@@ -347,6 +387,30 @@ void Agent::InitCollector() {
                 NULL);
     }
 
+}
+
+bool Agent::TbbKeepAwake() {
+    tbb_awake_count_++;
+    return true;
+}
+
+void Agent::InitDone() {
+    // Its observed that sometimes TBB doesnt scheduler misses spawn events
+    // and doesnt schedule a task till its triggered again. As a work around
+    // start a dummy timer that fires and awake TBB periodically
+    if (tbb_keepawake_timeout_) {
+        uint32_t task_id = task_scheduler_->GetTaskId("Agent::TbbKeepAwake");
+        tbb_awake_timer_ = TimerManager::CreateTimer(*event_mgr_->io_service(),
+                                                     "TBB Keep Awake",
+                                                     task_id, 0);
+        tbb_awake_timer_->Start(tbb_keepawake_timeout_,
+                                boost::bind(&Agent::TbbKeepAwake, this));
+    }
+}
+
+void Agent::Shutdown() {
+    if (tbb_awake_timer_)
+        TimerManager::DeleteTimer(tbb_awake_timer_);
 }
 
 static bool interface_exist(string &name) {
@@ -422,41 +486,51 @@ Agent::Agent() :
     stats_collector_(NULL), flow_stats_manager_(NULL), pkt_(NULL),
     services_(NULL), vgw_(NULL), rest_server_(NULL), oper_db_(NULL),
     diag_table_(NULL), controller_(NULL), event_mgr_(NULL),
-    ifmap_channel_(), xmpp_client_(), xmpp_init_(),
+    agent_xmpp_channel_(), ifmap_channel_(), xmpp_client_(), xmpp_init_(),
     dns_xmpp_channel_(), dns_xmpp_client_(), dns_xmpp_init_(),
     agent_stale_cleaner_(NULL), cn_mcast_builder_(NULL), ds_client_(NULL),
-    host_name_(""), agent_name_(""), prog_name_(""), introspect_port_(0),
-    instance_id_(g_vns_constants.INSTANCE_ID_DEFAULT),
-    module_type_(Module::VROUTER_AGENT), db_(NULL),
-    task_scheduler_(NULL), agent_init_(NULL), fabric_vrf_(NULL),
-    intf_table_(NULL),
-    nh_table_(NULL), uc_rt_table_(NULL), mc_rt_table_(NULL), vrf_table_(NULL),
+    metadata_server_port_(0), host_name_(""), agent_name_(""), prog_name_(""),
+    introspect_port_(0), instance_id_(g_vns_constants.INSTANCE_ID_DEFAULT),
+    module_type_(Module::VROUTER_AGENT), module_name_(), send_ratelimit_(0),
+    db_(NULL), task_scheduler_(NULL), agent_init_(NULL), fabric_vrf_(NULL),
+    intf_table_(NULL), health_check_table_(NULL), metadata_ip_allocator_(NULL),
+    nh_table_(NULL), uc_rt_table_(NULL), mc_rt_table_(NULL),
+    evpn_rt_table_(NULL), l2_rt_table_(NULL), vrf_table_(NULL),
     vm_table_(NULL), vn_table_(NULL), sg_table_(NULL), mpls_table_(NULL),
     acl_table_(NULL), mirror_table_(NULL), vrf_assign_table_(NULL),
+    vxlan_table_(NULL), service_instance_table_(NULL),
+    loadbalancer_table_(NULL), loadbalancer_pool_table_(NULL),
     physical_device_table_(NULL), physical_device_vn_table_(NULL),
-    mirror_cfg_table_(NULL), intf_mirror_cfg_table_(NULL),
+    config_manager_(), mirror_cfg_table_(NULL), intf_mirror_cfg_table_(NULL),
     intf_cfg_table_(NULL), router_id_(0), prefix_len_(0), 
     gateway_id_(0), compute_node_ip_(0), xs_cfg_addr_(""), xs_idx_(0),
     xs_addr_(), xs_port_(),
-    xs_stime_(), xs_dns_idx_(0), dns_addr_(), dns_port_(),
-    dss_addr_(""), dss_port_(0), dss_xs_instances_(0),
-    discovery_client_name_(),
+    xs_stime_(), xs_auth_enable_(false), xs_dns_idx_(0), dns_addr_(),
+    dns_port_(), dns_auth_enable_(false), dss_addr_(""), dss_port_(0),
+    dss_xs_instances_(0), discovery_client_name_(),
     ip_fabric_intf_name_(""), vhost_interface_name_(""),
     pkt_interface_name_("pkt0"), arp_proto_(NULL),
     dhcp_proto_(NULL), dns_proto_(NULL), icmp_proto_(NULL),
     dhcpv6_proto_(NULL), icmpv6_proto_(NULL), flow_proto_(NULL),
     local_peer_(NULL), local_vm_peer_(NULL), linklocal_peer_(NULL),
-    vgw_peer_(NULL), ifmap_parser_(NULL), router_id_configured_(false),
-    mirror_src_udp_port_(0), lifetime_manager_(NULL), 
-    ksync_sync_mode_(false), mgmt_ip_(""),
+    ecmp_peer_(NULL), vgw_peer_(NULL), evpn_peer_(NULL), multicast_peer_(NULL),
+    multicast_tor_peer_(NULL), multicast_tree_builder_peer_(NULL),
+    mac_vm_binding_peer_(NULL), ifmap_parser_(NULL),
+    router_id_configured_(false), mirror_src_udp_port_(0),
+    lifetime_manager_(NULL), ksync_sync_mode_(false), mgmt_ip_(""),
     vxlan_network_identifier_mode_(AUTOMATIC), headless_agent_mode_(false), 
     vhost_interface_(NULL),
     connection_state_(NULL), debug_(false), test_mode_(false),
     init_done_(false), simulate_evpn_tor_(false), tsn_enabled_(false),
     tor_agent_enabled_(false),
-    flow_table_size_(0), flow_thread_count_(0),
+    flow_table_size_(0), flow_thread_count_(0), max_vm_flows_(0),
     ovsdb_client_(NULL), vrouter_server_ip_(0),
-    vrouter_server_port_(0), flow_stats_req_handler_(NULL) {
+    vrouter_server_port_(0), vrouter_max_labels_(0), vrouter_max_nexthops_(0),
+    vrouter_max_interfaces_(0), vrouter_max_vrfs_(0),
+    vrouter_max_mirror_entries_(0), vrouter_max_bridge_entries_(0),
+    vrouter_max_oflow_bridge_entries_(0), flow_stats_req_handler_(NULL),
+    tbb_keepawake_timeout_(kDefaultTbbKeepawakeTimeout), tbb_awake_timer_(NULL),
+    tbb_awake_count_(0) {
 
     assert(singleton_ == NULL);
     singleton_ = this;
@@ -557,6 +631,22 @@ FlowStatsManager *Agent::flow_stats_manager() const {
 
 void Agent::set_flow_stats_manager(FlowStatsManager *aging_module) {
     flow_stats_manager_ = aging_module;
+}
+
+HealthCheckTable *Agent::health_check_table() const {
+    return health_check_table_;
+}
+
+void Agent::set_health_check_table(HealthCheckTable *table) {
+    health_check_table_ = table;
+}
+
+MetaDataIpAllocator *Agent::metadata_ip_allocator() const {
+    return metadata_ip_allocator_.get();
+}
+
+void Agent::set_metadata_ip_allocator(MetaDataIpAllocator *allocator) {
+    metadata_ip_allocator_.reset(allocator);
 }
 
 PktModule *Agent::pkt() const {

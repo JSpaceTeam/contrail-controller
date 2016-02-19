@@ -32,6 +32,7 @@
 #include "viz_message.h"
 #include "uflow_types.h"
 #include "viz_constants.h"
+#include <database/cassandra/cql/cql_types.h>
 
 class DbHandler {
 public:
@@ -140,12 +141,12 @@ public:
         GenDb::DbErrors *dbe, std::vector<GenDb::DbTableInfo> *vstats_dbti);
     void GetSandeshStats(std::string *drop_level,
         std::vector<SandeshStats> *vdropmstats) const;
-
+    bool GetCqlMetrics(cass::cql::Metrics *metrics) const;
+    bool GetCqlStats(cass::cql::DbStats *stats) const;
     void SetDbQueueWaterMarkInfo(Sandesh::QueueWaterMarkInfo &wm,
         boost::function<void (void)> defer_undefer_cb);
     void ResetDbQueueWaterMarkInfo();
-    std::string GetHost() const;
-    int GetPort() const;
+    std::vector<boost::asio::ip::tcp::endpoint> GetEndpoints() const;
     std::string GetName() const;
     bool UseCql() const;
 
@@ -183,7 +184,7 @@ private:
     static tbb::mutex fmutex_;
     bool use_cql_;
     std::string tablespace_;
- 
+    UniformInt8RandomGenerator gen_partition_no_;
     DISALLOW_COPY_AND_ASSIGN(DbHandler);
 };
 
@@ -250,12 +251,12 @@ class DbHandlerInitializer {
  * pugi walker to process flow message
  */
 template <typename T>
-class FlowDataIpv4ObjectWalker : public pugi::xml_tree_walker {
+class FlowLogDataObjectWalker : public pugi::xml_tree_walker {
 public:
-    FlowDataIpv4ObjectWalker(T &values) :
+    FlowLogDataObjectWalker(T &values) :
         values_(values) {
     }
-    ~FlowDataIpv4ObjectWalker() {}
+    ~FlowLogDataObjectWalker() {}
 
     // Callback that is called when traversal begins
     virtual bool begin(pugi::xml_node& node) {

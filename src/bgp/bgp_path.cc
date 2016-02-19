@@ -5,30 +5,14 @@
 #include "bgp/bgp_path.h"
 
 #include "bgp/bgp_route.h"
+#include "bgp/bgp_peer.h"
 
-std::string BgpPath::PathIdString(uint32_t path_id) {
+using std::string;
+using std::vector;
+
+string BgpPath::PathIdString(uint32_t path_id) {
     Ip4Address addr(path_id);
     return addr.to_string();
-}
-
-std::string BgpPath::PathSourceString(PathSource source) {
-    switch (source) {
-        case None:
-            return "None";
-        case ResolvedRoute:
-            return "ResolvedRoute";
-        case BGP_XMPP:
-            return "BGP_XMPP";
-        case StaticRoute:
-            return "StaticRoute";
-        case ServiceChain:
-            return "ServiceChain";
-        case Local:
-            return "Local";
-        default:
-            break;
-    }
-    return "Other";
 }
 
 BgpPath::BgpPath(const IPeer *peer, uint32_t path_id, PathSource src,
@@ -119,6 +103,8 @@ int BgpPath::PathCompare(const BgpPath &rhs, bool allow_ecmp) const {
     uint32_t rid = rorig_id ? rorig_id : rhs.peer_->bgp_identifier();
     KEY_COMPARE(id, rid);
 
+    KEY_COMPARE(attr_->cluster_list_length(), rattr->cluster_list_length());
+
     const BgpPeer *lpeer = dynamic_cast<const BgpPeer *>(peer_);
     const BgpPeer *rpeer = dynamic_cast<const BgpPeer *>(rhs.peer_);
     if (lpeer != NULL && rpeer != NULL) {
@@ -126,6 +112,19 @@ int BgpPath::PathCompare(const BgpPath &rhs, bool allow_ecmp) const {
     }
 
     return 0;
+}
+
+void BgpPath::UpdatePeerRefCount(int count) const {
+    if (!peer_)
+        return;
+    peer_->UpdateRefCount(count);
+    if (source_ != BGP_XMPP || IsReplicated())
+        return;
+    peer_->UpdatePrimaryPathCount(count);
+}
+
+string BgpPath::ToString() const {
+    return peer_ ? peer_->ToString() : "Nil";
 }
 
 RouteDistinguisher BgpPath::GetSourceRouteDistinguisher() const {
@@ -136,6 +135,58 @@ RouteDistinguisher BgpPath::GetSourceRouteDistinguisher() const {
 
     const BgpSecondaryPath *path = static_cast<const BgpSecondaryPath *>(this);
     return path->GetPrimaryRouteDistinguisher();
+}
+
+vector<string> BgpPath::GetFlagsStringList() const {
+    vector<string> flag_names;
+    if (flags_ == 0) {
+        flag_names.push_back("None");
+    } else {
+        if (flags_ & AsPathLooped)
+            flag_names.push_back("AsPathLooped");
+        if (flags_ & NoNeighborAs)
+            flag_names.push_back("NoNeighborAs");
+        if (flags_ & Stale)
+            flag_names.push_back("Stale");
+        if (flags_ & NoTunnelEncap)
+            flag_names.push_back("NoTunnelEncap");
+        if (flags_ & OriginatorIdLooped)
+            flag_names.push_back("OriginatorIdLooped");
+        if (flags_ & ResolveNexthop)
+            flag_names.push_back("ResolveNexthop");
+        if (flags_ & ResolvedPath)
+            flag_names.push_back("ResolvedPath");
+        if (flags_ & RoutingPolicyReject)
+            flag_names.push_back("RoutingPolicyReject");
+    }
+    return flag_names;
+}
+
+string BgpPath::GetSourceString(bool combine_bgp_and_xmpp) const {
+    switch (source_) {
+    case None:
+        return "None";
+    case BGP_XMPP:
+        if (combine_bgp_and_xmpp) {
+            return "BGP_XMPP";
+        } else if (peer_) {
+            return(peer_->IsXmppPeer() ? "XMPP" : "BGP");
+        } else {
+            return "None";
+        }
+        break;
+    case ServiceChain:
+        return "ServiceChain";
+    case StaticRoute:
+        return "StaticRoute";
+    case Aggregate:
+        return "Aggregate";
+    case Local:
+        return "Local";
+    default:
+        break;
+    }
+    return "None";
 }
 
 BgpSecondaryPath::BgpSecondaryPath(const IPeer *peer, uint32_t path_id,

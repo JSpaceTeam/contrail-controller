@@ -6,6 +6,7 @@
 #include <fstream>
 
 #include "bgp/bgp_log.h"
+#include "bgp/bgp_server.h"
 #include "bgp/bgp_xmpp_channel.h"
 #include "xml/xml_pugi.h"
 #include "testing/gunit.h"
@@ -73,6 +74,9 @@ public:
     }
     virtual string LastFlap() const {
         return "";
+    }
+    virtual void RegisterRxMessageTraceCallback(RxMessageTraceCb cb) {
+        return;
     }
 };
 

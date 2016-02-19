@@ -10,6 +10,7 @@
 
 #include "bgp/routing-instance/istatic_route_mgr.h"
 
+#include "base/queue_task.h"
 #include "bgp/bgp_condition_listener.h"
 #include "bgp/inet/inet_route.h"
 #include "bgp/inet6/inet6_route.h"
@@ -83,6 +84,7 @@ public:
     const StaticRouteMap &static_route_map() const { return static_route_map_; }
 
     virtual void NotifyAllRoutes();
+    virtual void UpdateAllRoutes();
     virtual uint32_t GetRouteCount() const;
     virtual uint32_t GetDownRouteCount() const;
     virtual bool FillStaticRouteInfo(RoutingInstance *rtinstance,
@@ -103,6 +105,9 @@ private:
     void StopStaticRouteDone(BgpTable *table, ConditionMatch *info);
     bool ResolvePendingStaticRouteConfig();
     bool StaticRouteEventCallback(StaticRouteRequest *req);
+
+    virtual void DisableResolveTrigger();
+    virtual void EnableResolveTrigger();
 
     virtual void DisableQueue() { static_route_queue_->set_disable(true); }
     virtual void EnableQueue() { static_route_queue_->set_disable(false); }

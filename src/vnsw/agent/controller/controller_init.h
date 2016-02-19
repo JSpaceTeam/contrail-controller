@@ -77,6 +77,7 @@ public:
 
 class VNController {
 public:
+    typedef boost::function<void(uint8_t)> XmppChannelDownCb;
     typedef boost::shared_ptr<ControllerXmppData> ControllerXmppDataType;
     typedef boost::shared_ptr<ControllerDeletePeerData> ControllerDeletePeerDataType;
     typedef boost::shared_ptr<ControllerWorkQueueData> ControllerWorkQueueDataType;
@@ -154,7 +155,7 @@ public:
     bool XmppMessageProcess(ControllerXmppDataType data);
     Agent *agent() {return agent_;}
     void Enqueue(ControllerWorkQueueDataType data);
-    void DeleteAgentXmppChannel(AgentXmppChannel *ch);
+    void DeleteAgentXmppChannel(uint8_t idx);
     void SetAgentMcastLabelRange(uint8_t idx);
     void FillMcastLabelRange(uint32_t *star_idx,
                              uint32_t *end_idx,
@@ -162,6 +163,14 @@ public:
     const FabricMulticastLabelRange &fabric_multicast_label_range(uint8_t idx) const {
         return fabric_multicast_label_range_[idx];
     }
+    void RegisterControllerChangeCallback(XmppChannelDownCb xmpp_channel_down_cb) {
+        xmpp_channel_down_cb_ = xmpp_channel_down_cb;
+    }
+    bool XmppMessageTrace(uint8_t peer_index,
+                          const std::string &to_address,
+                          int port, int size,
+                          const std::string &msg,
+                          const XmppStanza::XmppMessage *xmpp_msg);
 
 private:
     AgentXmppChannel *FindAgentXmppChannel(const std::string &server_ip);
@@ -181,16 +190,54 @@ private:
     ConfigCleanupTimer config_cleanup_timer_;
     WorkQueue<ControllerWorkQueueDataType> work_queue_;
     FabricMulticastLabelRange fabric_multicast_label_range_[MAX_XMPP_SERVERS];
+    XmppChannelDownCb xmpp_channel_down_cb_;
 };
 
 extern SandeshTraceBufferPtr ControllerInfoTraceBuf;
+extern SandeshTraceBufferPtr ControllerTxConfigTraceBuf1;
+extern SandeshTraceBufferPtr ControllerTxConfigTraceBuf2;
 extern SandeshTraceBufferPtr ControllerDiscoveryTraceBuf;
 extern SandeshTraceBufferPtr ControllerRouteWalkerTraceBuf;
 extern SandeshTraceBufferPtr ControllerTraceBuf;
+extern SandeshTraceBufferPtr ControllerRxRouteMessageTraceBuf1;
+extern SandeshTraceBufferPtr ControllerRxConfigMessageTraceBuf1;
+extern SandeshTraceBufferPtr ControllerRxRouteMessageTraceBuf2;
+extern SandeshTraceBufferPtr ControllerRxConfigMessageTraceBuf2;
+
+#define CONTROLLER_RX_ROUTE_MESSAGE_TRACE(obj, index, ...)\
+do {\
+    if (index == 0) { \
+        AgentXmpp##obj::TraceMsg(ControllerRxRouteMessageTraceBuf1, __FILE__, \
+                                 __LINE__, __VA_ARGS__);\
+    } else { \
+        AgentXmpp##obj::TraceMsg(ControllerRxRouteMessageTraceBuf2, __FILE__, \
+                                 __LINE__, __VA_ARGS__);\
+    } \
+} while(0);\
+
+#define CONTROLLER_RX_CONFIG_MESSAGE_TRACE(obj, index, ...)\
+do {\
+    if (index == 0) { \
+        AgentXmpp##obj::TraceMsg(ControllerRxConfigMessageTraceBuf1, __FILE__, \
+                                 __LINE__, __VA_ARGS__);\
+    } else { \
+        AgentXmpp##obj::TraceMsg(ControllerRxConfigMessageTraceBuf2, __FILE__, \
+                                 __LINE__, __VA_ARGS__);\
+    } \
+} while(0);\
 
 #define CONTROLLER_INFO_TRACE(obj, ...)\
 do {\
     AgentXmpp##obj::TraceMsg(ControllerInfoTraceBuf, __FILE__, __LINE__, __VA_ARGS__);\
+} while(0);\
+
+#define CONTROLLER_TX_CONFIG_TRACE(obj, index, ...)\
+do {\
+    if (index == 0) { \
+        AgentXmpp##obj::TraceMsg(ControllerTxConfigTraceBuf1, __FILE__, __LINE__, __VA_ARGS__);\
+    } else { \
+        AgentXmpp##obj::TraceMsg(ControllerTxConfigTraceBuf2, __FILE__, __LINE__, __VA_ARGS__);\
+    } \
 } while(0);\
 
 #define CONTROLLER_ROUTE_WALKER_TRACE(obj, ...)\

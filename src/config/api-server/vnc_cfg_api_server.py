@@ -9,8 +9,8 @@ between http/rest, address management, authentication and database interfaces.
 from gevent import monkey
 monkey.patch_all()
 from gevent import hub
-import pdb
 # from neutron plugin to api server, the request URL could be large. fix the const
+# fix the const
 import gevent.pywsgi
 gevent.pywsgi.MAX_REQUEST_LINE = 65535
 
@@ -18,7 +18,6 @@ import sys
 reload(sys)
 sys.setdefaultencoding('UTF8')
 import functools
-import re
 import logging
 import logging.config
 import signal
@@ -27,10 +26,7 @@ import socket
 from cfgm_common import jsonutils as json
 import uuid
 import copy
-import argparse
-import ConfigParser
 from pprint import pformat
-import cgitb
 from cStringIO import StringIO
 from lxml import etree
 from oslo_config import cfg
@@ -72,7 +68,7 @@ from cfgm_common import ignore_exceptions, imid
 from cfgm_common.uve.vnc_api.ttypes import VncApiCommon, VncApiConfigLog,\
     VncApiError
 from cfgm_common import illegal_xml_chars_RE
-from sandesh_common.vns.ttypes import Module, NodeType
+from sandesh_common.vns.ttypes import Module
 from sandesh_common.vns.constants import ModuleNames, Module2NodeType,\
     NodeTypeNames, INSTANCE_ID_DEFAULT, API_SERVER_DISCOVERY_SERVICE_NAME,\
     IFMAP_SERVER_DISCOVERY_SERVICE_NAME
@@ -84,9 +80,10 @@ from gen.resource_common import *
 from gen.resource_server import *
 import gen.vnc_api_server_gen
 import cfgm_common
+from cfgm_common.utils import cgitb_hook
 from cfgm_common.rest import LinkObject, hdr_server_tenant
 from cfgm_common.exceptions import *
-from cfgm_common.vnc_extensions import ExtensionManager, ApiHookManager
+from cfgm_common.vnc_extensions import ExtensionManager
 import gen.resource_xsd
 import vnc_addr_mgmt
 import vnc_auth
@@ -99,12 +96,13 @@ from cfgm_common.vnc_api_stats import log_api_stats
 from pysandesh.sandesh_base import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 import discoveryclient.client as client
-#from gen_py.vnc_api.ttypes import *
+# from gen_py.vnc_api.ttypes import *
 import netifaces
 from pysandesh.connection_info import ConnectionState
 from cfgm_common.uve.cfgm_cpuinfo.ttypes import NodeStatusUVE, \
     NodeStatus
 
+from sandesh.discovery_client_stats import ttypes as sandesh
 from sandesh.traces.ttypes import RestApiTrace
 from vnc_bottle import get_bottle_server
 from gen.vnc_api_server_gen import get_obj_type_to_db_type
@@ -113,12 +111,14 @@ _WEB_PORT = 8082
 _ADMIN_PORT = 8095
 
 _ACTION_RESOURCES = [
-    {'uri': '/prop-list-get', 'link_name': 'prop-list-get',
-     'method': 'GET', 'method_name': 'prop_list_http_get'},
-    {'uri': '/prop-list-update', 'link_name': 'prop-list-update',
-     'method': 'POST', 'method_name': 'prop_list_update_http_post'},
+    {'uri': '/prop-collection-get', 'link_name': 'prop-collection-get',
+     'method': 'GET', 'method_name': 'prop_collection_http_get'},
+    {'uri': '/prop-collection-update', 'link_name': 'prop-collection-update',
+     'method': 'POST', 'method_name': 'prop_collection_update_http_post'},
     {'uri': '/ref-update', 'link_name': 'ref-update',
      'method': 'POST', 'method_name': 'ref_update_http_post'},
+    {'uri': '/ref-relax-for-delete', 'link_name': 'ref-relax-for-delete',
+     'method': 'POST', 'method_name': 'ref_relax_for_delete_http_post'},
     {'uri': '/fqname-to-id', 'link_name': 'name-to-id',
      'method': 'POST', 'method_name': 'fq_name_to_id_http_post'},
     {'uri': '/id-to-fqname', 'link_name': 'id-to-name',
@@ -137,7 +137,9 @@ _ACTION_RESOURCES = [
     {'uri': '/stop-profile', 'link_name': 'stop-profile',
      'method': 'POST', 'method_name': 'stop_profile'},
     {'uri': '/list-bulk-collection', 'link_name': 'list-bulk-collection',
-     'method': 'POST', 'method_name': 'list_bulk_collection_http_post'}
+     'method': 'POST', 'method_name': 'list_bulk_collection_http_post'},
+    {'uri': '/obj-perms', 'link_name': 'obj-perms',
+     'method': 'GET', 'method_name': 'obj_perms_http_get'},
 ]
 
 
@@ -192,51 +194,6 @@ cfg.CONF.register_cli_opt(cfg.IntOpt(name='timeout', default=2, help="Default ti
                           group=elastic_search_group)
 
 
-# Masking of password from openstack/common/log.py
-_SANITIZE_KEYS = ['adminPass', 'admin_pass', 'password', 'admin_password']
-
-# NOTE(ldbragst): Let's build a list of regex objects using the list of
-# _SANITIZE_KEYS we already have. This way, we only have to add the new key
-# to the list of _SANITIZE_KEYS and we can generate regular expressions
-# for XML and JSON automatically.
-_SANITIZE_PATTERNS = []
-_FORMAT_PATTERNS = [r'(%(key)s\s*[=]\s*[\"\']).*?([\"\'])',
-                    r'(<%(key)s>).*?(</%(key)s>)',
-                    r'([\"\']%(key)s[\"\']\s*:\s*[\"\']).*?([\"\'])',
-                    r'([\'"].*?%(key)s[\'"]\s*:\s*u?[\'"]).*?([\'"])']
-
-for key in _SANITIZE_KEYS:
-    for pattern in _FORMAT_PATTERNS:
-        reg_ex = re.compile(pattern % {'key': key}, re.DOTALL)
-        _SANITIZE_PATTERNS.append(reg_ex)
-
-def mask_password(message, secret="***"):
-    """Replace password with 'secret' in message.
-    :param message: The string which includes security information.
-    :param secret: value with which to replace passwords.
-    :returns: The unicode value of message with the password fields masked.
-
-    For example:
-
-    >>> mask_password("'adminPass' : 'aaaaa'")
-    "'adminPass' : '***'"
-    >>> mask_password("'admin_pass' : 'aaaaa'")
-    "'admin_pass' : '***'"
-    >>> mask_password('"password" : "aaaaa"')
-    '"password" : "***"'
-    >>> mask_password("'original_password' : 'aaaaa'")
-    "'original_password' : '***'"
-    >>> mask_password("u'original_password' :   u'aaaaa'")
-    "u'original_password' :   u'***'"
-    """
-    if not any(key in message for key in _SANITIZE_KEYS):
-        return message
-
-    secret = r'\g<1>' + secret + r'\g<2>'
-    for pattern in _SANITIZE_PATTERNS:
-        message = re.sub(pattern, secret, message)
-    return message
-
 class VncApiServer(object):
     """
     This is the manager class co-ordinating all classes present in the package
@@ -273,9 +230,10 @@ class VncApiServer(object):
         for prop_name in resource_class.prop_fields:
             is_simple, prop_type = resource_class.prop_field_types[prop_name]
             is_list_prop = prop_name in resource_class.prop_list_fields
+            is_map_prop = prop_name in resource_class.prop_map_fields
 
             # TODO validate primitive types
-            if is_simple and (not is_list_prop):
+            if is_simple and (not is_list_prop) and (not is_map_prop):
                 continue
             prop_value = obj_dict.get(prop_name)
             if not prop_value:
@@ -302,7 +260,7 @@ class VncApiServer(object):
                                   %(prop_name, elem)
                         err_msg += str(e)
                         return False, err_msg
-            else: # complex-type and value isn't dict or wrapped in list
+            else: # complex-type + value isn't dict or wrapped in list or map
                 err_msg = 'Error in property %s type %s value of %s ' %(
                     prop_name, prop_cls, prop_value)
                 return False, err_msg
@@ -827,12 +785,14 @@ class VncApiServer(object):
                     id, None, obj_type, 'http_delete', err_msg)
                 raise cfgm_common.exceptions.HttpError(409, err_msg)
 
+        relaxed_refs = set(db_conn.dbe_get_relaxed_refs(id))
         for backref_field in r_class.backref_fields:
             _, _, is_derived = r_class.backref_field_types[backref_field]
             if is_derived:
                 continue
             exist_hrefs = [backref['href']
-                           for backref in read_result.get(backref_field, [])]
+                           for backref in read_result.get(backref_field, [])
+                               if backref['uuid'] not in relaxed_refs]
             if exist_hrefs:
                 err_msg = 'Delete when resource still referred: %s' %(
                     exist_hrefs)
@@ -853,6 +813,9 @@ class VncApiServer(object):
 
         def stateful_delete():
             get_context().set_state('PRE_DBE_DELETE')
+            (ok, del_result) = r_class.pre_dbe_delete(id, read_result, db_conn)
+            if not ok:
+                return (ok, del_result)
             # Delete default children first
             for child_field in r_class.children_fields:
                 child_type, is_derived = r_class.children_field_types[child_field]
@@ -863,9 +826,6 @@ class VncApiServer(object):
                     continue
                 self.delete_default_children(child_type, read_result)
 
-            (ok, del_result) = r_class.pre_dbe_delete(id, read_result, db_conn)
-            if not ok:
-                return (ok, del_result)
             callable = getattr(r_class, 'http_delete_fail', None)
             if callable:
                 cleanup_on_failure.append((callable, [id, read_result, db_conn]))
@@ -1339,6 +1299,7 @@ class VncApiServer(object):
         self.get_resource_class('logical-interface').generate_default_instance = False
         self.get_resource_class('api-access-list').generate_default_instance = False
         self.get_resource_class('dsa-rule').generate_default_instance = False
+        self.get_resource_class('bgp-as-a-service').generate_default_instance = False
 
         for act_res in _ACTION_RESOURCES:
             link = LinkObject('action', self._base_url, act_res['uri'],
@@ -1396,6 +1357,9 @@ class VncApiServer(object):
         if self._args.sandesh_send_rate_limit is not None:
             SandeshSystem.set_sandesh_send_rate_limit(
                 self._args.sandesh_send_rate_limit)
+        sandesh.DiscoveryClientStatsReq.handle_request = self.sandesh_disc_client_stats_handle_request
+        sandesh.DiscoveryClientSubscribeInfoReq.handle_request = self.sandesh_disc_client_subinfo_handle_request
+        sandesh.DiscoveryClientPublishInfoReq.handle_request = self.sandesh_disc_client_pubinfo_handle_request
         module = Module.API_SERVER
         module_name = ModuleNames[Module.API_SERVER]
         node_type = Module2NodeType[module]
@@ -1410,7 +1374,7 @@ class VncApiServer(object):
                                      self._args.collectors,
                                      'vnc_api_server_context',
                                      int(self._args.http_server_port),
-                                     ['cfgm_common'], self._disc,
+                                     ['cfgm_common', 'vnc_cfg_api_server.sandesh'], self._disc,
                                      logger_class=self._args.logger_class,
                                      logger_config_file=self._args.logging_conf)
         self._sandesh.trace_buffer_create(name="VncCfgTraceBuf", size=1000)
@@ -1481,6 +1445,66 @@ class VncApiServer(object):
         self._cpu_info = cpu_info
 
     # end __init__
+
+    def sandesh_disc_client_subinfo_handle_request(self, req):
+        stats = self._disc.get_stats()
+        resp = sandesh.DiscoveryClientSubscribeInfoResp(Subscribe=[])
+
+        for sub in stats['subs']:
+            info = sandesh.SubscribeInfo(service_type=sub['service_type'])
+            info.instances   = sub['instances']
+            info.ttl         = sub['ttl']
+            info.blob        = sub['blob']
+            resp.Subscribe.append(info)
+
+        resp.response(req.context())
+    # end
+
+    def sandesh_disc_client_pubinfo_handle_request(self, req):
+        stats = self._disc.get_stats()
+        resp = sandesh.DiscoveryClientPublishInfoResp(Publish=[])
+
+        for service_type, pub in stats['pubs'].items():
+            info = sandesh.PublishInfo(service_type=service_type)
+            info.blob        = pub['blob']
+            resp.Publish.append(info)
+
+        resp.response(req.context())
+    # end
+
+    # Return discovery client stats
+    def sandesh_disc_client_stats_handle_request(self, req):
+        stats = self._disc.get_stats()
+        resp = sandesh.DiscoveryClientStatsResp(Subscribe=[], Publish=[])
+
+        # pub stats
+        for service_type, pub in stats['pubs'].items():
+            pub_stats = sandesh.PublisherStats(service_type=service_type)
+            pub_stats.Request     = pub['request']
+            pub_stats.Response     = pub['response']
+            pub_stats.ConnError   = pub['conn_error']
+            pub_stats.Timeout   = pub['timeout']
+            pub_stats.unknown_exceptions = pub['exc_unknown']
+            pub_stats.exception_info    = pub['exc_info']
+            xxx = ['%s:%d' % (k[3:], v) for k, v in pub.items() if 'sc_' in k]
+            pub_stats.HttpError = ", ".join(xxx)
+            resp.Publish.append(pub_stats)
+
+        # sub stats
+        for sub in stats['subs']:
+            sub_stats = sandesh.SubscriberStats(service_type=sub['service_type'])
+            sub_stats.Request   = sub['request']
+            sub_stats.Response   = sub['response']
+            sub_stats.ConnError   = sub['conn_error']
+            sub_stats.Timeout   = sub['timeout']
+            sub_stats.unknown_exceptions = sub['exc_unknown']
+            sub_stats.exception_info    = sub['exc_info']
+            xxx = ['%s:%d' % (k[3:], v) for k, v in sub.items() if 'sc_' in k]
+            sub_stats.HttpError = ", ".join(xxx)
+            resp.Subscribe.append(sub_stats)
+
+        resp.response(req.context())
+    # end sandesh_disc_client_stats_handle_request
 
     def _extensions_transform_request(self, request):
         extensions = self._extension_mgrs.get('resourceApi')
@@ -1570,11 +1594,8 @@ class VncApiServer(object):
                     bottle.abort(e.status_code, e.content)
                 else:
                     string_buf = StringIO()
-                    cgitb.Hook(
-                        file=string_buf,
-                        format="text",
-                        ).handle(sys.exc_info())
-                    err_msg = mask_password(string_buf.getvalue())
+                    cgitb_hook(file=string_buf, format="text")
+                    err_msg = string_buf.getvalue()
                     self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
                     raise
 
@@ -1680,15 +1701,48 @@ class VncApiServer(object):
                 root=doc_root)
     # end documentation_http_get
 
-    def prop_list_http_get(self):
+    def obj_perms_http_get(self):
+        if 'token' not in get_request().query:
+            raise cfgm_common.exceptions.HttpError(
+                400, 'User token needed for validation')
         if 'uuid' not in get_request().query:
             raise cfgm_common.exceptions.HttpError(
-                400, 'Object uuid needed for property list get')
+                400, 'Object uuid needed for validation')
+        obj_uuid = get_request().query.uuid
+        user_token = get_request().query.token
+
+        result = {'permissions' : ''}
+
+        # get permissions in internal context
+        try:
+            orig_context = get_context()
+            orig_request = get_request()
+            b_req = bottle.BaseRequest(
+                {
+                 'HTTP_X_AUTH_TOKEN':  user_token,
+                 'REQUEST_METHOD'   : 'GET',
+                 'bottle.app': orig_request.environ['bottle.app'],
+                })
+            i_req = context.ApiInternalRequest(
+                b_req.url, b_req.urlparts, b_req.environ, b_req.headers, None, None)
+            set_context(context.ApiContext(internal_req=i_req))
+            if self._auth_svc.validate_user_token(get_request()):
+                result['permissions']= self._permissions.obj_perms(get_request(), obj_uuid)
+        finally:
+            set_context(orig_context)
+
+        return result
+    #end check_obj_perms_http_get
+
+    def prop_collection_http_get(self):
+        if 'uuid' not in get_request().query:
+            raise cfgm_common.exceptions.HttpError(
+                400, 'Object uuid needed for property collection get')
         obj_uuid = get_request().query.uuid
 
         if 'fields' not in get_request().query:
             raise cfgm_common.exceptions.HttpError(
-                400, 'Object fields needed for property list get')
+                400, 'Object fields needed for property collection get')
         obj_fields = get_request().query.fields.split(',')
 
         if 'position' in get_request().query:
@@ -1704,8 +1758,10 @@ class VncApiServer(object):
         resource_class = self.get_resource_class(obj_type)
 
         for obj_field in obj_fields:
-            if obj_field not in resource_class.prop_list_fields:
-                err_msg = 'Field %s is not a "ListProperty"' %(obj_field)
+            if ((obj_field not in resource_class.prop_list_fields) and
+                (obj_field not in resource_class.prop_map_fields)):
+                err_msg = '%s neither "ListProperty" nor "MapProperty"' %(
+                    obj_field)
                 raise cfgm_common.exceptions.HttpError(400, err_msg)
         # request validations over
 
@@ -1714,15 +1770,15 @@ class VncApiServer(object):
         if not ok:
             (code, msg) = result
             self.config_object_error(
-                obj_uuid, None, None, 'prop_list_http_get', msg)
+                obj_uuid, None, None, 'prop_collection_http_get', msg)
             raise cfgm_common.exceptions.HttpError(code, msg)
 
         try:
-            ok, result = self._db_conn.prop_list_get(
-                obj_uuid, obj_fields, fields_position)
+            ok, result = self._db_conn.prop_collection_get(
+                obj_type, obj_uuid, obj_fields, fields_position)
             if not ok:
                 self.config_object_error(
-                    obj_uuid, None, None, 'prop_list_http_get', result)
+                    obj_uuid, None, None, 'prop_collection_http_get', result)
         except NoIdError as e:
             # Not present in DB
             raise cfgm_common.exceptions.HttpError(404, str(e))
@@ -1733,23 +1789,24 @@ class VncApiServer(object):
         if (not result['id_perms'].get('user_visible', True) and
             not self.is_admin_request()):
             result = 'This object is not visible by users: %s' % id
-            self.config_object_error(id, None, None, 'prop_list_http_get', result)
+            self.config_object_error(
+                id, None, None, 'prop_collection_http_get', result)
             raise cfgm_common.exceptions.HttpError(404, result)
 
         # Prepare response
         del result['id_perms']
 
         return result
-    # end prop_list_http_get
+    # end prop_collection_http_get
 
-    def prop_list_update_http_post(self):
+    def prop_collection_update_http_post(self):
         self._post_common(get_request(), None, None)
 
         request_params = get_request().json
         # validate each requested operation
         obj_uuid = request_params.get('uuid')
         if not obj_uuid:
-            err_msg = 'Error: prop_list_update needs obj_uuid'
+            err_msg = 'Error: prop_collection_update needs obj_uuid'
             raise cfgm_common.exceptions.HttpError(400, err_msg)
 
         try:
@@ -1761,33 +1818,48 @@ class VncApiServer(object):
 
         for req_param in request_params.get('updates') or []:
             obj_field = req_param.get('field')
+            if obj_field in resource_class.prop_list_fields:
+                prop_coll_type = 'list'
+            elif obj_field in resource_class.prop_map_fields:
+                prop_coll_type = 'map'
+            else:
+                err_msg = '%s neither "ListProperty" nor "MapProperty"' %(
+                    obj_field)
+                raise cfgm_common.exceptions.HttpError(400, err_msg)
+
             req_oper = req_param.get('operation').lower()
             field_val = req_param.get('value')
             field_pos = str(req_param.get('position'))
-            if req_oper not in ('add', 'modify', 'delete'):
-                err_msg = 'Unsupported operation %s in request %s' %(
-                    req_oper, json.dumps(req_param))
-                raise cfgm_common.exceptions.HttpError(400, err_msg)
-            if ((req_oper == 'add') and
-                None in (obj_field, field_val)):
-                err_msg = 'Add needs field and value in request %s' %(
-                    req_oper, json.dumps(req_param))
-                raise cfgm_common.exceptions.HttpError(400, err_msg)
-            elif ((req_oper == 'modify') and
-                None in (obj_field, field_val, field_pos)):
-                err_msg = 'Modify needs field, value and position in request %s' %(
-                    req_oper, json.dumps(req_param))
-                raise cfgm_common.exceptions.HttpError(400, err_msg)
-            elif ((req_oper == 'delete') and
-                None in (obj_field, field_pos)):
-                err_msg = 'Delete needs field and position in request %s' %(
-                    req_oper, json.dumps(req_param))
-                raise cfgm_common.exceptions.HttpError(400, err_msg)
-
-            if obj_field not in resource_class.prop_list_fields:
-                err_msg = 'Field %s is not a "ListProperty": request %s' %(
-                    obj_field, json.dumps(req_param))
-                raise cfgm_common.exceptions.HttpError(400, err_msg)
+            if prop_coll_type == 'list':
+                if req_oper not in ('add', 'modify', 'delete'):
+                    err_msg = 'Unsupported operation %s in request %s' %(
+                        req_oper, json.dumps(req_param))
+                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                if ((req_oper == 'add') and field_val is None):
+                    err_msg = 'Add needs field value in request %s' %(
+                        req_oper, json.dumps(req_param))
+                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                elif ((req_oper == 'modify') and
+                    None in (field_val, field_pos)):
+                    err_msg = 'Modify needs field value and position in request %s' %(
+                        req_oper, json.dumps(req_param))
+                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                elif ((req_oper == 'delete') and field_pos is None):
+                    err_msg = 'Delete needs field position in request %s' %(
+                        req_oper, json.dumps(req_param))
+                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+            elif prop_coll_type == 'map':
+                if req_oper not in ('set', 'delete'):
+                    err_msg = 'Unsupported operation %s in request %s' %(
+                        req_oper, json.dumps(req_param))
+                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                if ((req_oper == 'set') and field_val is None):
+                    err_msg = 'Set needs field value in request %s' %(
+                        req_oper, json.dumps(req_param))
+                elif ((req_oper == 'delete') and field_pos is None):
+                    err_msg = 'Delete needs field position in request %s' %(
+                        req_oper, json.dumps(req_param))
+                    raise cfgm_common.exceptions.HttpError(400, err_msg)
 
         # Validations over. Invoke type specific hook and extension manager
         try:
@@ -1802,14 +1874,15 @@ class VncApiServer(object):
             read_result = cfgm_common.utils.detailed_traceback()
 
         if not read_ok:
-            self.config_object_error(obj_uuid, None, obj_type, 'prop_list_update', read_result)
+            self.config_object_error(
+                obj_uuid, None, obj_type, 'prop_collection_update', read_result)
             raise cfgm_common.exceptions.HttpError(500, read_result)
 
         # invoke the extension
         try:
             pre_func = 'pre_'+obj_type+'_update'
             self._extension_mgrs['resourceApi'].map_method(pre_func, obj_uuid, {},
-                prop_list_updates=request_params.get('updates'))
+                prop_collection_updates=request_params.get('updates'))
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
@@ -1824,33 +1897,36 @@ class VncApiServer(object):
         get_context().set_state('PRE_DBE_UPDATE')
         (ok, pre_update_result) = r_class.pre_dbe_update(
             obj_uuid, fq_name, {}, self._db_conn,
-            prop_list_updates=request_params.get('updates'))
+            prop_collection_updates=request_params.get('updates'))
         if not ok:
             (code, msg) = pre_update_result
-            self.config_object_error(obj_uuid, None, obj_type, 'prop_list_update', msg)
+            self.config_object_error(
+                obj_uuid, None, obj_type, 'prop_collection_update', msg)
             raise cfgm_common.exceptions.HttpError(code, msg)
 
         # the actual db update
         try:
             get_context().set_state('DBE_UPDATE')
-            ok, update_result = self._db_conn.prop_list_update(
+            ok, update_result = self._db_conn.prop_collection_update(
                 obj_type, obj_uuid, request_params.get('updates'))
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
                 404, 'uuid ' + obj_uuid + ' not found')
         if not ok:
             (code, msg) = update_result
-            self.config_object_error(obj_uuid, None, obj_type, 'prop_list_update', msg)
+            self.config_object_error(
+                obj_uuid, None, obj_type, 'prop_collection_update', msg)
             raise cfgm_common.exceptions.HttpError(code, msg)
 
         # type-specific hook
         get_context().set_state('POST_DBE_UPDATE')
         (ok, post_update_result) = r_class.post_dbe_update(
             obj_uuid, fq_name, {}, self._db_conn,
-            prop_list_updates=request_params.get('updates'))
+            prop_collection_updates=request_params.get('updates'))
         if not ok:
             (code, msg) = pre_update_result
-            self.config_object_error(obj_uuid, None, obj_type, 'prop_list_update', msg)
+            self.config_object_error(
+                obj_uuid, None, obj_type, 'prop_collection_update', msg)
             raise cfgm_common.exceptions.HttpError(code, msg)
 
         # invoke the extension
@@ -1858,7 +1934,7 @@ class VncApiServer(object):
             post_func = 'post_'+obj_type+'_update'
             self._extension_mgrs['resourceApi'].map_method(
                 post_func, obj_uuid, {}, read_result,
-                prop_list_updates=request_params.get('updates'))
+                prop_collection_updates=request_params.get('updates'))
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
@@ -1872,7 +1948,7 @@ class VncApiServer(object):
         apiConfig.object_type = obj_type
         apiConfig.identifier_name=':'.join(fq_name)
         apiConfig.identifier_uuid = obj_uuid
-        apiConfig.operation = 'prop-list-update'
+        apiConfig.operation = 'prop-collection-update'
         try:
             body = json.dumps(get_request().json)
         except:
@@ -1882,7 +1958,7 @@ class VncApiServer(object):
         self._set_api_audit_info(apiConfig)
         log = VncApiConfigLog(api_log=apiConfig, sandesh=self._sandesh)
         log.send(sandesh=self._sandesh)
-    # end prop_list_update_http_post
+    # end prop_collection_update_http_post
 
     def ref_update_http_post(self):
         self._post_common(get_request(), None, None)
@@ -2011,7 +2087,44 @@ class VncApiServer(object):
         self._set_api_audit_info(apiConfig)
         self.vnc_api_config_log(apiConfig)
         return {'uuid': id}
-    # end ref_update_id_http_post
+    # end ref_update_http_post
+
+    def ref_relax_for_delete_http_post(self):
+        self._post_common(get_request(), None, None)
+        # grab fields
+        obj_uuid = get_request().json.get('uuid')
+        ref_uuid = get_request().json.get('ref-uuid')
+
+        # validate fields
+        if None in (obj_uuid, ref_uuid):
+            err_msg = 'Bad Request: Both uuid and ref-uuid should be specified: '
+            err_msg += '%s, %s.' %(obj_uuid, ref_uuid)
+            raise cfgm_common.exceptions.HttpError(400, err_msg)
+
+        try:
+            obj_type = self._db_conn.uuid_to_obj_type(obj_uuid)
+            self._db_conn.ref_relax_for_delete(obj_uuid, ref_uuid)
+        except NoIdError:
+            raise cfgm_common.exceptions.HttpError(
+                404, 'uuid ' + obj_uuid + ' not found')
+
+        apiConfig = VncApiCommon()
+        apiConfig.object_type = obj_type.replace('-', '_')
+        fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
+        apiConfig.identifier_name=':'.join(fq_name)
+        apiConfig.identifier_uuid = obj_uuid
+        apiConfig.operation = 'ref-relax-for-delete'
+        try:
+            body = json.dumps(get_request().json)
+        except:
+            body = str(get_request().json)
+        apiConfig.body = body
+
+        self._set_api_audit_info(apiConfig)
+        self.vnc_api_config_log(apiConfig)
+
+        return {'uuid': obj_uuid}
+    # end ref_relax_for_delete_http_post
 
     def fq_name_to_id_http_post(self):
         self._post_common(get_request(), None, None)
@@ -2210,7 +2323,6 @@ class VncApiServer(object):
 
     # Private Methods
     def _parse_args(self, args_str):
-        import pdb
 	'''
         Eg. python vnc_cfg_api_server.py --ifmap_server_ip 192.168.1.17
                                          --ifmap_server_port 8443

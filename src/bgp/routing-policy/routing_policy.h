@@ -8,6 +8,7 @@
 #include <boost/scoped_ptr.hpp>
 #include <boost/intrusive_ptr.hpp>
 #include <boost/shared_ptr.hpp>
+#include <tbb/atomic.h>
 
 #include <map>
 #include <string>
@@ -20,6 +21,7 @@
 #include <sandesh/sandesh_trace.h>
 
 class BgpAttr;
+class BgpPath;
 class BgpRoute;
 class BgpServer;
 class BgpTable;
@@ -200,7 +202,8 @@ public:
     PolicyTerm();
     ~PolicyTerm();
     bool terminal() const;
-    bool ApplyTerm(const BgpRoute *route, BgpAttr *attr) const;
+    bool ApplyTerm(const BgpRoute *route,
+                   const BgpPath *path, BgpAttr *attr) const;
     void set_actions(const ActionList &actions) {
         actions_ = actions;
     }
@@ -253,8 +256,10 @@ public:
         terms_.push_back(term);
     }
 
-    PolicyResult operator()(const BgpRoute *route, BgpAttr *attr) const;
+    PolicyResult operator()(const BgpRoute *route,
+                            const BgpPath *path, BgpAttr *attr) const;
     uint32_t generation() const { return generation_; }
+    uint32_t refcount() const { return refcount_; }
 
 private:
     friend class RoutingPolicyMgr;
@@ -271,18 +276,19 @@ private:
     LifetimeRef<RoutingPolicy> manager_delete_ref_;
 
     // Updated when routing policy undergoes a change
-    uint32_t refcount_;
+    tbb::atomic<uint32_t> refcount_;
     uint32_t generation_;
     RoutingPolicyTermList terms_;
 };
 
 inline void intrusive_ptr_add_ref(RoutingPolicy *policy) {
-    policy->refcount_++;
+    policy->refcount_.fetch_and_increment();
+    return;
 }
 
 inline void intrusive_ptr_release(RoutingPolicy *policy) {
-    assert(policy->refcount_ != 0);
-    if (--policy->refcount_ == 0) {
+    int prev = policy->refcount_.fetch_and_decrement();
+    if (prev == 1) {
         if (policy->MayDelete())
             policy->RetryDelete();
     }
@@ -372,7 +378,7 @@ public:
     LifetimeActor *deleter();
 
     RoutingPolicy::PolicyResult ExecuteRoutingPolicy(const RoutingPolicy *policy,
-                                    const BgpRoute *route, BgpAttr *attr) const;
+               const BgpRoute *route, const BgpPath *path, BgpAttr *attr) const;
 
 
     // Update the routing policy list on attach point

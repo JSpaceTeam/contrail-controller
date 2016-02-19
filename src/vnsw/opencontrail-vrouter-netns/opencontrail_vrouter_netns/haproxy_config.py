@@ -116,7 +116,29 @@ def _set_defaults(config):
 
     return _construct_config_block(config, conf, "default", default_custom_attributes)
 
+def _set_frontend_v2(config, conf_dir, keystone_auth_conf_file):
+    conf = []
+    for listener in config['listeners']:
+        if not listener['admin-state']:
+            continue
+        lconf = [
+            'frontend %s' % listener['id'],
+            'option tcplog',
+            'bind %s:%d' % (config['loadbalancer']['vip-address'],
+                            listener['port']),
+            'mode %s' % PROTO_MAP[listener['protocol']]
+        ]
+        if listener['pools'] and listener['pools'][0]['pool']['admin-state']:
+            lconf.append('default_backend %s'
+                         % listener['pools'][0]['pool']['id'])
+        res = "\n\t".join(lconf)
+        conf.append(res)
+    return "\n".join(conf)
+
 def _set_frontend(config, conf_dir, keystone_auth_conf_file):
+    if 'loadbalancer' in config:
+        return _set_frontend_v2(config, conf_dir, keystone_auth_conf_file)
+
     port = config['vip']['port']
     vip_custom_attributes = validator(config, 'vip', keystone_auth_conf_file)
     ssl = ''
@@ -144,7 +166,36 @@ def _set_frontend(config, conf_dir, keystone_auth_conf_file):
 
     return _construct_config_block(config, conf, "vip", vip_custom_attributes)
 
+def _set_backend_v2(config):
+    conf = []
+    for listener in config['listeners']:
+        if not listener['pools'] or not listener['admin-state']:
+            continue
+        pool = listener['pools'][0]['pool']
+        if not pool['admin-state']:
+            continue
+        lconf = [
+            'backend %s' % pool['id'],
+            'mode %s' % PROTO_MAP[pool['protocol']],
+            'balance %s' % LB_METHOD_MAP[pool['method']]
+        ]
+        if pool['protocol'] == PROTO_HTTP:
+            lconf.append('option forwardfor')
+
+        for member in listener['pools'][0]['members']:
+            if not member['admin-state']:
+                continue
+            server = (('server %(id)s %(address)s:%(port)s '
+                      'weight %(weight)s') % member) + ''
+            lconf.append(server)
+        res = "\n\t".join(lconf)
+        conf.append(res)
+    return "\n".join(conf)
+
 def _set_backend(config):
+    if 'loadbalancer' in config:
+        return _set_backend_v2(config)
+
     pool_custom_attributes = validator(config, 'pool')
     conf = [
         'backend %s' % config['pool']['id'],

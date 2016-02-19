@@ -7,6 +7,7 @@
 #include "test/test_cmn_util.h"
 #include "test_flow_util.h"
 #include "ksync/ksync_sock_user.h"
+#include "oper/ecmp_load_balance.h"
 #include "oper/tunnel_nh.h"
 #include "pkt/flow_table.h"
 
@@ -59,12 +60,15 @@ public:
         Ip6Address addr = Ip6Address::from_string(ip);
         InetUnicastAgentRouteTable *rt_table =
             agent()->vrf_table()->GetInet6UnicastRouteTable(vrf);
+        VnListType vn_list;
+        vn_list.insert(intf->vn()->GetName());
         rt_table->AddLocalVmRouteReq(agent()->local_peer(), vrf, addr,
                                      128, intf->GetUuid(),
-                                     intf->vn()->GetName(), label,
+                                     vn_list, label,
                                      SecurityGroupList(), CommunityList(), false,
                                      PathPreference(),
-                                     Ip6Address());
+                                     Ip6Address(),
+                                     EcmpLoadBalance());
         client->WaitForIdle();
         EXPECT_TRUE(RouteFindV6(vrf, addr, 128));
     }

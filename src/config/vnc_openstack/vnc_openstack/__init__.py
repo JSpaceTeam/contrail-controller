@@ -2,15 +2,12 @@
 # Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
 #
 
-import sys
-from cfgm_common import jsonutils as json
 import uuid
 import gevent
 import gevent.event
 import gevent.monkey
 gevent.monkey.patch_all()
 import requests
-import cgitb
 import copy
 from cStringIO import StringIO
 import bottle
@@ -21,13 +18,13 @@ import ConfigParser
 import keystoneclient.v2_0.client as keystone
 import keystoneclient.v3.client as keystonev3
 from netaddr import *
-import cfgm_common
 try:
     from cfgm_common import vnc_plugin_base
     from cfgm_common import utils as cfgmutils
 except ImportError:
     from common import vnc_plugin_base
     from cfgm_common import utils as cfgmutils
+from cfgm_common.utils import cgitb_hook
 from pysandesh.sandesh_base import *
 from pysandesh.sandesh_logger import *
 from vnc_api import vnc_api
@@ -257,7 +254,7 @@ class OpenstackDriver(vnc_plugin_base.Resync):
 
     def _cgitb_error_log(self):
         tmp_file = StringIO()
-        cgitb.Hook(format="text", file=tmp_file).handle(sys.exc_info())
+        cgitb_hook(format="text", file=tmp_file)
         self._vnc_os_logger.error("%s" % tmp_file.getvalue())
         tmp_file.close()
 
@@ -995,6 +992,10 @@ class NeutronApiDriver(vnc_plugin_base.NeutronApi):
         self.route('/neutron/nat_instance',
                      'POST', self._npi.plugin_http_post_svc_instance)
 
+        # Bottle callbacks for virtual-router operations
+        self.route('/neutron/virtual_router',
+                     'POST', self._npi.plugin_http_post_virtual_router)
+
     def route(self, uri, method, handler):
         def handler_trap_exception(*args, **kwargs):
             try:
@@ -1004,10 +1005,7 @@ class NeutronApiDriver(vnc_plugin_base.NeutronApi):
                 # don't log details of bottle.abort i.e handled error cases
                 if not isinstance(e, bottle.HTTPError):
                     string_buf = StringIO()
-                    cgitb.Hook(
-                        file=string_buf,
-                        format="text",
-                        ).handle(sys.exc_info())
+                    cgitb_hook(file=string_buf, format="text",)
                     err_msg = string_buf.getvalue()
                     self._logger.error(err_msg)
 

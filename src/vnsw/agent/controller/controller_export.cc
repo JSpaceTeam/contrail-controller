@@ -5,6 +5,7 @@
 #include <boost/uuid/uuid_io.hpp>
 
 #include <cmn/agent_cmn.h>
+#include <oper/ecmp_load_balance.h>
 #include <oper/route_common.h>
 #include <oper/peer.h>
 #include <oper/nexthop.h>
@@ -20,9 +21,9 @@
 
 RouteExport::State::State() : 
     DBState(), exported_(false), fabric_multicast_exported_(false),
-    force_chg_(false), label_(MplsTable::kInvalidLabel), vn_(""), sg_list_(),
+    force_chg_(false), label_(MplsTable::kInvalidLabel), vn_(), sg_list_(),
     tunnel_type_(TunnelType::INVALID), path_preference_(),
-    destination_(), source_() {
+    destination_(), source_(), ecmp_load_balance_() {
 }
 
 bool RouteExport::State::Changed(const AgentRoute *route, const AgentPath *path) const {
@@ -51,6 +52,9 @@ bool RouteExport::State::Changed(const AgentRoute *route, const AgentPath *path)
     if (path_preference_ != path->path_preference())
         return true;
 
+    if(ecmp_load_balance_ != path->ecmp_load_balance())
+        return true;
+
     return false;
 }
 
@@ -62,6 +66,7 @@ void RouteExport::State::Update(const AgentRoute *route, const AgentPath *path) 
     communities_ = path->communities();
     tunnel_type_ = path->tunnel_type();
     path_preference_ = path->path_preference();
+    ecmp_load_balance_ = path->ecmp_load_balance();
 }
 
 RouteExport::RouteExport(AgentRouteTable *rt_table):
@@ -171,19 +176,24 @@ void RouteExport::UnicastNotify(AgentXmppChannel *bgp_xmpp_peer,
 
     if (path) {
         if (state->Changed(route, path)) {
+            VnListType vn_list;
+            vn_list.insert(state->vn_);
             state->Update(route, path);
             state->exported_ = 
                 AgentXmppChannel::ControllerSendRouteAdd(bgp_xmpp_peer, 
                         static_cast<AgentRoute * >(route),
-                        path->NexthopIp(table->agent()), state->vn_,
+                        path->NexthopIp(table->agent()), vn_list,
                         state->label_, path->GetTunnelBmap(),
                         &path->sg_list(), &path->communities(),
-                        type, state->path_preference_);
+                        type, state->path_preference_,
+                        state->ecmp_load_balance_);
         }
     } else {
         if (state->exported_ == true) {
+            VnListType vn_list;
+            vn_list.insert(state->vn_);
             AgentXmppChannel::ControllerSendRouteDelete(bgp_xmpp_peer, 
-                    static_cast<AgentRoute *>(route), state->vn_, 
+                    static_cast<AgentRoute *>(route), vn_list,
                     (state->tunnel_type_ == TunnelType::VXLAN ?
                      state->label_ : 0),
                     TunnelType::AllType(), NULL, NULL,
@@ -257,10 +267,19 @@ void RouteExport::SubscribeFabricMulticast(const Agent *agent,
         (active_path->peer()->GetType() != Peer::OVS_PEER) &&
         ((state->fabric_multicast_exported_ == false) ||
          (state->force_chg_ == true))) {
+        //TODO optimize by checking for force_chg? In other cases duplicate
+        //request can be filtered.
+        if (state->fabric_multicast_exported_ == true) {
+            //Unsubscribe before re-sending subscription, this makes sure in any
+            //corner case control-node does not see this as a duplicate request.
+            AgentXmppChannel::ControllerSendMcastRouteDelete(bgp_xmpp_peer,
+                                                             route);
+            state->fabric_multicast_exported_ = false;
+        }
         //Sending 255.255.255.255 for fabric tree
         state->fabric_multicast_exported_ =
             AgentXmppChannel::ControllerSendMcastRouteAdd(bgp_xmpp_peer,
-                                                              route);
+                                                          route);
     }
 }
 

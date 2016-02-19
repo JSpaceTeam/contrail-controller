@@ -14,7 +14,9 @@
 #include <cfg/cfg_init.h>
 #include <oper/route_common.h>
 #include <oper/operdb_init.h>
+#include <oper/metadata_ip.h>
 #include <oper/interface_common.h>
+#include <oper/health_check.h>
 #include <oper/nexthop.h>
 #include <oper/vrf.h>
 #include <oper/mpls.h>
@@ -39,6 +41,7 @@
 #include <oper/agent_profile.h>
 #include <oper/agent_sandesh.h>
 #include <oper/vrouter.h>
+#include <oper/bgp_as_service.h>
 #include <nexthop_server/nexthop_manager.h>
 
 using boost::assign::map_list_of;
@@ -85,6 +88,9 @@ void OperDB::CreateDBTables(DB *db) {
                         &LoadbalancerPoolTable::CreateTable);
     DB::RegisterFactory("db.physical_devices.0",
                         &PhysicalDeviceTable::CreateTable);
+    DB::RegisterFactory("db.healthcheck.0",
+                        boost::bind(&HealthCheckTable::CreateTable,
+                                    agent_, _1, _2));
 
     InterfaceTable *intf_table;
     intf_table = static_cast<InterfaceTable *>(db->CreateTable("db.interface.0"));
@@ -92,6 +98,15 @@ void OperDB::CreateDBTables(DB *db) {
     agent_->set_interface_table(intf_table);
     intf_table->Init(this);
     intf_table->set_agent(agent_);
+
+    // Allocate Range to be used for MetaDataIPAllocator
+    agent_->set_metadata_ip_allocator(new MetaDataIpAllocator(agent_, 1, 8192));
+
+    HealthCheckTable *hc_table;
+    hc_table =
+        static_cast<HealthCheckTable *>(db->CreateTable("db.healthcheck.0"));
+    assert(hc_table);
+    agent_->set_health_check_table(hc_table);
 
     NextHopTable *nh_table;
     nh_table = static_cast<NextHopTable *>(db->CreateTable("db.nexthop.0"));
@@ -142,6 +157,7 @@ void OperDB::CreateDBTables(DB *db) {
     assert(mirror_table);
     agent_->set_mirror_table(mirror_table);
     mirror_table->set_agent(agent_);
+    mirror_table->Initialize();
 
     VrfAssignTable *vassign_table = static_cast<VrfAssignTable *>
                    (db->CreateTable("db.vrf_assign.0"));
@@ -195,6 +211,7 @@ void OperDB::CreateDBTables(DB *db) {
     agent_->set_physical_device_vn_table(dev_vn_table);
     profile_.reset(new AgentProfile(agent_, true));
     vrouter_ = std::auto_ptr<VRouter> (new VRouter(this));
+    bgp_as_a_service_ = std::auto_ptr<BgpAsAService>(new BgpAsAService(agent_));
 }
 
 void OperDB::Init() {
@@ -211,8 +228,8 @@ void OperDB::Init() {
         netns_workers = agent_->params()->si_netns_workers();
         netns_timeout = agent_->params()->si_netns_timeout();
     }
-    instance_manager_->Initialize(agent_->db(), agent_->agent_signal(),
-                                   netns_cmd, docker_cmd, netns_workers, netns_timeout);
+    instance_manager_->Initialize(agent_->db(), netns_cmd,
+                    docker_cmd, netns_workers, netns_timeout);
     if (nexthop_manager_.get()) {
         nexthop_manager_->Initialize(agent_->db());
     }
@@ -286,6 +303,9 @@ void OperDB::Shutdown() {
     route_preference_module_->Shutdown();
     domain_config_->Terminate();
     vrouter_.reset();
+    if (agent()->mirror_table()) {
+        agent()->mirror_table()->Shutdown();
+    }
 }
 
 void OperDB::DeleteRoutes() {

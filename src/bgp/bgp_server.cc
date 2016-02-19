@@ -11,6 +11,7 @@
 #include "bgp/bgp_factory.h"
 #include "bgp/bgp_lifetime.h"
 #include "bgp/bgp_log.h"
+#include "bgp/bgp_peer.h"
 #include "bgp/bgp_peer_membership.h"
 #include "bgp/bgp_session_manager.h"
 #include "bgp/scheduling_group.h"
@@ -18,6 +19,7 @@
 #include "bgp/routing-instance/istatic_route_mgr.h"
 #include "bgp/routing-instance/peer_manager.h"
 #include "bgp/routing-instance/routepath_replicator.h"
+#include "bgp/routing-instance/routing_instance.h"
 #include "bgp/routing-instance/rtarget_group_mgr.h"
 #include "bgp/routing-policy/routing_policy.h"
 
@@ -287,12 +289,13 @@ BgpServer::BgpServer(EventManager *evm)
       local_autonomous_system_(0),
       bgp_identifier_(0),
       hold_time_(0),
-      lifetime_manager_(new BgpLifetimeManager(this,
+      lifetime_manager_(BgpObjectFactory::Create<BgpLifetimeManager>(this,
           TaskScheduler::GetInstance()->GetTaskId("bgp::Config"))),
       deleter_(new DeleteActor(this)),
       destroyed_(false),
       aspath_db_(new AsPathDB(this)),
       olist_db_(new BgpOListDB(this)),
+      cluster_list_db_(new ClusterListDB(this)),
       comm_db_(new CommunityDB(this)),
       edge_discovery_db_(new EdgeDiscoveryDB(this)),
       edge_forwarding_db_(new EdgeForwardingDB(this)),

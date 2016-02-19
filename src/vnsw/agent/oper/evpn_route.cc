@@ -7,6 +7,7 @@
 #include <cmn/agent_cmn.h>
 #include <route/route.h>
 
+#include <oper/ecmp_load_balance.h>
 #include <oper/route_common.h>
 #include <oper/vrf.h>
 #include <oper/tunnel_nh.h>
@@ -158,7 +159,7 @@ void EvpnAgentRouteTable::AddReceiveRouteReq(const Peer *peer,
     req.key.reset(new EvpnRouteKey(peer, vrf_name, mac, ip_addr,
                                    ethernet_tag));
     req.data.reset(new L2ReceiveRoute(vn_name, ethernet_tag, label, pref));
-    Enqueue(&req);
+    agent()->fabric_evpn_table()->Enqueue(&req);
 }
 
 void EvpnAgentRouteTable::AddReceiveRoute(const Peer *peer,
@@ -206,13 +207,16 @@ void EvpnAgentRouteTable::AddLocalVmRoute(const Peer *peer,
 
     Agent *agent = static_cast<AgentDBTable *>(intf->get_table())->agent();
     VmInterfaceKey intf_key(AgentKey::ADD_DEL_CHANGE, intf->GetUuid(), "");
+    VnListType vn_list;
+    vn_list.insert(vn_name);
     LocalVmRoute *data = new LocalVmRoute(intf_key, label,
                                           intf->vxlan_id(), false,
-                                          vn_name,
+                                          vn_list,
                                           InterfaceNHFlags::BRIDGE,
                                           sg_id_list, CommunityList(),
                                           path_pref,
-                                          IpAddress());
+                                          IpAddress(),
+                                          EcmpLoadBalance());
     data->set_tunnel_bmap(TunnelType::AllType());
 
     DBRequest req(DBRequest::DB_ENTRY_ADD_CHANGE);

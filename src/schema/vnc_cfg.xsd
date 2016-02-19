@@ -641,8 +641,8 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <!-- Ecmp load balance parameters to be used -->
 <xsd:complexType name="EcmpHashingIncludeFields">
     <xsd:all>
-        <xsd:element name="source-mac" type="xsd:boolean" default="true"/>
-        <xsd:element name="destination-mac" type="xsd:boolean" default="true"/>
+        <!-- hashing-configured - decides if fields should be used or not -->
+        <xsd:element name="hashing-configured" type="xsd:boolean" default="false"/>
         <xsd:element name="source-ip" type="xsd:boolean" default="true"/>
         <xsd:element name="destination-ip" type="xsd:boolean" default="true"/>
         <xsd:element name="ip-protocol" type="xsd:boolean" default="true"/>
@@ -807,9 +807,6 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
         <xsd:element name='forwarding-mode' type='ForwardingModeType'/>
         <!-- Enable or disable unicast RPF for virtual-network -->
         <xsd:element name='rpf' type='RpfModeType'/>
-        <!-- Ecmp nexthop load balance criterias -->
-        <xsd:element name='ecmp-hashing-include-fields'
-                     type='EcmpHashingIncludeFields'/>
     </xsd:all>
 </xsd:complexType>
 
@@ -832,6 +829,10 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <xsd:element name="virtual-network-properties" type="VirtualNetworkType"/>
 <!--#IFMAP-SEMANTICS-IDL
      Property('virtual-network-properties', 'virtual-network') -->
+
+<!-- Ecmp nexthop load balance criterias -->
+<!--#IFMAP-SEMANTICS-IDL
+     Property('ecmp-hashing-include-fields', 'virtual-network') -->
 
 <xsd:element name="provider-properties" type="ProviderDetails"/>
 <!--#IFMAP-SEMANTICS-IDL
@@ -1054,9 +1055,6 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
         <xsd:element name='interface-mirror'  type="InterfaceMirrorType"/>
         <xsd:element name="local-preference" type="xsd:integer"/>
         <xsd:element name="sub-interface-vlan-tag" type="xsd:integer"/>
-        <!-- Ecmp nexthop load balance criterias -->
-        <xsd:element name='ecmp-hashing-include-fields'
-                     type='EcmpHashingIncludeFields'/>
     </xsd:all>
 </xsd:complexType>
 
@@ -1077,6 +1075,10 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
     </xsd:all>
 </xsd:complexType>
 
+<!-- Ecmp nexthop load balance criterias -->
+<!--#IFMAP-SEMANTICS-IDL
+     Property('ecmp-hashing-include-fields', 'virtual-machine-interface') -->
+
 <xsd:element name="virtual-machine-interface-properties" 
              type="VirtualMachineInterfacePropertiesType"/>
 <!--#IFMAP-SEMANTICS-IDL
@@ -1085,8 +1087,8 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 
 <xsd:element name="virtual-machine-interface-bindings" type="KeyValuePairs"/>
 <!--#IFMAP-SEMANTICS-IDL
-     ListProperty('virtual-machine-interface-bindings',
-                  'virtual-machine-interface') -->
+     MapProperty('virtual-machine-interface-bindings',
+                  'virtual-machine-interface', 'key') -->
 
 <xsd:complexType name="ProtocolType">
     <xsd:all>
@@ -1108,7 +1110,7 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <xsd:element name="virtual-machine-interface-fat-flow-protocols"
              type="FatFlowProtocols"/>
 <!--#IFMAP-SEMANTICS-IDL
-     Property('virtual-machine-interface-fat-flow-protocols',
+     ListProperty('virtual-machine-interface-fat-flow-protocols',
              'virtual-machine-interface') -->
 
 <xsd:element name="virtual-machine-interface-sub-interface"/>
@@ -1277,6 +1279,11 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <!--#IFMAP-SEMANTICS-IDL
      Property('virtual-router-type', 'virtual-router') -->
 
+<xsd:element name="virtual-router-dpdk-enabled" type="xsd:boolean"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('virtual-router-dpdk-enabled', 'virtual-router') -->
+
+
 <xsd:element name="physical-router-virtual-router"/>
 <!--#IFMAP-SEMANTICS-IDL
     Link('physical-router-virtual-router',
@@ -1431,6 +1438,10 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <xsd:element name="project-routing-policy"/>
 <!--#IFMAP-SEMANTICS-IDL
     Link('project-routing-policy', 'project', 'routing-policy', ['has']) -->
+
+<xsd:element name="project-route-aggregate"/>
+<!--#IFMAP-SEMANTICS-IDL
+    Link('project-route-aggregate', 'project', 'route-aggregate', ['has']) -->
 
 <xsd:element name="customer-attachment-virtual-machine-interface"/>
 <!--#IFMAP-SEMANTICS-IDL
@@ -1594,9 +1605,9 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
      Link('virtual-machine-service-instance', 'virtual-machine',
           'service-instance', ['ref', 'derived']) -->
 
-<xsd:element name='service-instance-instance-ip' type="ServiceInterfaceTag"/>
+<xsd:element name='service-instance-shared-ip' type="ServiceInterfaceTag"/>
 <!-- #IFMAP-SEMANTICS-IDL
-     Link('service-instance-instance-ip', 'service-instance',
+     Link('service-instance-shared-ip', 'service-instance',
           'instance-ip', ['ref']) -->
 
 <xsd:element name="service-health-check-service-instance" type="ServiceInterfaceTag"/>
@@ -1618,23 +1629,6 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <!--#IFMAP-SEMANTICS-IDL
      Link('route-aggregate-service-instance',
           'bgp:route-aggregate', 'service-instance', ['ref']) -->
-
-<!-- NEED TO DELETE THIS BEFORE RELEASE IN 3.0 BY PNF TEAM -->
-<xsd:complexType name='ServiceInstanceVirtualMachineInterfaceType'>
-    <xsd:all>
-        <xsd:element name="instance-id" type="xsd:integer"/>
-        <xsd:element name="interface-type" type="ServiceInterfaceType"/>
-    </xsd:all>
-</xsd:complexType>
-<!-- NEED TO DELETE THIS BEFORE RELEASE IN 3.0 BY PNF TEAM -->
-
-<!-- NEED TO DELETE THIS BEFORE RELEASE IN 3.0 BY PNF TEAM -->
-<xsd:element name='service-instance-interface'
-    type='ServiceInstanceVirtualMachineInterfaceType'/>
-<!-- #IFMAP-SEMANTICS-IDL
-     Link('service-instance-interface', 'service-instance',
-          'virtual-machine-interface', ['ref', 'derived']) -->
-<!-- NEED TO DELETE THIS BEFORE RELEASE IN 3.0 BY PNF TEAM -->
 
 <xsd:element name='port-tuple' type='ifmap:IdentityType'/>
 
@@ -1692,11 +1686,18 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
     </xsd:all>
 </xsd:complexType>
 
+<xsd:simpleType name="RouteNextHopType">
+    <xsd:restriction base="xsd:string">
+        <xsd:enumeration value="service-instance"/>
+        <xsd:enumeration value="ip-address"/>
+    </xsd:restriction>
+</xsd:simpleType>
+
 <xsd:complexType name='RouteType'>
     <xsd:all>
         <xsd:element name='prefix' type='xsd:string'/>
         <xsd:element name='next-hop' type='xsd:string'/>
-        <xsd:element name='next-hop-type' type='xsd:string'/>
+        <xsd:element name='next-hop-type' type='RouteNextHopType'/>
         <xsd:element name='community-attributes' type='CommunityAttributes'/>
     </xsd:all>
 </xsd:complexType>

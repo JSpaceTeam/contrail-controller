@@ -48,16 +48,11 @@ void DiscoveryAgentClient::DiscoverController() {
         agent_cfg_->agent()->discovery_service_client();
     if (ds_client) {
 
-        int xs_instances = 
-            agent_cfg_->agent()->discovery_xmpp_server_instances();
-        if ((xs_instances < 0) || (xs_instances > 2)) {
-            xs_instances = 2;
-        }
-
+        int xs_instances = 0;
         ds_client->Subscribe(
             g_vns_constants.XMPP_SERVER_DISCOVERY_SERVICE_NAME, xs_instances,
             boost::bind(&DiscoveryAgentClient::DiscoverySubscribeXmppHandler,
-                         this, _1)); 
+                         this, _1), MAX_XMPP_SERVERS);
     }    
 }
 
@@ -66,15 +61,7 @@ void DiscoveryAgentClient::ReDiscoverController() {
     DiscoveryServiceClient *ds_client =
         agent_cfg_->agent()->discovery_service_client();
     if (ds_client) {
-
-        int xs_instances = 
-            agent_cfg_->agent()->discovery_xmpp_server_instances();
-        if ((xs_instances < 0) || (xs_instances > 2)) {
-            xs_instances = 2;
-        }
-
-        ds_client->Subscribe(
-            g_vns_constants.XMPP_SERVER_DISCOVERY_SERVICE_NAME, xs_instances);
+        ds_client->Subscribe(g_vns_constants.XMPP_SERVER_DISCOVERY_SERVICE_NAME);
     }
 }
 
@@ -85,16 +72,14 @@ void DiscoveryAgentClient::DiscoverDNS() {
         agent_cfg_->agent()->discovery_service_client();
     if (ds_client) {
 
-        int dns_instances = 
-            agent_cfg_->agent()->discovery_xmpp_server_instances();
-        if ((dns_instances < 0) || (dns_instances > 2)) {
-            dns_instances = 2;
+        int dns_instances = agent_cfg_->agent()->discovery_xmpp_server_instances();
+        if (dns_instances > MAX_XMPP_SERVERS || dns_instances <= 0) {
+            dns_instances = MAX_XMPP_SERVERS;
         }
-
         ds_client->Subscribe(
             g_vns_constants.DNS_SERVER_DISCOVERY_SERVICE_NAME, dns_instances,
             boost::bind(&DiscoveryAgentClient::DiscoverySubscribeDNSHandler, 
-                        this, _1)); 
+                        this, _1));
     }    
 }
 
@@ -103,15 +88,7 @@ void DiscoveryAgentClient::ReDiscoverDNS() {
     DiscoveryServiceClient *ds_client = 
         agent_cfg_->agent()->discovery_service_client();
     if (ds_client) {
-
-        int dns_instances = 
-            agent_cfg_->agent()->discovery_xmpp_server_instances();
-        if ((dns_instances < 0) || (dns_instances > 2)) {
-            dns_instances = 2;
-        }
-
-        ds_client->Subscribe(
-            g_vns_constants.DNS_SERVER_DISCOVERY_SERVICE_NAME, dns_instances);
+        ds_client->Subscribe(g_vns_constants.DNS_SERVER_DISCOVERY_SERVICE_NAME);
     }    
 }
 

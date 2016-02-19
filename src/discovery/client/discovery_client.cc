@@ -32,21 +32,20 @@ SandeshTraceBufferPtr DiscoveryClientTraceBuf(SandeshTraceBufferCreate(
 
 /*************** Discovery Service Subscribe Response Message Header **********/
 DSSubscribeResponse::DSSubscribeResponse(std::string serviceName, 
-                                         uint8_t numbOfInstances,
                                          EventManager *evm,
                                          DiscoveryServiceClient *ds_client)
-    : serviceName_(serviceName), numbOfInstances_(numbOfInstances),
-      chksum_(0),
+    : serviceName_(serviceName),
+      subscribe_chksum_(0), chksum_(0),
       subscribe_timer_(TimerManager::CreateTimer(*evm->io_service(), "Subscribe Timer",
                        TaskScheduler::GetInstance()->GetTaskId("http client"), 0)),
       ds_client_(ds_client), subscribe_msg_(""), attempts_(0),
-      sub_sent_(0), sub_rcvd_(0), sub_fail_(0),
+      sub_sent_(0), sub_rcvd_(0), sub_fail_(0), sub_last_ttl_(0),
       subscribe_cb_called_(false) {
 }
 
 DSSubscribeResponse::~DSSubscribeResponse() {
-    service_list_.clear();
     inuse_service_list_.clear();
+    publisher_id_map_.clear();
     TimerManager::DeleteTimer(subscribe_timer_);
 }
 
@@ -58,7 +57,7 @@ int DSSubscribeResponse::GetConnectTime() const {
 
 bool DSSubscribeResponse::SubscribeTimerExpired() {
     // Resend subscription request
-    ds_client_->Subscribe(serviceName_, numbOfInstances_); 
+    ds_client_->Subscribe(serviceName_);
     return false;
 }
 
@@ -70,6 +69,15 @@ void DSSubscribeResponse::StartSubscribeTimer(int seconds) {
 
 void DSSubscribeResponse::AddInUseServiceList(
                           boost::asio::ip::tcp::endpoint ep) {
+    std::vector<boost::asio::ip::tcp::endpoint>::iterator it;
+    for (it = inuse_service_list_.begin();
+         it != inuse_service_list_.end(); it++) {
+        boost::asio::ip::tcp::endpoint endpoint = *it;
+        if (ep.address().to_string().compare(
+            endpoint.address().to_string()) == 0) {
+            return;
+        }
+    }
     inuse_service_list_.push_back(ep);
 }
 
@@ -89,14 +97,11 @@ void DSSubscribeResponse::DeleteInUseServiceList(
 
 std::string DSSubscribeResponse::GetPublisherId(string ip_address) {
 
-    std::vector<DSResponse>::iterator it = service_list_.begin();
-    for (; it != service_list_.end(); it++) {
-        DSResponse resp = *it;
-        if (resp.ep.address().to_string().compare(ip_address) == 0) {
-            return (resp.publisher_id);
-        }
+    PublisherIdMap::iterator loc = publisher_id_map_.find(ip_address);
+    if (loc != publisher_id_map_.end()) {
+        return(loc->second);
     }
-    return (NULL);
+    return "";
 }
 
 
@@ -104,14 +109,14 @@ std::string DSSubscribeResponse::GetPublisherId(string ip_address) {
 DSPublishResponse::DSPublishResponse(std::string serviceName, 
                                      EventManager *evm,
                                      DiscoveryServiceClient *ds_client)
-    : serviceName_(serviceName), 
+    : serviceName_(serviceName), publish_resp_chksum_(0),
       publish_hb_timer_(TimerManager::CreateTimer(*evm->io_service(), "Publish Timer",
                         TaskScheduler::GetInstance()->GetTaskId("http client"), 0)),
       publish_conn_timer_(TimerManager::CreateTimer(*evm->io_service(), "Publish Conn Timer",
                           TaskScheduler::GetInstance()->GetTaskId("http client"), 0)),
       ds_client_(ds_client), publish_msg_(""), attempts_(0),
-      pub_sent_(0), pub_rcvd_(0), pub_fail_(0), pub_fallback_(0),
-      pub_hb_sent_(0), pub_hb_fail_(0), pub_hb_rcvd_(0),
+      pub_sent_(0), pub_rcvd_(0), pub_fail_(0), pub_fallback_(0), pub_timeout_(0),
+      pub_hb_sent_(0), pub_hb_fail_(0), pub_hb_rcvd_(0), pub_hb_timeout_(0),
       publish_cb_called_(false), heartbeat_cb_called_(false) {
 }
 
@@ -296,7 +301,7 @@ void DiscoveryServiceClient::PublishResponseHandler(std::string &xmls,
     if (loc != publish_response_map_.end()) {
         resp = loc->second;
     } else {
-        DISCOVERY_CLIENT_LOG_ERROR(DiscoveryClientLog, serviceName, 
+        DISCOVERY_CLIENT_LOG_ERROR(DiscoveryClientErrorLog, serviceName,
                                    "Stray Publish Response");
         if (conn) {
             http_client_->RemoveConnection(conn);
@@ -317,10 +322,22 @@ void DiscoveryServiceClient::PublishResponseHandler(std::string &xmls,
         // Errorcode is of type CURLcode
         if (ec.value() != 0) {
             DISCOVERY_CLIENT_TRACE(DiscoveryClientErrorMsg,
-                "PublishResponseHandler Error", serviceName, ec.value());
+                "Error PublishResponseHandler ",
+                 serviceName + " " + curl_error_category.message(ec.value()),
+                 ec.value());
             // exponential back-off and retry
             resp->pub_fail_++;
             resp->attempts_++; 
+
+            // CURLE_OPERATION_TIMEDOUT, timeout triggered when no
+            // response from Discovery Server for 4secs.
+            if (curl_error_category.message(ec.value()).find("Timeout") !=
+                std::string::npos) {
+                resp->pub_timeout_++;
+                // reset attempts so publish can be sent right away
+                resp->attempts_ = 0;
+            }
+
             // Update connection info
             ConnectionState::GetInstance()->Update(ConnectionType::DISCOVERY,
                 serviceName, ConnectionStatus::DOWN, ds_endpoint_,
@@ -361,8 +378,6 @@ void DiscoveryServiceClient::PublishResponseHandler(std::string &xmls,
         return;
     }
 
-    DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, "PublishResponseHandler",
-                           serviceName, xmls);
     //Extract cookie from message
     XmlPugi *pugi = reinterpret_cast<XmlPugi *>(impl.get());
     pugi::xml_node node = pugi->FindNode("cookie");
@@ -387,6 +402,15 @@ void DiscoveryServiceClient::PublishResponseHandler(std::string &xmls,
         resp->cookie_ = node.child_value();
         resp->attempts_ = 0;
         resp->pub_rcvd_++;
+
+        // generate hash of the message
+        boost::hash<std::string> string_hash;
+        uint32_t gen_chksum = string_hash(xmls);
+        if (resp->publish_resp_chksum_ != gen_chksum) {
+            DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, "PublishResponseHandler",
+                                   serviceName, xmls);
+            resp->publish_resp_chksum_ = gen_chksum;
+        }
         // Update connection info
         ConnectionState::GetInstance()->Update(ConnectionType::DISCOVERY,
             serviceName, ConnectionStatus::UP, ds_endpoint_,
@@ -476,6 +500,8 @@ void DiscoveryServiceClient::Publish(std::string serviceName, std::string &msg) 
         "Publish");
     DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, pub_msg->publish_hdr_, 
                            serviceName, pub_msg->publish_msg_);
+    DISCOVERY_CLIENT_LOG_NOTICE(DiscoveryClientLogMsg, pub_msg->publish_hdr_,
+                                serviceName, pub_msg->publish_msg_);
 }
 
 void DiscoveryServiceClient::ReEvaluatePublish(std::string serviceName,
@@ -521,12 +547,15 @@ void DiscoveryServiceClient::ReEvaluatePublish(std::string serviceName,
             stringstream ss;
             impl->PrintDoc(ss);
             resp->publish_msg_ = ss.str();
+
+            DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, resp->publish_hdr_,
+                                   serviceName, resp->publish_msg_);
+            DISCOVERY_CLIENT_LOG_NOTICE(DiscoveryClientLogMsg, resp->publish_hdr_,
+                                        serviceName, resp->publish_msg_);
         }
 
         /* Send publish unconditionally */
         resp->pub_sent_++;
-        DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, resp->publish_hdr_,
-                               serviceName, resp->publish_msg_);
         SendHttpPostMessage(resp->publish_hdr_, serviceName,
                             resp->publish_msg_);
     }
@@ -588,6 +617,8 @@ void DiscoveryServiceClient::Publish(std::string serviceName, std::string &msg,
         "Publish");
     DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, pub_msg->publish_hdr_,
                            serviceName, pub_msg->publish_msg_);
+    DISCOVERY_CLIENT_LOG_NOTICE(DiscoveryClientLogMsg, pub_msg->publish_hdr_,
+                                serviceName, pub_msg->publish_msg_);
 }
 
 
@@ -600,9 +631,6 @@ void DiscoveryServiceClient::Publish(std::string serviceName) {
         DSPublishResponse *resp = loc->second;
         resp->pub_sent_++; 
         SendHttpPostMessage(resp->publish_hdr_, serviceName, resp->publish_msg_);
-
-        DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, resp->publish_hdr_, 
-                               serviceName, resp->publish_msg_);
     }
 }
 
@@ -671,25 +699,99 @@ void DiscoveryServiceClient::Subscribe(std::string serviceName,
     // Create Response Header
     ServiceResponseMap::iterator loc = service_response_map_.find(serviceName);
     if (loc == service_response_map_.end()) {
-        DSSubscribeResponse *resp = new DSSubscribeResponse(serviceName, numbOfInstances,
+        DSSubscribeResponse *resp = new DSSubscribeResponse(serviceName,
                                                       evm_, this);
         //cache the request
         resp->subscribe_msg_ = ss.str();
         resp->sub_sent_++;
         service_response_map_.insert(make_pair(serviceName, resp));
+
+        // generate hash of subscribe message
+        boost::hash<std::string> string_hash;
+        uint32_t gen_chksum = string_hash(ss.str());
+        resp->subscribe_chksum_ = gen_chksum;
     }
 
-    SendHttpPostMessage("subscribe", serviceName, ss.str()); 
- 
+    SendHttpPostMessage("subscribe", serviceName, ss.str());
+
     // Update connection info
     ConnectionState::GetInstance()->Update(ConnectionType::DISCOVERY,
         serviceName, ConnectionStatus::INIT, ds_endpoint_,
         "Subscribe");
     DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, "subscribe",
                            serviceName, ss.str());
+    DISCOVERY_CLIENT_LOG_NOTICE(DiscoveryClientLogMsg, "subscribe",
+                                serviceName, ss.str());
 }
 
-void DiscoveryServiceClient::Subscribe(std::string serviceName, uint8_t numbOfInstances) {
+void DiscoveryServiceClient::Subscribe(std::string serviceName,
+                                       uint8_t numbOfInstances,
+                                       ServiceHandler cb,
+                                       uint8_t minInstances) {
+    //Register the callback handler
+    RegisterSubscribeResponseHandler(serviceName, cb);
+
+    //Build the DOM tree
+    auto_ptr<XmlBase> impl(XmppXmlImplFactory::Instance()->GetXmlImpl());
+    impl->LoadDoc("");
+    XmlPugi *pugi = reinterpret_cast<XmlPugi *>(impl.get());
+    pugi->AddNode(serviceName, "");
+
+    stringstream inst;
+    inst << static_cast<int>(numbOfInstances);
+    pugi->AddChildNode("instances", inst.str());
+    pugi->ReadNode(serviceName); //Reset parent
+    if (minInstances != 0) {
+        stringstream min_inst;
+        min_inst << static_cast<int>(minInstances);
+        pugi->AddChildNode("min-instances", min_inst.str());
+        pugi->ReadNode(serviceName); //Reset parent
+    }
+
+    if (!subscriber_name_.empty()) {
+        pugi->AddChildNode("client-type", subscriber_name_);
+        pugi->ReadNode(serviceName); //Reset parent
+    }
+    boost::system::error_code error;
+    string client_id = boost::asio::ip::host_name(error) + ":" +
+                       subscriber_name_;
+    pugi->AddChildNode("client", client_id);
+    pugi->ReadNode(serviceName); //Reset parent
+    pugi->AddChildNode("remote-addr", local_addr_);
+
+    stringstream ss;
+    impl->PrintDoc(ss);
+
+    // Create Response Header
+    ServiceResponseMap::iterator loc = service_response_map_.find(serviceName);
+    if (loc == service_response_map_.end()) {
+        DSSubscribeResponse *resp = new DSSubscribeResponse(serviceName,
+                                                            evm_, this);
+        //cache the request
+        resp->subscribe_msg_ = ss.str();
+        resp->sub_sent_++;
+        service_response_map_.insert(make_pair(serviceName, resp));
+
+        // generate hash of subscribe message
+        boost::hash<std::string> string_hash;
+        uint32_t gen_chksum = string_hash(ss.str());
+        resp->subscribe_chksum_ = gen_chksum;
+    }
+
+    SendHttpPostMessage("subscribe", serviceName, ss.str());
+
+    // Update connection info
+    ConnectionState::GetInstance()->Update(ConnectionType::DISCOVERY,
+        serviceName, ConnectionStatus::INIT, ds_endpoint_,
+        "Subscribe");
+    DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, "subscribe",
+                           serviceName, ss.str());
+    DISCOVERY_CLIENT_LOG_NOTICE(DiscoveryClientLogMsg, "subscribe",
+                                serviceName, ss.str());
+}
+
+
+void DiscoveryServiceClient::Subscribe(std::string serviceName) {
     // Get Response Header
     ServiceResponseMap::iterator loc = service_response_map_.find(serviceName);
     if (loc != service_response_map_.end()) {
@@ -704,14 +806,15 @@ void DiscoveryServiceClient::Subscribe(std::string serviceName, uint8_t numbOfIn
                 XmlPugi *pugi = reinterpret_cast<XmlPugi *>(impl.get());
                 pugi::xml_node node_service = pugi->FindNode(serviceName);
                 if (!pugi->IsNull(node_service)) {
-                    pugi->AddNode("service-in-use-list", "");
+                    pugi->ReadNode(serviceName); //SetContext
+                    pugi->AddChildNode("service-in-use-list", "");
                     std::vector<boost::asio::ip::tcp::endpoint>::iterator it;
                     for (it = resp->inuse_service_list_.begin();
                          it != resp->inuse_service_list_.end(); it++) {
                         boost::asio::ip::tcp::endpoint ep = *it;
                         std::string pub_id =
                             resp->GetPublisherId(ep.address().to_string());
-                        pugi->AddChildNode("publiser-id", pub_id);
+                        pugi->AddChildNode("publisher-id", pub_id);
                         pugi->ReadNode("service-in-use-list");
                     }
                 }
@@ -721,6 +824,15 @@ void DiscoveryServiceClient::Subscribe(std::string serviceName, uint8_t numbOfIn
             stringstream ss;
             impl->PrintDoc(ss);
             SendHttpPostMessage("subscribe", serviceName, ss.str());
+
+            // generate hash of the message
+            boost::hash<std::string> string_hash;
+            uint32_t gen_chksum = string_hash(ss.str());
+            if (resp->subscribe_chksum_ != gen_chksum) {
+                DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, "subscribe",
+                                       serviceName, ss.str());
+                resp->subscribe_chksum_ = gen_chksum;
+            }
         } else {
             SendHttpPostMessage("subscribe", serviceName, resp->subscribe_msg_);
         }
@@ -761,7 +873,7 @@ void DiscoveryServiceClient::SubscribeResponseHandler(std::string &xmls,
     if (loc != service_response_map_.end()) {
         hdr = loc->second;
     } else {
-        DISCOVERY_CLIENT_LOG_ERROR(DiscoveryClientLog, serviceName, 
+        DISCOVERY_CLIENT_LOG_ERROR(DiscoveryClientErrorLog, serviceName,
                                    "Stray Subscribe Response");
         if (conn) {
             http_client_->RemoveConnection(conn);
@@ -781,8 +893,9 @@ void DiscoveryServiceClient::SubscribeResponseHandler(std::string &xmls,
         // Errorcode is of type CURLcode
         if (ec.value() != 0) {
             DISCOVERY_CLIENT_TRACE(DiscoveryClientErrorMsg,
-                "SubscribeResponseHandler Error",
-                 serviceName, ec.value());
+                "Error SubscribeResponseHandler ",
+                 serviceName + " " + curl_error_category.message(ec.value()),
+                 ec.value());
             // exponential back-off and retry
             hdr->attempts_++; 
             hdr->sub_fail_++;
@@ -840,6 +953,7 @@ void DiscoveryServiceClient::SubscribeResponseHandler(std::string &xmls,
         // Delete ttl for checksum calculation
         pugi->DeleteNode("ttl");
         impl->PrintDoc(docs);
+        hdr->sub_last_ttl_ = ttl;
     }
 
     pugi::xml_node node = pugi->FindNode("response");
@@ -856,6 +970,9 @@ void DiscoveryServiceClient::SubscribeResponseHandler(std::string &xmls,
                 boost::trim(value);
                 if (strcmp(subnode.name(), "ip-address") == 0) {
                     resp.ep.address(ip::address::from_string(value));
+                    // Update Map to get publisher-id during next subscribe
+                    hdr->publisher_id_map_.insert(make_pair(
+                        resp.ep.address().to_string(), resp.publisher_id));
                 } else  if (strcmp(subnode.name(), "port") == 0) {
                     uint32_t port; 
                     stringstream sport(value);
@@ -866,7 +983,6 @@ void DiscoveryServiceClient::SubscribeResponseHandler(std::string &xmls,
             ds_response.push_back(resp);
         }
 
-
         // generate hash of the message
         boost::hash<std::string> string_hash;
         uint32_t gen_chksum = string_hash(docs.str());
@@ -874,7 +990,8 @@ void DiscoveryServiceClient::SubscribeResponseHandler(std::string &xmls,
         hdr->sub_rcvd_++;
         hdr->attempts_ = 0;
         if (ds_response.size() == 0) {
-            //Restart Subscribe Timer
+            //Restart Subscribe Timer with shorter ttl
+            ttl = DiscoveryServiceClient::kHeartBeatInterval;
             hdr->StartSubscribeTimer(ttl);
             DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, "SubscribeResponseHandler",
                                    serviceName, xmls);
@@ -886,19 +1003,19 @@ void DiscoveryServiceClient::SubscribeResponseHandler(std::string &xmls,
         }
 
         if (hdr->chksum_ != gen_chksum) {
+            DISCOVERY_CLIENT_LOG_NOTICE(DiscoveryClientLogMsg, "SubscribeResponseHandler",
+                                        serviceName, xmls);
+
             DISCOVERY_CLIENT_TRACE(DiscoveryClientMsg, "SubscribeResponseHandler",
                                    serviceName, xmls);
+            // Update DSSubscribeResponse for first response or change in response
+            hdr->chksum_ = gen_chksum;
         }
+
         // Update connection info
         ConnectionState::GetInstance()->Update(ConnectionType::DISCOVERY,
                 serviceName, ConnectionStatus::UP, ds_endpoint_,
                 "SubscribeResponse");
-
-        // Update DSSubscribeResponse for first response or change in response
-        hdr->chksum_ = gen_chksum;
-
-        hdr->service_list_.clear();
-        hdr->service_list_ = ds_response;
 
         //Start Subscribe Timer
         hdr->StartSubscribeTimer(ttl);
@@ -963,7 +1080,7 @@ void DiscoveryServiceClient::HeartBeatResponseHandler(std::string &xmls,
     if (loc != publish_response_map_.end()) {
         resp = loc->second;
     } else {
-        DISCOVERY_CLIENT_LOG_ERROR(DiscoveryClientLog, serviceName, 
+        DISCOVERY_CLIENT_LOG_ERROR(DiscoveryClientErrorLog, serviceName,
                                    "Stray HeartBeat Response");
         if (conn) {
             http_client_->RemoveConnection(conn);
@@ -986,16 +1103,34 @@ void DiscoveryServiceClient::HeartBeatResponseHandler(std::string &xmls,
         // Errorcode is of type CURLcode
         if (ec.value() != 0) {
             DISCOVERY_CLIENT_TRACE(DiscoveryClientErrorMsg,
-                "HeartBeatResponseHandler Error", serviceName, ec.value());
+                "Error HeartBeatResponseHandler ",
+                 serviceName + " " + curl_error_category.message(ec.value()),
+                 ec.value());
+
             resp->pub_hb_fail_++;
-            resp->StopHeartBeatTimer();
             // Resend original publish request after exponential back-off
             resp->attempts_++;
+            // CURLE_OPERATION_TIMEDOUT, timeout triggered when no
+            // response from Discovery Server for 4secs.
+            if (curl_error_category.message(ec.value()).find("Timeout") !=
+                std::string::npos) {
+                resp->pub_hb_timeout_++;
+                if (resp->attempts_ <= 3) {
+                    // Make client resilient to heart beat misses.
+                    // Continue sending heartbeat
+                    return;
+                } else {
+                    // reset attempts so publish can be sent right away
+                    resp->attempts_ = 0;
+                }
+            }
+
             // Update connection info
             ConnectionState::GetInstance()->Update(ConnectionType::DISCOVERY,
                 serviceName, ConnectionStatus::DOWN, ds_endpoint_,
                 ec.message());
-             resp->StartPublishConnectTimer(resp->GetConnectTime());
+            resp->StopHeartBeatTimer();
+            resp->StartPublishConnectTimer(resp->GetConnectTime());
         } else if (resp->heartbeat_cb_called_ == false) {
             DISCOVERY_CLIENT_TRACE(DiscoveryClientErrorMsg,
                 "HeartBeatResponseHandler, Only header received",
@@ -1031,6 +1166,7 @@ void DiscoveryServiceClient::HeartBeatResponseHandler(std::string &xmls,
             return;
     }
     resp->pub_hb_rcvd_++;
+    resp->attempts_ = 0;
 }
 
 void DiscoveryServiceClient::SendHttpPostMessage(std::string msg_type, 
@@ -1139,6 +1275,7 @@ void DiscoveryServiceClient::FillDiscoveryServiceSubscriberStats(
          stats.set_subscribe_rcvd(sub_resp->sub_rcvd_);
          stats.set_subscribe_fail(sub_resp->sub_fail_);
          stats.set_subscribe_retries(sub_resp->attempts_); 
+         stats.set_subscribe_last_ttl(sub_resp->sub_last_ttl_);
 
          ds_stats.push_back(stats);
 
@@ -1159,14 +1296,12 @@ void DiscoveryServiceClient::FillDiscoveryServicePublisherStats(
 
          DiscoveryClientPublisherStats stats;
          stats.set_serviceName(pub_resp->serviceName_); 
-         stats.set_heartbeat_sent(pub_resp->pub_hb_sent_);
-         stats.set_heartbeat_fail(pub_resp->pub_hb_fail_);   
-         stats.set_heartbeat_rcvd(pub_resp->pub_hb_rcvd_);
          stats.set_publish_sent(pub_resp->pub_sent_);
          stats.set_publish_rcvd(pub_resp->pub_rcvd_); 
          stats.set_publish_fail(pub_resp->pub_fail_); 
          stats.set_publish_retries(pub_resp->attempts_);
          stats.set_publish_fallback(pub_resp->pub_fallback_); 
+         stats.set_publish_timeout(pub_resp->pub_timeout_);
 
          ds_stats.push_back(stats);
 

@@ -654,9 +654,12 @@ static bool GetInstanceTargetRouteTarget(DBGraph *graph, IFMapNode *node,
 //
 // Fill in all the export route targets for a routing-instance.  The input
 // IFMapNode represents the routing-instance.  We traverse the graph edges
-// and look for instance-target adjacencies. If the instance-target has is
-// an export target i.e. it's not import-only, add the route-target to the
-// vector.
+// and look for instance-target adjacencies. If the instance-target is an
+// export and import target, add it to the vector.
+//
+// Note that we purposely skip adding export only targets to the vector.
+// Reasoning is that export only targets are manually configured by users
+// and hence should not be imported based on policy.
 //
 static void GetRoutingInstanceExportTargets(DBGraph *graph, IFMapNode *node,
         vector<string> *target_list) {
@@ -671,7 +674,7 @@ static void GetRoutingInstanceExportTargets(DBGraph *graph, IFMapNode *node,
             if (!itarget)
                 continue;
             const autogen::InstanceTargetType &itt = itarget->data();
-            if (itt.import_export != "import")
+            if (itt.import_export.empty())
                 target_list->push_back(target);
         }
     }
@@ -722,9 +725,7 @@ static bool GetRoutingInstanceRoutingPolicy(DBGraph *graph, IFMapNode *node,
         static_cast<autogen::RoutingPolicyRoutingInstance *>(node->GetObject());
     const autogen::RoutingPolicyType &attach_info = policy->data();
 
-    if (!stringToInteger(attach_info.sequence, ri_rp_link->sequence_)) {
-        return false;
-    }
+    ri_rp_link->sequence_ = attach_info.sequence;
 
     for (DBGraphVertex::adjacency_iterator iter = node->begin(graph);
          iter != node->end(graph); ++iter) {
@@ -746,25 +747,27 @@ static bool GetRouteAggregateConfig(DBGraph *graph, IFMapNode *node,
     const autogen::RouteAggregate *ra =
         static_cast<autogen::RouteAggregate *>(node->GetObject());
     if (ra == NULL) return false;
-    BOOST_FOREACH(const autogen::AggregateRouteType &aggregate_route,
-                  ra->aggregate_route_entries()) {
-        AggregateRouteConfig aggregate;
 
-        boost::system::error_code ec;
-        aggregate.nexthop = IpAddress::from_string(aggregate_route.nexthop, ec);
-        if (ec != 0) return false;
+    boost::system::error_code ec;
+    IpAddress nexthop =
+        IpAddress::from_string(ra->aggregate_route_nexthop(), ec);
+    if (ec != 0) return false;
+
+    BOOST_FOREACH(const std::string &route, ra->aggregate_route_entries()) {
+        AggregateRouteConfig aggregate;
+        aggregate.nexthop = nexthop;
 
         Ip4Address address;
-        ec = Ip4SubnetParse(aggregate_route.prefix, &address,
-                            &aggregate.prefix_length);
+        ec = Ip4SubnetParse(route, &address, &aggregate.prefix_length);
         if (ec == 0) {
+            if (!nexthop.is_v4()) continue;
             aggregate.aggregate = address;
             inet_list->push_back(aggregate);
         } else {
+            if (!nexthop.is_v6()) continue;
             Ip6Address address;
-            ec = Inet6SubnetParse(aggregate_route.prefix, &address,
-                                  &aggregate.prefix_length);
-            if (ec != 0) return false;
+            ec = Inet6SubnetParse(route, &address, &aggregate.prefix_length);
+            if (ec != 0) continue;
             aggregate.aggregate = address;
             inet6_list->push_back(aggregate);
         }
@@ -1567,36 +1570,45 @@ void BgpIfmapRoutingPolicyConfig::RemoveInstance(BgpIfmapInstanceConfig *rti) {
 }
 
 
-static void BuildPolicyTerm(autogen::PolicyTerm cfg_term,
+static void BuildPolicyTerm(autogen::PolicyTermType cfg_term,
                             RoutingPolicyTerm *term) {
-    term->match.community_match = cfg_term.fromxx.community;
-    term->match.prefix_match.prefix_to_match = cfg_term.fromxx.prefix.prefix;
-    term->match.prefix_match.prefix_match_type = cfg_term.fromxx.prefix.type_;
+    term->match.protocols_match = cfg_term.term_match_condition.protocol;
+    term->match.community_match = cfg_term.term_match_condition.community;
+    BOOST_FOREACH(const autogen::PrefixMatchType &prefix_match,
+                  cfg_term.term_match_condition.prefix) {
+        PrefixMatchConfig match;
+        match.prefix_to_match = prefix_match.prefix;
+        match.prefix_match_type = prefix_match.prefix_type.empty() ?
+            "exact" : prefix_match.prefix_type;
+        term->match.prefixes_to_match.push_back(match);
+    }
+
     BOOST_FOREACH(const std::string community,
-                  cfg_term.then.update.community.add.community) {
+                  cfg_term.term_action_list.update.community.add.community) {
         term->action.update.community_add.push_back(community);
     }
     BOOST_FOREACH(const std::string community,
-                  cfg_term.then.update.community.remove.community) {
+                  cfg_term.term_action_list.update.community.remove.community) {
         term->action.update.community_remove.push_back(community);
     }
     BOOST_FOREACH(const std::string community,
-                  cfg_term.then.update.community.set.community) {
+                  cfg_term.term_action_list.update.community.set.community) {
         term->action.update.community_set.push_back(community);
     }
-    term->action.update.local_pref = cfg_term.then.update.local_pref;
+    term->action.update.local_pref =
+        cfg_term.term_action_list.update.local_pref;
+    term->action.update.med = cfg_term.term_action_list.update.med;
     term->action.action = RoutingPolicyActionConfig::NEXT_TERM;
-    if (strcmp(cfg_term.then.action.c_str(), "reject") == 0) {
+    if (strcmp(cfg_term.term_action_list.action.c_str(), "reject") == 0)
         term->action.action = RoutingPolicyActionConfig::REJECT;
-    } else if (strcmp(cfg_term.then.action.c_str(), "accept") == 0) {
+    else if (strcmp(cfg_term.term_action_list.action.c_str(), "accept") == 0)
         term->action.action = RoutingPolicyActionConfig::ACCEPT;
-    }
 }
 
 static void BuildPolicyTerms(BgpRoutingPolicyConfig *policy_cfg,
                              const autogen::RoutingPolicy *policy) {
-    std::vector<autogen::PolicyTerm> terms = policy->entries();
-    BOOST_FOREACH(autogen::PolicyTerm cfg_term, terms) {
+    std::vector<autogen::PolicyTermType> terms = policy->entries();
+    BOOST_FOREACH(autogen::PolicyTermType cfg_term, terms) {
         RoutingPolicyTerm policy_term;
         BuildPolicyTerm(cfg_term, &policy_term);
         policy_cfg->add_term(policy_term);

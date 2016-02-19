@@ -18,6 +18,7 @@
 #include "base/timer.h"
 
 #include "http/client/http_client.h"
+#include "http/client/http_curl.h"
 
 class ServiceType;
 class DiscoveryServiceClient;
@@ -31,7 +32,7 @@ struct DSResponse {
 };
 
 struct DSSubscribeResponse {
-    DSSubscribeResponse(std::string serviceName, uint8_t numbOfInstances,
+    DSSubscribeResponse(std::string serviceName,
                      EventManager *evm, DiscoveryServiceClient *);
     ~DSSubscribeResponse();
 
@@ -43,11 +44,11 @@ struct DSSubscribeResponse {
     /* Subscribe Request cached */
     std::string serviceName_;
     uint8_t numbOfInstances_;
+    uint32_t subscribe_chksum_;
 
     /* Subscribe Response cached */
     uint32_t chksum_;
     Timer *subscribe_timer_; 
-    std::vector<DSResponse> service_list_;   
     DiscoveryServiceClient *ds_client_;
     std::string subscribe_msg_;
     int attempts_;
@@ -56,15 +57,19 @@ struct DSSubscribeResponse {
     int sub_sent_;
     int sub_rcvd_;
     int sub_fail_;
+    int sub_last_ttl_;
 
     bool subscribe_cb_called_;
+
+    // Map of <ep, PublisherId> PublisherIdMap
+    typedef std::map<std::string, std::string> PublisherIdMap;
+    PublisherIdMap publisher_id_map_;
+    std::string GetPublisherId(std::string ip_address);
 
     // Save in-use server list
     void AddInUseServiceList(boost::asio::ip::tcp::endpoint ep);
     void DeleteInUseServiceList(boost::asio::ip::tcp::endpoint ep);
     std::vector<boost::asio::ip::tcp::endpoint> inuse_service_list_;
-
-    std::string GetPublisherId(std::string ip_address);
 };
 
 struct DSPublishResponse {
@@ -89,6 +94,8 @@ struct DSPublishResponse {
 
     /* HeartBeat publisher cookie */
     std::string cookie_;
+    uint32_t publish_resp_chksum_;
+
     /* HeartBeat Timer */
     Timer *publish_hb_timer_;
     /* Connect Timer */
@@ -108,9 +115,11 @@ struct DSPublishResponse {
     int pub_rcvd_;
     int pub_fail_;
     int pub_fallback_;
+    int pub_timeout_;
     int pub_hb_sent_;
     int pub_hb_fail_;
     int pub_hb_rcvd_;
+    int pub_hb_timeout_;
 
     bool publish_cb_called_;
     bool heartbeat_cb_called_;
@@ -144,9 +153,11 @@ public:
 
     /* Subscribe api's */
     typedef boost::function<void(std::vector<DSResponse>)> ServiceHandler;
-    void Subscribe(std::string serviceName, 
-                   uint8_t numbOfInstances, ServiceHandler);
-    void Subscribe(std::string serviceName, uint8_t numbOfInstances);
+    void Subscribe(std::string serviceName, uint8_t numbOfInstances,
+                   ServiceHandler);
+    void Subscribe(std::string serviceName, uint8_t numbOfInstances,
+                   ServiceHandler, uint8_t minInstances);
+    void Subscribe(std::string serviceName);
     void SubscribeResponseHandler(std::string &msg, boost::system::error_code &, 
                                   std::string serviceName, HttpConnection *);
     void AddSubscribeInUseServiceList(std::string serviceName,
