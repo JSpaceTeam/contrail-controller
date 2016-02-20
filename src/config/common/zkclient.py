@@ -405,6 +405,10 @@ class ZookeeperClient(object):
             return []
     # end set_node
 
+    def transaction(self):
+        return self._zk_client.transaction()
+    # end transaction
+
     def _sandesh_connection_info_update(self, status, message):
         from pysandesh.connection_info import ConnectionState
         from pysandesh.gen_py.process_info.ttypes import ConnectionStatus

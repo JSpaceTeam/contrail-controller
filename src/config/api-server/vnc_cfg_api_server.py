@@ -2312,6 +2312,10 @@ class VncApiServer(object):
         self._db_conn = db_conn
     # end _db_connect
 
+    def get_vnc_zk_client(self):
+        return self._db_conn.get_zk_db_client()
+    # end get_vnc_zk_client
+
     def _ensure_id_perms_present(self, obj_type, obj_uuid, obj_dict):
         """
         Called at resource creation to ensure that id_perms is present in obj

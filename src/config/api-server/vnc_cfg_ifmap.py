@@ -1301,6 +1301,10 @@ class VncZkClient(object):
             self._reconnect_zk_greenlet = gevent.spawn(self._reconnect_zk)
     # end
 
+    def get_zk_client(self):
+        return self._zk_client
+    # end get_zk_client
+
     def create_subnet_allocator(self, subnet, subnet_alloc_list,
                                 addr_from_start, should_persist,
                                 start_subnet, size):
@@ -1537,6 +1541,10 @@ class VncDbClient(object):
         return msb_id, lsb_id
 
     # end _uuid_to_longs
+
+    def get_zk_db_client(self):
+        return self._zk_db.get_zk_client()
+    # end get_zk_db_client
 
     def set_uuid(self, obj_type, obj_dict, id, do_lock=True):
         if do_lock:
