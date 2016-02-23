@@ -448,14 +448,10 @@ class VncApiServerBase(VncApiServer):
                     bottle.abort(e.status_code, e.content)
                 else:
                     string_buf = StringIO()
-                    cgitb.Hook(
-                        file=string_buf,
-                        format="text",
-                    ).handle(sys.exc_info())
-                    err_msg = mask_password(string_buf.getvalue())
+                    cgitb_hook(file=string_buf, format="text")
+                    err_msg = string_buf.getvalue()
                     self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
-
-                raise
+                    raise
         logger.debug("Add route: %s " % uri)
         bottle.route(uri, method, handler_trap_exception)
 
