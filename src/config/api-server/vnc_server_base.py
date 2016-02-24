@@ -16,7 +16,6 @@ def log_api_stats(func):
     return wrapper
 
 
-from csp.csp_api_context import APIContext
 from oslo_utils import importutils
 from cfgm_common import vnc_api_stats
 
@@ -27,6 +26,7 @@ from vnc_cfg_api_server import _ACTION_RESOURCES
 from bottle import request
 from gen.resource_xsd import *
 from cfgm_common.vnc_extensions import ExtensionManager, ApiHookManager
+from pysandesh.sandesh_base_logger import SandeshBaseLogger
 
 # Parse config for olso configs. Try to move all config parsing to oslo cfg
 elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
@@ -44,16 +44,7 @@ cfg.CONF.register_cli_opt(
     cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
     group=elastic_search_group)
 
-sandesh_to_log_level = {
-    SandeshLevel.SYS_EMERG: logging.FATAL,
-    SandeshLevel.SYS_CRIT: logging.CRITICAL,
-    SandeshLevel.SYS_ALERT: logging.INFO,
-    SandeshLevel.SYS_NOTICE: logging.INFO,
-    SandeshLevel.SYS_INFO: logging.INFO,
-    SandeshLevel.SYS_WARN: logging.WARN,
-    SandeshLevel.SYS_DEBUG: logging.DEBUG,
-    SandeshLevel.SYS_ERR: logging.ERROR
-}
+
 
 
 class VncApiServerBase(VncApiServer):
@@ -131,8 +122,6 @@ class VncApiServerBase(VncApiServer):
         # GreenletProfiler.set_clock_type('wall')
         self._profile_info = None
         self._sandesh = None
-        self.csp_logger_init(self._settings)
-        self._csp_logger = self.get_default_logger()
 
         # REST interface initialization
         self._get_common = self._http_get_common
@@ -263,6 +252,7 @@ class VncApiServerBase(VncApiServer):
         pass
 
     def vnc_api_config_log(self, apiConfig):
+        # we already fo API logging through the logging middleware.
         pass
 
     def http_rpc_post(self, resource_type):
@@ -440,9 +430,6 @@ class VncApiServerBase(VncApiServer):
 
                 return response
             except Exception as e:
-                if trace:
-                    # CSP Logger?
-                    pass
                 # don't log details of bottle.abort i.e handled error cases
                 if isinstance(e, cfgm_common.exceptions.HttpError):
                     bottle.abort(e.status_code, e.content)
@@ -458,16 +445,10 @@ class VncApiServerBase(VncApiServer):
     # end route
 
     def config_log(self, err_str, level=SandeshLevel.SYS_INFO):
-        log_level = logging.WARN
-        if level in sandesh_to_log_level:
-            log_level = sandesh_to_log_level[level]
-        logging.log(log_level, err_str)
+        logging.log(SandeshBaseLogger.get_py_logger_level(level), err_str)
 
     # end config_log
 
-    def get_default_logger(self):
-        from csp.csp_log_writer import CSPSandeshLogger
-        return CSPSandeshLogger().get_csp_logger()  # CSP Logger
 
     def __add_middleware(self, name, module):
         mod, func = module.split(':')
@@ -489,45 +470,6 @@ class VncApiServerBase(VncApiServer):
 
 
 
-                # The following method could reside in csp-logger for better maintenance
-
-    def csp_logger_init(self, settings):
-        if not settings.get('contrail_analytics_server'):
-            raise Exception('Missing contrail_analytics_server configuration.')
-        contrail_analytics_server = settings['contrail_analytics_server']
-
-        if not settings.get('application_name'):
-            raise Exception('Missing application name.')
-        app_name = settings['application_name']
-
-        contrail_discovery_port = '5998'
-        if settings.get('contrail_discovery_port'):
-            contrail_discovery_port = settings['contrail_discovery_port']
-
-        log_level = 'ERROR'
-        if settings.get('log_level'):
-            log_level = settings['log_level']
-
-        # if file location is configured, get it
-        file_location = '/tmp/'
-        if settings.get('log_location'):
-            file_location = settings.get('log_location')
-        # if local_log_enabled if configured, take it; otherwise log will be sent to analytics server
-        local_log_enabled = False
-        if settings.get('local_log_enabled') and \
-                        settings.get('local_log_enabled').lower() in ["true", "yes"]:
-            local_log_enabled = True
-
-        APIContext().set_csp_logger(
-            contrail_analytics_server,
-            contrail_discovery_port,
-            app_name,
-            log_level,
-            file_location=file_location,
-            local_log_enabled=local_log_enabled)
-
-        # end
-        # Private Methods
 
     def _load_extensions(self):
         try:
@@ -547,8 +489,9 @@ class VncApiServerBase(VncApiServer):
                 api_server_port=self._args.listen_port,
                 conf_sections=conf_sections, sandesh=self._sandesh, propagate_map_exceptions=True)
         except Exception as e:
-            # csp Log
-            pass
+            err_msg = cfgm_common.utils.detailed_traceback()
+            self.config_log("Exception in extension load: %s" %(err_msg),
+                level=SandeshLevel.SYS_ERR)
 
     # end _load_extensions
 
