@@ -1053,7 +1053,9 @@ class VncServerKombuClient(VncKombuClient):
             msg = "Notification Message: %s" %(pformat(oper_info))
             self.config_log(msg, level=SandeshLevel.SYS_DEBUG)
             trace = self._generate_msgbus_notify_trace(oper_info)
-
+            r_class = self._db_client_mgr.get_resource_class(oper_info['type'])
+            if not r_class:
+                return
             if oper_info['oper'] == 'CREATE':
                 self._dbe_create_notification(oper_info)
             if oper_info['oper'] == 'UPDATE':
@@ -1085,7 +1087,8 @@ class VncServerKombuClient(VncKombuClient):
     def _dbe_create_notification(self, obj_info):
         obj_dict = obj_info['obj_dict']
 
-        self.dbe_uve_trace("CREATE", obj_info['type'], obj_info['uuid'], obj_dict)
+        if not self._ifmap_disable:
+            self.dbe_uve_trace("CREATE", obj_info['type'], obj_info['uuid'], obj_dict)
 
         try:
             r_class = self._db_client_mgr.get_resource_class(obj_info['type'])
@@ -1118,8 +1121,8 @@ class VncServerKombuClient(VncKombuClient):
             return
 
         new_obj_dict = result
-
-        self.dbe_uve_trace("UPDATE", obj_info['type'], obj_info['uuid'], new_obj_dict)
+        if not self._ifmap_disable:
+            self.dbe_uve_trace("UPDATE", obj_info['type'], obj_info['uuid'], new_obj_dict)
 
         try:
             r_class = self._db_client_mgr.get_resource_class(obj_info['type'])
@@ -1949,7 +1952,7 @@ class VncDbClient(object):
                 return (ok, None, total)
             else:
                 (ok, result) = self._search_db.count(obj_type=obj_type, body=body, params=params)
-                return (ok, None, total)
+                return (ok, None, result)
         else:
             if obj_uuids or parent_uuids or back_ref_uuids or filters or not self._search_db.enabled(obj_type):
                 (ok, cassandra_result) = self._cassandra_db.object_list(

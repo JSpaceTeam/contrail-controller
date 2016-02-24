@@ -1956,8 +1956,7 @@ class VncApiServer(object):
         apiConfig.body = body
 
         self._set_api_audit_info(apiConfig)
-        log = VncApiConfigLog(api_log=apiConfig, sandesh=self._sandesh)
-        log.send(sandesh=self._sandesh)
+        self.vnc_api_config_log(apiConfig)
     # end prop_collection_update_http_post
 
     def ref_update_http_post(self):
