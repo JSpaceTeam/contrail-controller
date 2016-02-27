@@ -167,8 +167,6 @@ class VncApiServerBase(VncApiServer):
         self.__load_middleware()
         self._auth_svc = auth_svc
 
-        # API/Permissions check
-        self._permissions = vnc_perms.VncPermissions(self, self._args)
 
         # DB interface initialization
         if self._args.wipe_config:
@@ -176,6 +174,13 @@ class VncApiServerBase(VncApiServer):
         else:
             self._db_connect(self._args.reset_config)
             self._db_init_entries()
+
+        # API/Permissions check
+        # after db init (uses db_conn)
+        self._rbac = vnc_rbac.VncRbac(self, self._db_conn)
+        self._permissions = vnc_perms.VncPermissions(self, self._args)
+        if self._args.multi_tenancy_with_rbac:
+            self._create_default_rbac_rule()
 
     @classmethod
     def _generate_rpc_uri(cls, obj):
@@ -206,6 +211,10 @@ class VncApiServerBase(VncApiServer):
         return None
 
     # end get_rpc_input_type
+
+    #Override trace since we are using logger middleware
+    def _generate_rest_api_request_trace(self):
+        return None
 
     @classmethod
     def _generate_search_methods(cls, obj):
@@ -408,41 +417,7 @@ class VncApiServerBase(VncApiServer):
         return bottle.HTTPResponse(status=200)
 
 
-    # Override Route
-    def route(self, uri, method, handler):
 
-        def handler_trap_exception(*args, **kwargs):
-            set_context(ApiContext(external_req=bottle.request))
-            trace = None
-            try:
-                self._extensions_transform_request(get_request())
-                self._extensions_validate_request(get_request())
-
-                trace = self._generate_rest_api_request_trace()
-                # (ok, status) = self._rbac.validate_request(get_request())
-                # if not ok:
-                #     (code, err_msg) = status
-                #     raise cfgm_common.exceptions.HttpError(code, err_msg)
-                response = handler(*args, **kwargs)
-                self._generate_rest_api_response_trace(trace, response)
-
-                self._extensions_transform_response(get_request(), response)
-
-                return response
-            except Exception as e:
-                # don't log details of bottle.abort i.e handled error cases
-                if isinstance(e, cfgm_common.exceptions.HttpError):
-                    bottle.abort(e.status_code, e.content)
-                else:
-                    string_buf = StringIO()
-                    cgitb_hook(file=string_buf, format="text")
-                    err_msg = string_buf.getvalue()
-                    self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
-                    raise
-        logger.debug("Add route: %s " % uri)
-        bottle.route(uri, method, handler_trap_exception)
-
-    # end route
 
     def config_log(self, err_str, level=SandeshLevel.SYS_INFO):
         logging.log(SandeshBaseLogger.get_py_logger_level(level), err_str)
