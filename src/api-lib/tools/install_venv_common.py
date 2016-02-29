@@ -123,6 +123,7 @@ class InstallVenv(object):
         self.pip_install(find_links, 'pip>=6.0')
         self.pip_install(find_links, 'setuptools')
         self.pip_install(find_links, 'pbr')
+        self.pip_install(find_links, 'markerlib')
 
         self.pip_install(find_links, '-r', self.requirements, '-r', self.test_requirements, '--pre')
 
