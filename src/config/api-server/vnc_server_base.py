@@ -134,7 +134,10 @@ class VncApiServerBase(VncApiServer):
 
 
         for act_res in _ACTION_RESOURCES:
-            link = LinkObject('action', self._base_url, act_res['uri'],
+            uri = act_res['uri']
+            if SERVICE_PATH:
+                uri = '%s%s' % (SERVICE_PATH, uri)
+            link = LinkObject('action', self._base_url, uri,
                               act_res['link_name'])
             self._homepage_links.append(link)
         # Enable/Disable multi tenancy
@@ -181,6 +184,11 @@ class VncApiServerBase(VncApiServer):
         self._permissions = vnc_perms.VncPermissions(self, self._args)
         if self._args.multi_tenancy_with_rbac:
             self._create_default_rbac_rule()
+
+        @bottle.hook('before_request')
+        def strip_path(): # pylint: disable=W0612
+            bottle.request.environ['PATH_INFO'] = bottle.request.\
+                    environ['PATH_INFO'].rstrip('/')
 
     @classmethod
     def _generate_rpc_uri(cls, obj):
