@@ -202,14 +202,20 @@ class VncApiServer(object):
 
     def __new__(cls, *args, **kwargs):
         obj = super(VncApiServer, cls).__new__(cls, *args, **kwargs)
-        bottle.route('/', 'GET', obj.homepage_http_get)
+        if SERVICE_PATH:
+            bottle.route('%s' % SERVICE_PATH, 'GET', obj.homepage_http_get)
+        else:
+            bottle.route('/', 'GET', obj.homepage_http_get)
 
         cls._generate_resource_crud_methods(obj)
         cls._generate_resource_crud_uri(obj)
         for act_res in _ACTION_RESOURCES:
             http_method = act_res.get('method', 'POST')
             method_name = getattr(obj, act_res['method_name'])
-            obj.route(act_res['uri'], http_method, method_name)
+            uri = act_res['uri']
+            if SERVICE_PATH:
+                uri = '%s%s' % (SERVICE_PATH, uri)
+            obj.route(uri, http_method, method_name)
         return obj
     # end __new__
 
@@ -1302,7 +1308,10 @@ class VncApiServer(object):
         self.get_resource_class('bgp-as-a-service').generate_default_instance = False
 
         for act_res in _ACTION_RESOURCES:
-            link = LinkObject('action', self._base_url, act_res['uri'],
+            uri = act_res['uri']
+            if SERVICE_PATH:
+                uri = '%s%s' % (SERVICE_PATH, uri)
+            link = LinkObject('action', self._base_url, uri,
                               act_res['link_name'], act_res['method'])
             self._homepage_links.append(link)
 
@@ -1677,7 +1686,7 @@ class VncApiServer(object):
         json_body = {}
         json_links = []
         # strip trailing '/' in url
-        url = get_request().url[:-1]
+        url = get_request().url.rstrip('/').rstrip(SERVICE_PATH)
         for link in self._homepage_links:
             # strip trailing '/' in url
             json_links.append(

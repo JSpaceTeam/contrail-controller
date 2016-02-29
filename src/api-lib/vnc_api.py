@@ -27,7 +27,7 @@ from cfgm_common.exceptions import *
 from cfgm_common import ssl_adapter
 
 from pprint import pformat
-
+from gen.vnc_api_server_gen import SERVICE_PATH
 
 ASC = 'asc'
 DESC = 'desc'
@@ -116,7 +116,7 @@ class VncApi(object):
 
     # Connection to api-server through Quantum
     _DEFAULT_WEB_PORT = 8082
-    _DEFAULT_BASE_URL = "/"
+    _DEFAULT_BASE_URL = '%s/' % SERVICE_PATH
 
     # The number of items beyond which instead of GET /<collection>
     # a POST /list-bulk-collection is issued
