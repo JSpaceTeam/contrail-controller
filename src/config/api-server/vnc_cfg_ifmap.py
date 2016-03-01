@@ -2440,7 +2440,6 @@ class VncSearchDbClient(VncSearchItf):
                 matches.append(match)
         except NoIdError as e:
             return (False, str(e))
-
         return (True, matches)
 
     # dbe_read_multi
