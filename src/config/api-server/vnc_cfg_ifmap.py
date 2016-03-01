@@ -2424,6 +2424,26 @@ class VncSearchDbClient(VncSearchItf):
 
     # dbe_list
 
+    def dbe_read_multi(self, obj_type, ids_list, params=None):
+        obj_type = obj_type.replace('-', '_')
+        if params is None:
+            params = {}
+        elif params and 'filter' in params:
+            body = SearchUtil.convert_to_es_query_dsl(params)
+            self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
+        if 'size' not in params:
+            params['size'] = 1000
+        matches = []
+        try:
+            for id in ids_list:
+                match = self._es_client.get_source(index=self.index, doc_type=obj_type, id=id['uuid'], params=params)
+                matches.append(match)
+        except NoIdError as e:
+            return (False, str(e))
+        return (True, matches)
+
+    # dbe_read_multi
+
     def count(self, obj_type, body=None, params=None):
         obj_type = obj_type.replace('-', '_')
         if params is None:
