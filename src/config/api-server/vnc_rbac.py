@@ -165,7 +165,7 @@ class VncRbac(object):
     # end
 
     def request_path_to_obj_type(self, path):
-        obj_type = path.replace("%s" % SERVICE_PATH, '').split("/")[1]
+        obj_type = path.replace("%s" % SERVICE_PATH, '', 1).split("/")[1]
         return obj_type
 
         """
