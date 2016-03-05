@@ -297,6 +297,9 @@ def parse_args(args_str):
     parser.add_argument(
         "--disable_ifmap", action="store_true",
         help="Disable if map")
+    parser.add_argument(
+        "--service_lookup_file",
+        help="Service lookup yaml file")
     args_obj, remaining_argv = parser.parse_known_args(remaining_argv)
     args_obj.config_sections = config
     if type(args_obj.cassandra_server_list) is str:
