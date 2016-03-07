@@ -3,7 +3,6 @@ from gevent import monkey
 monkey.patch_all()
 from gevent import hub
 import abc
-
 """
 Overriding the base api_stats logger to do nothing
 """
@@ -27,6 +26,7 @@ from bottle import request
 from gen.resource_xsd import *
 from cfgm_common.vnc_extensions import ExtensionManager, ApiHookManager
 from pysandesh.sandesh_base_logger import SandeshBaseLogger
+from csp_services_common import cfg
 
 # Parse config for olso configs. Try to move all config parsing to oslo cfg
 elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
