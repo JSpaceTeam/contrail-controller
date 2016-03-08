@@ -491,6 +491,8 @@ class VncApiServer(object):
         try:
             self._extension_mgrs['resourceApi'].map_method(
                 'pre_%s_read' %(obj_type), id)
+        except HttpError:
+            raise
         except Exception as e:
             pass
 
@@ -569,6 +571,8 @@ class VncApiServer(object):
         try:
             self._extension_mgrs['resourceApi'].map_method(
                 'post_%s_read' %(obj_type), id, rsp_body)
+        except HttpError:
+            raise
         except Exception as e:
             pass
 
