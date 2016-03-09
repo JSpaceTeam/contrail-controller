@@ -193,6 +193,11 @@ cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing',default=False,
 cfg.CONF.register_cli_opt(cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
                           group=elastic_search_group)
 
+class OWERTYPE(object):
+    DEFAULT = 1
+    FQ_PROJECT = 2
+    CUSTOMIZED = 3
+
 
 class VncApiServer(object):
     """
@@ -2965,6 +2970,33 @@ class VncApiServer(object):
                 %(invalid_chars))
     # end _http_post_validate
 
+    def _update_perms2_ownership(self, request, obj_type, obj_dict, multi_tenancy_owner):
+        if multi_tenancy_owner == OWERTYPE.CUSTOMIZED:
+            return obj_dict
+
+        multi_tenancy_rule = self.get_resource_class(obj_type).multi_tenancy_rule
+        multi_tenancy_owner = multi_tenancy_rule.get('owner', 1)
+        multi_tenancy_owner_access = multi_tenancy_rule.get('owner_access', 7)
+        multi_tenancy_share = multi_tenancy_rule.get('share', [])
+        multi_tenancy_global_access = multi_tenancy_rule.get('global_access', 0)
+
+        obj_dict['perms2']['owner_access'] = multi_tenancy_owner_access
+        obj_dict['perms2']['share'] = multi_tenancy_share
+        obj_dict['perms2']['global_access'] = multi_tenancy_global_access
+
+        if multi_tenancy_owner == OWERTYPE.FQ_PROJECT:
+            try:
+                owner = self._db_conn.fq_name_to_uuid('project', obj_dict['fq_name'][:2]).replace('-', '')
+            except Exception as ex:
+                owner = None
+                logger.warn("Cannot set owner to fq_name project id, exception caught %s", ex.message)
+            obj_dict['perms2']['owner'] = owner
+        else:  # if owner type is default or invalid type value, use default token pj id
+            # set ownership of object to creator tenant
+            owner = request.headers.environ.get('HTTP_X_PROJECT_ID', None)
+            obj_dict['perms2']['owner'] = owner
+        return obj_dict
+
     def _http_post_common(self, request, obj_type, obj_dict):
         # If not connected to zookeeper do not allow operations that
         # causes the state change
@@ -2992,13 +3024,22 @@ class VncApiServer(object):
         except NoIdError:
             pass
 
+        multi_tenancy_owner = OWERTYPE.DEFAULT
+
+        if 'perms2' in obj_dict:
+            multi_tenancy_owner = OWERTYPE.CUSTOMIZED  # if input has perms2, leaving the input intact
+            logger.info("Input contains perms2")
+
         # Ensure object has at least default permissions set
         self._ensure_id_perms_present(obj_type, None, obj_dict)
         self._ensure_perms2_present(obj_type, None, obj_dict)
 
-        # set ownership of object to creator tenant
-        owner = request.headers.environ.get('HTTP_X_PROJECT_ID', None)
-        obj_dict['perms2']['owner'] = owner
+        if not self.is_multi_tenancy_with_rbac_set():
+            # set ownership of object to creator tenant
+            owner = request.headers.environ.get('HTTP_X_PROJECT_ID', None)
+            obj_dict['perms2']['owner'] = owner
+        else:
+            obj_dict = self._update_perms2_ownership(request, obj_type, obj_dict, multi_tenancy_owner)
 
         # TODO check api + resource perms etc.
 

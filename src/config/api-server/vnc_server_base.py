@@ -45,6 +45,22 @@ cfg.CONF.register_cli_opt(
     group=elastic_search_group)
 
 
+RBAC_RULE = 'rbac_rule'
+MULTI_TENANCY = 'multi_tenancy'
+
+
+class Policy(object):
+    """An object to hold rbac and multi tenancy policy"""
+
+    def __init__(self, filename):
+        with open(filename) as policy_file:
+            self.policy_json = json.loads(policy_file.read())
+
+    def get_default_rbac_rule(self):
+        return self.policy_json.get(RBAC_RULE).get('default')
+
+    def get_multi_tenancy_rule(self):
+        return self.policy_json.get(MULTI_TENANCY)
 
 
 class VncApiServerBase(VncApiServer):
@@ -219,6 +235,26 @@ class VncApiServerBase(VncApiServer):
         return None
 
     # end get_rpc_input_type
+
+    def _update_default_rbac_rule(self, rbac_rule):
+        obj_type = 'api-access-list'
+        fq_name = ['default-domain', 'default-api-access-list']
+        id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
+        (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid': id})
+        obj_dict['api_access_list_entries'] = {'rbac_rule': rbac_rule}
+        self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
+        logger.info("Updated default rbac rule")
+
+    # end _update_default_rbac_rule
+
+    def _update_multi_tenancy_rule(self, multi_tenancy_rule):
+        for resource in multi_tenancy_rule.keys():
+            if not resource.startswith('r:'):
+                rule = multi_tenancy_rule.get(resource)
+                self.get_resource_class(resource).multi_tenancy_rule = multi_tenancy_rule.get(rule)
+        logger.info("Updated multi-tenancy rule")
+
+    # end _update_multi_tenancy_rule
 
     #Override trace since we are using logger middleware
     def _generate_rest_api_request_trace(self):
