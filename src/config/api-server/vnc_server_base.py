@@ -200,6 +200,14 @@ class VncApiServerBase(VncApiServer):
         self._permissions = vnc_perms.VncPermissions(self, self._args)
         if self._args.multi_tenancy_with_rbac:
             self._create_default_rbac_rule()
+            policy = None
+            try:
+                policy = Policy("policy/policy.json")
+            except Exception:
+                logger.warn("Cannot load policy file, apply default policy")
+            if policy:
+                self._update_default_rbac_rule(policy.get_default_rbac_rule())
+                self._update_multi_tenancy_rule(policy.get_multi_tenancy_rule())
 
         @bottle.hook('before_request')
         def strip_path(): # pylint: disable=W0612
