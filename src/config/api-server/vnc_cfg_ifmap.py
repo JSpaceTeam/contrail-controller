@@ -2344,10 +2344,15 @@ class VncSearchDbClient(VncSearchItf):
     # ____initialize_index_schema
 
     def _scrub_dict(self, obj_dict):
-        if not isinstance(obj_dict, dict):
+        if isinstance(obj_dict, list):
+            dict_list=[]
+            for item in obj_dict:
+                dict_list.append(self._scrub_dict(item))
+            return dict_list
+        elif isinstance(obj_dict, dict):
+            return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if v is not None and not self._is_unsupported_entry(k))
+        else:
             return obj_dict
-        return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if v is not None and not self._is_unsupported_entry(k))
-
     # end _scrub_dict
 
     def _is_unsupported_entry(self, k):
@@ -2407,9 +2412,6 @@ class VncSearchDbClient(VncSearchItf):
         obj_type = obj_type.replace('-', '_')
         if params is None:
             params = {}
-        elif params and 'filter' in params:
-            body = SearchUtil.convert_to_es_query_dsl(params)
-            self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
         if 'size' not in params:
             params['size'] = 1000
         matches = self._es_client.search(index=self.index, doc_type=obj_type, body=body, params=params)
@@ -2448,9 +2450,6 @@ class VncSearchDbClient(VncSearchItf):
         obj_type = obj_type.replace('-', '_')
         if params is None:
             params = {}
-        elif params and 'filter' in params:
-            body = SearchUtil.convert_to_es_query_dsl(params)
-            self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
         result = self._es_client.count(index=self.index, doc_type=obj_type, body=body, params=params)
         total = result['count']
         return (True, total)
@@ -2496,12 +2495,19 @@ class SearchUtil:
                     "\r\n", "\t"]
 
     @classmethod
-    def convert_to_es_query_dsl(self, params):
-        body = {}
-        if 'filter' in params:
+    def convert_to_es_query_dsl(self, body=None, params=None, owner=None):
+        if params and 'filter' in params:
+            body = {}
             body['query'] = self._parser_filter(params['filter'])
-        else:
+        if body is None:
+            body = {}
             body['query'] = {'match_all': {}}
+        if owner:
+            if 'match_all' in body['query']:
+                body['query']={"term":{"perms2.owner._raw":owner}}
+            else:
+                query_json=body['query']
+                body['query']={"bool":{"must":[{"term":{"perms2.owner._raw":owner}},query_json]}}
         return body
 
     # end convert_to_es_query_dsl

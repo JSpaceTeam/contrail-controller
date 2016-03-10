@@ -62,7 +62,7 @@ try:
     import vnc_cfg_types
 except:
     pass
-from vnc_cfg_ifmap import VncDbClient
+from vnc_cfg_ifmap import VncDbClient, SearchUtil
 
 from cfgm_common import ignore_exceptions, imid
 from cfgm_common.uve.vnc_api.ttypes import VncApiCommon, VncApiConfigLog,\
@@ -2332,10 +2332,10 @@ class VncApiServer(object):
             del body['filters']
         if 'type' in body:
             del body['type']
-
+        params=get_request().query
         return self._list_collection(resource_type, parent_uuids, back_ref_uuids,
                                      obj_uuids, is_count, is_detail, filters=filters,
-                                     body=body, req_fields=req_fields)
+                                     body=body, req_fields=req_fields, params=params)
     #end _http_post_filter
 
     # Private Methods
@@ -2661,6 +2661,21 @@ class VncApiServer(object):
                          req_fields=None, body=None, params=None):
         obj_type = resource_type.replace('-', '_') # e.g. virtual_network
 
+        env = get_request().headers.environ
+        tenant_name = env.get(hdr_server_tenant(), 'default-project')
+        tenant_fq_name = ['default-domain', tenant_name]
+        owner = None
+        try:
+            tenant_uuid = self._db_conn.fq_name_to_uuid('project', tenant_fq_name)
+            if self.is_multi_tenancy_set():
+                owner = tenant_uuid.replace('-','')
+            shares = self._db_conn.get_shared_objects(obj_type, tenant_uuid)
+        except NoIdError:
+            shares = []
+        if cfg.CONF.elastic_search.search_enabled:
+            body = SearchUtil.convert_to_es_query_dsl(body, params, owner)
+            self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_INFO)
+
         (ok, result, total) = self._db_conn.dbe_list(obj_type,
                              parent_uuids, back_ref_uuids, obj_uuids, is_count,
                              filters=filters, body=body, params=params)
@@ -2680,14 +2695,6 @@ class VncApiServer(object):
                 result.remove((fq_name, uuid))
 
         # include objects shared with tenant
-        env = get_request().headers.environ
-        tenant_name = env.get(hdr_server_tenant(), 'default-project')
-        tenant_fq_name = ['default-domain', tenant_name]
-        try:
-            tenant_uuid = self._db_conn.fq_name_to_uuid('project', tenant_fq_name)
-            shares = self._db_conn.get_shared_objects(obj_type, tenant_uuid)
-        except NoIdError:
-            shares = []
         for (obj_uuid, obj_perm) in shares:
             try:
                 fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
@@ -2699,7 +2706,7 @@ class VncApiServer(object):
         obj_dicts = []
         if not is_detail:
             if not self.is_admin_request():
-                obj_ids_list = [{'uuid': obj_uuid} 
+                obj_ids_list = [{'uuid': obj_uuid}
                                 for _, obj_uuid in fq_names_uuids]
                 obj_fields = [u'id_perms']
                 if req_fields:
