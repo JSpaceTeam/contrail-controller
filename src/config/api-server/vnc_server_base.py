@@ -202,7 +202,7 @@ class VncApiServerBase(VncApiServer):
             self._create_default_rbac_rule()
             policy = None
             try:
-                policy = Policy("policy/policy.json")
+                policy = Policy("app_cfg_server/policy/policy.json")
             except Exception:
                 logger.warn("Cannot load policy file, apply default policy")
             if policy:
