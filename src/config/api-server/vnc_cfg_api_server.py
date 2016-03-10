@@ -2667,8 +2667,9 @@ class VncApiServer(object):
             shares = self._db_conn.get_shared_objects(obj_type, tenant_uuid)
         except NoIdError:
             shares = []
-        body = SearchUtil.convert_to_es_query_dsl(body, params, owner)
-        self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_INFO)
+        if cfg.CONF.elastic_search.search_enabled:
+            body = SearchUtil.convert_to_es_query_dsl(body, params, owner)
+            self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_INFO)
 
         (ok, result, total) = self._db_conn.dbe_list(obj_type,
                              parent_uuids, back_ref_uuids, obj_uuids, is_count,
