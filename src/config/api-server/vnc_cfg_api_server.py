@@ -352,6 +352,10 @@ class VncApiServer(object):
             result = 'Bad reference in create: ' + result
             raise cfgm_common.exceptions.HttpError(400, result)
 
+        # parent check
+        if r_class.parent_types and 'parent_type' not in obj_dict:
+            raise cfgm_common.exceptions.HttpError(400, 'No parent_type attribute')
+
         # common handling for all resource create
         (ok, result) = self._post_common(
             get_request(), resource_type, obj_dict)
@@ -367,9 +371,11 @@ class VncApiServer(object):
 
         db_conn = self._db_conn
 
+
         # if client gave parent_type of config-root, ignore and remove
         if 'parent_type' in obj_dict and obj_dict['parent_type'] == 'config-root':
             del obj_dict['parent_type']
+
 
         if 'parent_type' in obj_dict:
             # non config-root child, verify parent exists
