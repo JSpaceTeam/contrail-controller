@@ -198,6 +198,13 @@ class OWERTYPE(object):
     FQ_PROJECT = 2
     CUSTOMIZED = 3
 
+class SHARETYPE(object):
+    GLOBAL_SHARED = 1
+    FQ_TENANT_SHARED = 2
+
+    @classmethod
+    def allowed(cls):
+        return [1, 2]
 
 class VncApiServer(object):
     """
@@ -351,10 +358,11 @@ class VncApiServer(object):
         if not ok:
             result = 'Bad reference in create: ' + result
             raise cfgm_common.exceptions.HttpError(400, result)
-
+        
         # parent check
         if r_class.parent_types and 'parent_type' not in obj_dict:
             raise cfgm_common.exceptions.HttpError(400, 'No parent_type attribute')
+
 
         # common handling for all resource create
         (ok, result) = self._post_common(
@@ -371,11 +379,9 @@ class VncApiServer(object):
 
         db_conn = self._db_conn
 
-
         # if client gave parent_type of config-root, ignore and remove
         if 'parent_type' in obj_dict and obj_dict['parent_type'] == 'config-root':
             del obj_dict['parent_type']
-
 
         if 'parent_type' in obj_dict:
             # non config-root child, verify parent exists
@@ -491,6 +497,12 @@ class VncApiServer(object):
                       %(obj_type, obj_dict)
             err_msg += cfgm_common.utils.detailed_traceback()
             self.config_log(err_msg, level=SandeshLevel.SYS_NOTICE)
+
+        if self.is_multi_tenancy_with_rbac_set(): # updating perms2 for share relation
+            try:
+                self._update_refs_perms2(obj_type, obj_dict, 'ADD')
+            except Exception as e:
+                logger.error("Failed updating share-relation: %s", e.message)
 
         return {resource_type: rsp_body}
     # end http_resource_create
@@ -719,6 +731,14 @@ class VncApiServer(object):
             err_msg += cfgm_common.utils.detailed_traceback()
             self.config_log(err_msg, level=SandeshLevel.SYS_NOTICE)
 
+        if self.is_multi_tenancy_with_rbac_set():
+            try:
+                refs_add, refs_del = self._refs_diff(obj_type, read_result, obj_dict)
+                self._update_refs_perms2(obj_type, refs_add, 'ADD')
+                self._update_refs_perms2(obj_type, refs_del, 'DELETE')
+            except Exception as e:
+                logger.error("Failed updating share-relation: %s", e.message)
+
         return {resource_type: rsp_body}
     # end http_resource_update
 
@@ -737,6 +757,7 @@ class VncApiServer(object):
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
                 404, 'ID %s does not exist' %(id))
+
 
         try:
             self._extension_mgrs['resourceApi'].map_method(
@@ -765,6 +786,15 @@ class VncApiServer(object):
             self.config_object_error(
                 id, None, obj_type, 'http_delete', read_result)
             # proceed down to delete the resource
+
+        pj_id = None
+        if self.is_multi_tenancy_with_rbac_set() and read_ok:
+            try:
+                pj_id = self._db_conn.fq_name_to_uuid('project', read_result.get('fq_name')[:2]).replace('-', '')
+            except cfgm_common.exceptions.NoIdError:
+                logger.warn("No uuid for project based on fq_name %s[:2] of %s", read_result.get('fq_name'), obj_type)
+            except Exception as e:
+                logger.warn("Cannot get project info for obj (%s): %s", read_result.get('fq_name'), e.message)
 
         # common handling for all resource delete
         parent_type = read_result.get('parent_type')
@@ -899,6 +929,12 @@ class VncApiServer(object):
                       %(obj_type, id)
             err_msg += cfgm_common.utils.detailed_traceback()
             self.config_log(err_msg, level=SandeshLevel.SYS_NOTICE)
+
+        if self.is_multi_tenancy_with_rbac_set():
+            try:
+                self._update_refs_perms2(obj_type, read_result, 'DELETE', pj_id)
+            except Exception as e:
+                logger.error("Failed updating share-relation: %s", e.message)
     # end http_resource_delete
 
     @log_api_stats
@@ -2095,6 +2131,12 @@ class VncApiServer(object):
             err_msg += cfgm_common.utils.detailed_traceback()
             self.config_log(err_msg, level=SandeshLevel.SYS_NOTICE)
 
+        if self.is_multi_tenancy_with_rbac_set():
+            try:
+                self._update_ref_perms2(obj_type, obj_dict, ref_type.replace('_', '-'), ref_uuid, operation.upper())
+            except Exception as e:
+                logger.error("Failed updating share-relation: %s", e.message)
+
         apiConfig = VncApiCommon()
         apiConfig.object_type = obj_type.replace('-', '_')
         fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
@@ -2990,11 +3032,9 @@ class VncApiServer(object):
         multi_tenancy_rule = self.get_resource_class(obj_type).multi_tenancy_rule
         multi_tenancy_owner = multi_tenancy_rule.get('owner', 1)
         multi_tenancy_owner_access = multi_tenancy_rule.get('owner_access', 7)
-        multi_tenancy_share = multi_tenancy_rule.get('share', [])
         multi_tenancy_global_access = multi_tenancy_rule.get('global_access', 0)
 
         obj_dict['perms2']['owner_access'] = multi_tenancy_owner_access
-        obj_dict['perms2']['share'] = multi_tenancy_share
         obj_dict['perms2']['global_access'] = multi_tenancy_global_access
 
         if multi_tenancy_owner == OWERTYPE.FQ_PROJECT:
@@ -3009,6 +3049,121 @@ class VncApiServer(object):
             owner = request.headers.environ.get('HTTP_X_PROJECT_ID', None)
             obj_dict['perms2']['owner'] = owner
         return obj_dict
+
+    def _get_share_rules(self, obj_type, ref_type):
+        multi_tenancy_rule = self.get_resource_class(ref_type).multi_tenancy_rule
+        ok, rules = True, None
+        try:
+            share_type = multi_tenancy_rule.get('share').get(obj_type)[0]
+            share_access = multi_tenancy_rule.get('share').get(obj_type)[1]
+            global_access = multi_tenancy_rule.get('global_access')
+            ok = True if share_type in SHARETYPE.allowed() else False
+            if ok:
+                rules = {'share_type': share_type, 'share_access': share_access, 'global_access': global_access}
+        except Exception:
+            ok = False
+        return ok, rules
+
+    def _refs_diff(self, obj_type, old_obj, new_obj):
+        ref_add_dict, ref_del_dict = copy.deepcopy(old_obj), copy.deepcopy(old_obj)
+        for ref_name in self.get_resource_class(obj_type).ref_fields:
+            refs_in_old, refs_in_new = old_obj.get(ref_name), new_obj.get(ref_name)
+            if refs_in_new is None:
+                ref_add_dict[ref_name], ref_del_dict[ref_name] = [], []
+            elif not refs_in_old:
+                ref_add_dict[ref_name], ref_del_dict[ref_name] = refs_in_new, []
+            elif refs_in_old and isinstance(refs_in_new, list) and len(refs_in_new) == 0:
+                ref_add_dict[ref_name], ref_del_dict[ref_name] = [], refs_in_old
+            else:
+                try:
+                    old_dict = {k.get("uuid"): k for k in refs_in_old}
+                    new_dict = {k.get("uuid"): k for k in refs_in_new}
+                    refs_del, refs_add = [], []
+                    for k in old_dict.keys():
+                        if new_dict.get(k):
+                            refs_add.append(new_dict.get(k))
+                            new_dict.pop(k, None)
+                        else:
+                            refs_del.append(old_dict.get(k))
+                    ref_add_dict[ref_name], ref_del_dict[ref_name] = refs_add, refs_del
+                    for k in new_dict.keys():
+                        ref_add_dict.get(ref_name).append(new_dict.get(k))
+                except Exception: # input format has exception, no change
+                    ref_add_dict[ref_name], ref_del_dict[ref_name] = [], []
+        return ref_add_dict, ref_del_dict
+
+    def _update_refs_perms2(self, obj_type, obj_dict, operation, project_id=None):
+        for ref_name in self.get_resource_class(obj_type).ref_fields:
+            ref_type = ref_name.replace('_refs', '').replace('_', '-')
+            obj_type = obj_type.replace('_', '-')
+            has_share_rule, share_rules = self._get_share_rules(obj_type, ref_type)
+            if not has_share_rule:
+                continue
+            for ref_dict in obj_dict.get(ref_name) or []:
+                ref_uuid = ref_dict.get('uuid')
+                try:
+                    self._update_refs_perms2_common(obj_dict, ref_type, ref_uuid, operation, share_rules, project_id)
+                except Exception as e:
+                    logger.error("Caught exception when updating %s with uuid %s: %s", ref_type, ref_uuid, e.message)
+
+    def _update_ref_perms2(self, obj_type, obj_dict, ref_type, ref_uuid, operation):
+        obj_type = obj_type.replace('_', '-')
+        has_share_rule, share_rules = self._get_share_rules(obj_type, ref_type)
+        if not has_share_rule:
+            return
+        try:
+            self._update_refs_perms2_common(obj_dict, ref_type, ref_uuid, operation, share_rules)
+        except Exception as e:
+            logger.error("Caught exception when updating %s with uuid %s: %s", ref_type, ref_uuid, e.message)
+
+    def _update_refs_perms2_common(self, obj_dict, ref_type, ref_uuid, operation, share_rules, project_id=None):
+        logger.info("Updating refs perms2: ref_type=%s ref_uuid=%s operation=%s share_rules=%s",
+                    ref_type, ref_uuid, operation, str(share_rules))
+        share_type = share_rules.get('share_type')
+        share_access = share_rules.get('share_access')
+        global_access = share_rules.get('global_access')
+        ref_ok = False
+        try:
+            (ref_ok, ref_result) = self._db_conn.dbe_read(ref_type, {"uuid": ref_uuid})
+        except cfgm_common.exceptions.NoIdError:
+            logger.error("No uuid %s for %s", ref_uuid, ref_type)
+        except Exception as e:
+            logger.error("Cannot read %s with uuid %s: %s", ref_type, ref_uuid, e.message)
+        if not ref_ok:
+            return False
+        ref_dict = copy.deepcopy(ref_result)
+        if share_type == SHARETYPE.GLOBAL_SHARED:
+            if operation == 'ADD':
+                ref_dict.get('perms2')['global_access'] = share_access
+            elif operation == 'DELETE':
+                ref_dict.get('perms2')['global_access'] = global_access
+        elif share_type == SHARETYPE.FQ_TENANT_SHARED:
+            share_list, tenant_id = ref_dict.get('perms2').get('share'), None
+            tmp_dict = {k.get("tenant"): k for k in share_list}
+            try:
+                tenant_id = project_id if project_id else \
+                    self._db_conn.fq_name_to_uuid('project', obj_dict['fq_name'][:2]).replace('-', '')
+            except cfgm_common.exceptions.NoIdError:
+                logger.error("No uuid for project %s", obj_dict['fq_name'][:2])
+            except Exception as e:
+                logger.error("Cannot get project info for obj (%s): %s", obj_dict.get('fq_name'), e.message)
+            if not tenant_id:
+                return False
+            if operation == 'ADD':
+                tmp_dict[tenant_id] = {"tenant": tenant_id, "tenant_access": share_access}
+            elif operation == 'DELETE':
+                tmp_dict.pop(tenant_id, None)
+            ref_dict.get('perms2')['share'] = tmp_dict.values()
+        try:
+            self._db_conn.dbe_update(ref_type, {"uuid": ref_uuid}, ref_dict)
+        except cfgm_common.exceptions.NoIdError:
+            logger.error("No uuid %s for %s", ref_uuid, ref_type)
+            return False
+        except Exception as e:
+            logger.error("Cannot update %s with uuid %s: %s", ref_type, ref_uuid, e.message)
+            return False
+        logger.info("Updating share relation in perms2 successful for %s with uuid %s", ref_type, ref_uuid)
+        return True
 
     def _http_post_common(self, request, obj_type, obj_dict):
         # If not connected to zookeeper do not allow operations that
