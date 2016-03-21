@@ -1,7 +1,6 @@
 from gevent import monkey
 
 monkey.patch_all()
-from gevent import hub
 import abc
 """
 Overriding the base api_stats logger to do nothing
@@ -42,6 +41,10 @@ cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing', default=False,
 
 cfg.CONF.register_cli_opt(
     cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
+    group=elastic_search_group)
+
+cfg.CONF.register_cli_opt(
+    cfg.StrOpt(name='search_client', default=None, help="VncDBSearch client implementation"),
     group=elastic_search_group)
 
 
@@ -213,6 +216,15 @@ class VncApiServerBase(VncApiServer):
         def strip_path(): # pylint: disable=W0612
             bottle.request.environ['PATH_INFO'] = bottle.request.\
                     environ['PATH_INFO'].rstrip('/')
+
+        # Start logger port
+        try:
+            listener = logging.config.listen(9999)
+            listener.start()
+        except Exception as e:
+            logging.error("Failed starting up logger config socket: ", e)
+
+
 
     @classmethod
     def _generate_rpc_uri(cls, obj):
