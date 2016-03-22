@@ -616,7 +616,7 @@ class TestCrud(test_case.ApiServerTestCase):
     def test_create_using_rest_api(self):
         listen_ip = self._api_server_ip
         listen_port = self._api_server._args.listen_port
-        url = 'http://%s:%s/virtual-networks' %(listen_ip, listen_port)
+        url = 'http://%s:%s/virtual-network' %(listen_ip, listen_port)
         vn_body = {
             'virtual-network': {
                 'fq_name': ['default-domain',
@@ -1175,50 +1175,44 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         vmi_uuids = [o.uuid for o in vmi_objs]
 
         logger.info("Querying VNs by obj_uuids.")
-        flexmock(self._api_server).should_call('list_bulk_collection_http_post').once()
         ret_list = self._vnc_lib.resource_list('virtual-network',
                                                obj_uuids=vn_uuids)
-        ret_uuids = [ret['uuid'] for ret in ret_list['virtual-networks']]
+        ret_uuids = [ret['uuid'] for ret in ret_list['virtual-network']]
         self.assertThat(set(vn_uuids), Equals(set(ret_uuids)))
 
         logger.info("Querying RIs by parent_id.")
-        flexmock(self._api_server).should_call('list_bulk_collection_http_post').once()
         ret_list = self._vnc_lib.resource_list('routing-instance',
                                                parent_id=vn_uuids)
         ret_uuids = [ret['uuid']
-                     for ret in ret_list['routing-instances']]
+                     for ret in ret_list['routing-instance']]
         self.assertThat(set(ri_uuids),
             Equals(set(ret_uuids) & set(ri_uuids)))
 
         logger.info("Querying VMIs by back_ref_id.")
-        flexmock(self._api_server).should_call('list_bulk_collection_http_post').once()
         ret_list = self._vnc_lib.resource_list('virtual-machine-interface',
                                                back_ref_id=vn_uuids)
         ret_uuids = [ret['uuid']
-                     for ret in ret_list['virtual-machine-interfaces']]
+                     for ret in ret_list['virtual-machine-interface']]
         self.assertThat(set(vmi_uuids), Equals(set(ret_uuids)))
 
         logger.info("Querying VMIs by back_ref_id and extra fields.")
-        flexmock(self._api_server).should_call('list_bulk_collection_http_post').once()
         ret_list = self._vnc_lib.resource_list('virtual-machine-interface',
                                                back_ref_id=vn_uuids,
                                                fields=['virtual_network_refs'])
         ret_uuids = [ret['uuid']
-                     for ret in ret_list['virtual-machine-interfaces']]
+                     for ret in ret_list['virtual-machine-interface']]
         self.assertThat(set(vmi_uuids), Equals(set(ret_uuids)))
         self.assertEqual(set(vmi['virtual_network_refs'][0]['uuid']
-            for vmi in ret_list['virtual-machine-interfaces']),
+            for vmi in ret_list['virtual-machine-interface']),
             set(vn_uuids))
 
         logger.info("Querying RIs by parent_id and filter.")
-        flexmock(self._api_server).should_call('list_bulk_collection_http_post').once()
         ret_list = self._vnc_lib.resource_list('routing-instance',
             parent_id=vn_uuids,
             filters={'display_name':'%s-ri-5' %(self.id())})
-        self.assertThat(len(ret_list['routing-instances']), Equals(1))
+        self.assertThat(len(ret_list['routing-instance']), Equals(1))
 
         logger.info("Querying VNs by obj_uuids for children+backref fields.")
-        flexmock(self._api_server).should_call('list_bulk_collection_http_post').once()
         ret_objs = self._vnc_lib.resource_list('virtual-network',
             detail=True, obj_uuids=vn_uuids, fields=['routing_instances',
             'virtual_machine_interface_back_refs'])
@@ -1264,7 +1258,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         vn_objs = create_vns()
 
         # unanchored summary list without filters
-        read_vn_dicts = self._vnc_lib.virtual_networks_list()['virtual-networks']
+        read_vn_dicts = self._vnc_lib.virtual_networks_list()['virtual-network']
         self.assertThat(len(read_vn_dicts), Not(LessThan(num_objs)))
         for obj in vn_objs:
             # locate created object, should only be one, expect exact fields
@@ -1277,7 +1271,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         resp = self._vnc_lib.virtual_networks_list(
             filters={'display_name':vn_objs[2].display_name},
             fields=['is_shared'])
-        vn_dicts = resp['virtual-networks']
+        vn_dicts = resp['virtual-network']
         self.assertThat(len(vn_dicts), Equals(1))
         self.assertThat(vn_dicts[0]['uuid'], Equals(vn_objs[2].uuid))
         self.assertThat(set(['fq_name', 'uuid', 'href', 'is_shared']),
@@ -1305,7 +1299,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         # parent anchored summary list without filters, with extra fields
         read_vn_dicts = self._vnc_lib.virtual_networks_list(
             parent_id=proj_obj.uuid,
-            fields=['router_external'])['virtual-networks']
+            fields=['router_external'])['virtual-network']
         self.assertThat(len(read_vn_dicts), Equals(num_objs))
         for obj in vn_objs:
             # locate created object, should only be one, expect exact fields
@@ -1321,7 +1315,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         resp = self._vnc_lib.virtual_networks_list(
             parent_id=proj_obj.uuid,
             filters={'is_shared': vn_objs[2].is_shared})
-        read_vn_dicts = resp['virtual-networks']
+        read_vn_dicts = resp['virtual-network']
         self.assertThat(len(read_vn_dicts), Equals(num_objs))
         for obj in vn_objs:
             # locate created object, should only be one, expect exact fields
@@ -1356,7 +1350,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         resp = self._vnc_lib.virtual_networks_list(
             back_ref_id=ipam_obj.uuid,
             filters={'is_shared':vn_objs[2].is_shared})
-        read_vn_dicts = resp['virtual-networks']
+        read_vn_dicts = resp['virtual-network']
         self.assertThat(len(read_vn_dicts), Equals(num_objs))
         for obj in vn_objs:
             # locate created object, should only be one, expect exact fields
@@ -1371,7 +1365,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             back_ref_id=ipam_obj.uuid,
             filters={'display_name':vn_objs[2].display_name},
             fields=['is_shared', 'router_external'])
-        read_vn_dicts = resp['virtual-networks']
+        read_vn_dicts = resp['virtual-network']
         self.assertEqual(len(read_vn_dicts), 1)
         self.assertEqual(read_vn_dicts[0]['uuid'], vn_objs[2].uuid)
         self.assertEqual(read_vn_dicts[0]['is_shared'], True)
@@ -1436,7 +1430,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         listen_port = self._api_server._args.listen_port
         q_params = 'obj_uuids=%s,%s&fields=is_shared,router_external' %(
             vn1_obj.uuid, vn2_obj.uuid)
-        url = 'http://%s:%s/virtual-networks?%s' %(
+        url = 'http://%s:%s/virtual-network?%s' %(
             listen_ip, listen_port, q_params)
 
         def fake_non_admin_request(orig_method, *args, **kwargs):
@@ -1445,7 +1439,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             'is_admin_request', fake_non_admin_request):
             resp = requests.get(url)
             self.assertEqual(resp.status_code, 200)
-            read_vn_dicts = json.loads(resp.text)['virtual-networks']
+            read_vn_dicts = json.loads(resp.text)['virtual-network']
             self.assertEqual(len(read_vn_dicts), 1)
             self.assertEqual(read_vn_dicts[0]['uuid'], vn1_obj.uuid)
             self.assertEqual(read_vn_dicts[0]['is_shared'], True)
@@ -2052,7 +2046,7 @@ class TestLocalAuth(test_case.ApiServerTestCase):
 
         # equivalent to curl -u foo:bar http://localhost:8095/virtual-networks
         logger.info("Positive case")
-        url = 'http://localhost:%s/virtual-networks' %(admin_port)
+        url = 'http://localhost:%s/virtual-network' %(admin_port)
         resp = requests.get(url, auth=HTTPBasicAuth('foo', 'bar'))
         self.assertThat(resp.status_code, Equals(200))
 
@@ -2164,7 +2158,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
             del request.environ['SERVER_SOFTWARE']
 
             # /virtual-networks -> virtual-network
-            obj_type = request.path[1:-1]
+            obj_type = request.path[1:]
             if request.method == 'POST' and obj_type == 'virtual-network':
                 obj_name = request.json[obj_type]['fq_name'][-1]
                 if 'transform-create' in obj_name:
@@ -2180,7 +2174,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
 
         def validate_request(self, request):
             # /virtual-networks -> virtual-network
-            obj_type = request.path[1:-1]
+            obj_type = request.path[1:]
             if request.method == 'POST' and obj_type == 'virtual-network':
                 obj_name = request.json[obj_type]['fq_name'][-1]
                 if 'validate-create' in obj_name:
@@ -2207,8 +2201,8 @@ class TestExtensionApi(test_case.ApiServerTestCase):
             TestExtensionApi.test_case.assertThat(request.environ['HTTP_X_CONTRAIL_USERAGENT'],
                                        Equals('bar'))
             if request.method == 'POST':
-                obj_type = request.path[1:-1]
-                obj_name = request.json[obj_type]['fq_name'][-1]
+                obj_type = request.path[1:]
+		obj_name = request.json[obj_type]['fq_name'][-1]
                 if 'transform-create' in obj_name:
                     bottle.response.status = '234 Transformed Response'
                     response[obj_type]['extra_field'] = 'foo'
@@ -2249,7 +2243,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
                           {'fq_name': obj.fq_name,
                            'parent_type': 'project',
                            'uuid': obj_request_uuid}}
-        status, content = self._http_post('/virtual-networks',
+	status, content = self._http_post('/virtual-network',
                               body=json.dumps(body_dict))
         self.assertThat(status, Equals(234))
         obj_dict = json.loads(content)['virtual-network']
@@ -2260,10 +2254,10 @@ class TestExtensionApi(test_case.ApiServerTestCase):
         self.assertThat(obj_dict['extra_field'], Equals('foo'))
 
         # read
-        status, content = self._http_get('/virtual-networks',
+        status, content = self._http_get('/virtual-network',
             query_params={'obj_uuids':'replace-me'+obj_dict['uuid']})
         self.assertThat(status, Equals(200))
-        objs_dict = json.loads(content)['virtual-networks']
+        objs_dict = json.loads(content)['virtual-network']
         self.assertThat(len(objs_dict), Equals(1))
         self.assertThat(objs_dict[0]['fq_name'][-1],
                         Equals('transform-create-foo'))
@@ -2284,7 +2278,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
         body_dict = {'virtual-network':
                         {'fq_name': obj.fq_name,
                         'parent_type': 'project'}}
-        status, content = self._http_post('/virtual-networks',
+        status, content = self._http_post('/virtual-network',
                               body=json.dumps(body_dict))
         self.assertThat(status, Equals(456))
         self.assertThat(content, Contains('invalidating create request'))
@@ -2488,7 +2482,7 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
     def test_set_in_resource_body_rest_api(self):
         listen_ip = self._api_server_ip
         listen_port = self._api_server._args.listen_port
-        url = 'http://%s:%s/virtual-machine-interfaces' %(
+        url = 'http://%s:%s/virtual-machine-interface' %(
             listen_ip, listen_port)
         vmi_body = {
             'virtual-machine-interface': {
@@ -2552,7 +2546,7 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
     def _rest_vmi_create(self):
         listen_ip = self._api_server_ip
         listen_port = self._api_server._args.listen_port
-        url = 'http://%s:%s/virtual-machine-interfaces' %(
+        url = 'http://%s:%s/virtual-machine-interface' %(
             listen_ip, listen_port)
         vmi_body = {
             'virtual-machine-interface': {
