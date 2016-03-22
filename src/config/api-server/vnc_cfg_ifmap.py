@@ -2669,21 +2669,26 @@ class SearchUtil(object):
                             }
                         },
                         {
-                            "bool": {
-                                "must": [
-                                    {
-                                        "term": {
-                                            "perms2.share.tenant._raw": tenant_uuid
-                                        }
-                                    },
-                                    {
-                                        "range": {
-                                            "perms2.share.tenant_access": {
-                                                "gte": 4
+                            "nested": {
+                                "path": "perms2.share",
+                                "query": {
+                                    "bool": {
+                                        "must": [
+                                            {
+                                                "term": {
+                                                    "perms2.share.tenant._raw": tenant_uuid
+                                                }
+                                            },
+                                            {
+                                                "range": {
+                                                    "perms2.share.tenant_access": {
+                                                        "gte": 4
+                                                    }
+                                                }
                                             }
-                                        }
+                                        ]
                                     }
-                                ]
+                                }
                             }
                         }
                     ],
