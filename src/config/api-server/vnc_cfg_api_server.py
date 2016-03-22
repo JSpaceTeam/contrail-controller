@@ -2712,16 +2712,16 @@ class VncApiServer(object):
         env = get_request().headers.environ
         tenant_name = env.get(hdr_server_tenant(), 'default-project')
         tenant_fq_name = ['default-domain', tenant_name]
-        owner = None
+        tenant = None
         try:
             tenant_uuid = self._db_conn.fq_name_to_uuid('project', tenant_fq_name)
-            if self.is_multi_tenancy_set():
-                owner = tenant_uuid.replace('-','')
+            if self.is_multi_tenancy_set() and not self.is_admin_request():
+                tenant = tenant_uuid.replace('-','')
             shares = self._db_conn.get_shared_objects(obj_type, tenant_uuid)
         except NoIdError:
             shares = []
         if cfg.CONF.elastic_search.search_enabled:
-            body = SearchUtil.convert_to_es_query_dsl(body, params, owner)
+            body = SearchUtil.convert_to_es_query_dsl(body, params, tenant)
             self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_INFO)
 
         (ok, result, total) = self._db_conn.dbe_list(obj_type,
