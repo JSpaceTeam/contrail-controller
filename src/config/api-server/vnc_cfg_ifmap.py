@@ -2632,21 +2632,50 @@ class SearchUtil(object):
                     "\r\n", "\t"]
 
     @classmethod
-    def convert_to_es_query_dsl(self, body=None, params=None, owner=None):
+    def convert_to_es_query_dsl(self, body=None, params=None, tenant_uuid=None):
         if params and 'filter' in params:
             body = {}
             body['query'] = self._parser_filter(params['filter'])
         if body is None:
             body = {}
             body['query'] = {'match_all': {}}
-        if owner:
+        if tenant_uuid:
+            validate_perms = {
+                "bool": {
+                    "should": [
+                        {
+                            "term": {
+                                "perms2.owner._raw": tenant_uuid
+                            }
+                        },
+                        {
+                            "bool": {
+                                "must": [
+                                    {
+                                        "term": {
+                                            "perms2.share.tenant._raw": tenant_uuid
+                                        }
+                                    },
+                                    {
+                                        "range": {
+                                            "perms2.share.tenant_access": {
+                                                "gte": 5
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "minimum_should_match": 1
+                }
+            }
             if 'match_all' in body['query']:
-                body['query'] = {"term": {"perms2.owner._raw": owner}}
+                body['query'] = validate_perms
             else:
                 query_json = body['query']
-                body['query'] = {"bool": {"must": [{"term": {"perms2.owner._raw": owner}}, query_json]}}
+                body['query'] = {"bool": {"must": [validate_perms, query_json]}}
         return body
-
     # end convert_to_es_query_dsl
 
     @classmethod
