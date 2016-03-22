@@ -2644,8 +2644,28 @@ class SearchUtil(object):
                 "bool": {
                     "should": [
                         {
-                            "term": {
-                                "perms2.owner._raw": tenant_uuid
+                            "range": {
+                                "perms2.global_access": {
+                                    "gte": 4
+                                }
+                            }
+                        },
+                        {
+                            "bool": {
+                                "must": [
+                                    {
+                                        "term": {
+                                            "perms2.owner._raw": tenant_uuid
+                                        }
+                                    },
+                                    {
+                                        "range": {
+                                            "perms2.owner_access": {
+                                                "gte": 4
+                                            }
+                                        }
+                                    }
+                                ]
                             }
                         },
                         {
@@ -2659,7 +2679,7 @@ class SearchUtil(object):
                                     {
                                         "range": {
                                             "perms2.share.tenant_access": {
-                                                "gte": 5
+                                                "gte": 4
                                             }
                                         }
                                     }
@@ -2676,6 +2696,7 @@ class SearchUtil(object):
                 query_json = body['query']
                 body['query'] = {"bool": {"must": [validate_perms, query_json]}}
         return body
+
     # end convert_to_es_query_dsl
 
     @classmethod
