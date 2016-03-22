@@ -9,7 +9,6 @@ import abc
 from elasticsearch.exceptions import TransportError, ConnectionError
 from cfgm_common.zkclient import ZookeeperClient, IndexAllocator
 from elasticsearch.client import IndicesClient, Elasticsearch
-from fixtures._fixtures.mockpatch import mock
 from gevent import ssl, monkey
 from oslo_config import cfg
 from vnc_db_rollback import VncDBRollBackHandler, DB_ERROR, SEARCH_ERROR, OP_UPDATE, OP_DELETE, OP_CREATE
