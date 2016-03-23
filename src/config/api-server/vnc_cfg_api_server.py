@@ -31,7 +31,7 @@ from cStringIO import StringIO
 from lxml import etree
 from oslo_config import cfg
 #import GreenletProfiler
-from gen.vnc_api_server_gen import SERVICE_PATH
+from gen.vnc_api_client_gen import SERVICE_PATH
 logger = logging.getLogger(__name__)
 
 """
@@ -104,7 +104,7 @@ from cfgm_common.uve.cfgm_cpuinfo.ttypes import NodeStatusUVE, \
 from sandesh.discovery_client_stats import ttypes as sandesh
 from sandesh.traces.ttypes import RestApiTrace
 from vnc_bottle import get_bottle_server
-from gen.vnc_api_server_gen import get_obj_type_to_db_type
+from gen.vnc_api_client_gen import get_obj_type_to_db_type
 _WEB_HOST = '0.0.0.0'
 _WEB_PORT = 8082
 _ADMIN_PORT = 8095
@@ -336,7 +336,7 @@ class VncApiServer(object):
         try:
             self._extension_mgrs['resourceApi'].map_method(
                  'pre_%s_create' %(obj_type), obj_dict)
-        except RuntimeError:
+        except RuntimeError as e:
             # lack of registered extension leads to RuntimeError
             pass
         except HttpError:

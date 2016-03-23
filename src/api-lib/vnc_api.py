@@ -27,7 +27,7 @@ from cfgm_common.exceptions import *
 from cfgm_common import ssl_adapter
 
 from pprint import pformat
-from gen.vnc_api_server_gen import SERVICE_PATH
+from gen.vnc_api_client_gen import SERVICE_PATH
 
 ASC = 'asc'
 DESC = 'desc'
@@ -845,7 +845,7 @@ class VncApi(object):
         return json.loads(content)[obj_field]
     # end _prop_collection_get
 
-    def _prop_map_get_elem_key(self, obj_uuid, obj_field, elem):
+    def _prop_map_get_elem_key(self, obj_uuid, obj_field, value):
         _, obj_type = self.id_to_fq_name_type(obj_uuid)
         obj_class = utils.obj_type_to_vnc_class(obj_type, __name__)
 

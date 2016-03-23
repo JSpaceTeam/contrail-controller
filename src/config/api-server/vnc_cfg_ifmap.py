@@ -131,7 +131,7 @@ class VncIfmapClient(object):
         # Set the signal handler
         signal.signal(signal.SIGUSR2, self.handler)
         if not self._ifmap_disable:
-            self._reset()
+            self.reset()
             self._init_conn()
             self._publish_config_root()
             self._health_checker_greenlet = gevent.spawn(self._health_checker)
@@ -813,7 +813,7 @@ class VncServerCassandraClient(VncCassandraClient):
                 if oper == 'set':
                     prop_elem_val = oper_param['value']
                     position = prop_elem_val[key_name]
-
+                    self._set_in_prop_map(bch, obj_uuid,
                         prop_name, prop_elem_val, position)
                 elif oper == 'delete':
                     position = oper_param['position']

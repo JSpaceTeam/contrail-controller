@@ -10,7 +10,7 @@ import ConfigParser
 from provision_defaults import *
 from cfgm_common.exceptions import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
-from gen.vnc_api_server_gen import SERVICE_PATH
+from gen.vnc_api_client_gen import SERVICE_PATH
 
 class VncRbac(object):
 

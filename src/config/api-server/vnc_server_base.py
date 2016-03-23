@@ -26,7 +26,7 @@ from gen.resource_xsd import *
 from cfgm_common.vnc_extensions import ExtensionManager, ApiHookManager
 from pysandesh.sandesh_base_logger import SandeshBaseLogger
 from csp_services_common import cfg
-
+from gen.vnc_api_client_gen import *
 # Parse config for olso configs. Try to move all config parsing to oslo cfg
 elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
 cfg.CONF.register_cli_opt(cfg.BoolOpt(name='search_enabled', default=False),
@@ -83,7 +83,7 @@ class VncApiServerBase(VncApiServer):
         self._post_common = None
         self._resource_classes = {}
         self._rpc_input_types = {}
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             camel_name = cfgm_common.utils.CamelCase(resource_type)
             r_class_name = '%sServer' % (camel_name)
             common_class = cfgm_common.utils.str_to_class(camel_name, __name__)
@@ -94,7 +94,7 @@ class VncApiServerBase(VncApiServer):
                            (vnc_cfg_base_type.Resource, common_class, object), {})
             self.set_resource_class(resource_type, r_class)
 
-        for rpc_input in gen.vnc_api_server_gen.all_rpc_input_types:
+        for rpc_input in all_rpc_input_types:
             camel_name = cfgm_common.utils.CamelCase(rpc_input)
             rpc_input_type = '%s_InputType' % (camel_name)
             self._rpc_input_types[rpc_input] = rpc_input_type
@@ -116,19 +116,19 @@ class VncApiServerBase(VncApiServer):
                                            self._args.listen_port)
         # Generate LinkObjects for all entities
         links = []
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             link = LinkObject('collection',
                               self._base_url, '%s/%s' % (SERVICE_PATH, resource_type),
                               '%s' % (resource_type))
             links.append(link)
 
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             link = LinkObject('resource-base',
                               self._base_url, '%s/%s' % (SERVICE_PATH, resource_type),
                               '%s' % (resource_type))
             links.append(link)
 
-        for rpc in gen.vnc_api_server_gen.all_rpc_input_types:
+        for rpc in all_rpc_input_types:
             link = LinkObject('rpc',
                               self._base_url, '%s/%s' % (SERVICE_PATH, rpc),
                               '%s' % (rpc))
@@ -221,14 +221,14 @@ class VncApiServerBase(VncApiServer):
         try:
             listener = logging.config.listen(9999)
             listener.start()
-        except Exception as e:
-            logging.error("Failed starting up logger config socket: ", e)
+        except Exception:
+            logging.error("Failed starting up logger config socket")
 
 
 
     @classmethod
     def _generate_rpc_uri(cls, obj):
-        for resource_type in gen.vnc_api_server_gen.all_rpc_input_types:
+        for resource_type in all_rpc_input_types:
             # RPC /rpc
             obj_type = resource_type.replace('-', '_')
             # leaf resource
@@ -240,7 +240,7 @@ class VncApiServerBase(VncApiServer):
 
     @classmethod
     def _generate_rpc_methods(cls, obj):
-        for resource_type in gen.vnc_api_server_gen.all_rpc_input_types:
+        for resource_type in all_rpc_input_types:
             obj_type = resource_type.replace('-', '_')
             rpc_method = functools.partial(obj.http_rpc_post,
                                            resource_type)
@@ -282,7 +282,7 @@ class VncApiServerBase(VncApiServer):
 
     @classmethod
     def _generate_search_methods(cls, obj):
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             obj_type = resource_type.replace('-', '_')
 
             filter_method = functools.partial(obj._http_post_filter, resource_type)
@@ -301,7 +301,7 @@ class VncApiServerBase(VncApiServer):
 
     @classmethod
     def _generate_search_uri(cls, obj):
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             obj_type = resource_type.replace('-', '_')
             obj.route('%s/%s/_filter'%(SERVICE_PATH, resource_type),
                       'POST',
