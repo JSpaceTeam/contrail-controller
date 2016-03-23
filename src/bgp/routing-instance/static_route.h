@@ -12,6 +12,7 @@
 
 #include "base/queue_task.h"
 #include "bgp/bgp_condition_listener.h"
+#include "bgp/bgp_config.h"
 #include "bgp/inet/inet_route.h"
 #include "bgp/inet6/inet6_route.h"
 
@@ -42,8 +43,7 @@ typedef ConditionMatchPtr StaticRoutePtr;
 struct StaticRouteRequest {
     enum RequestType {
         NEXTHOP_ADD_CHG,
-        NEXTHOP_DELETE,
-        DELETE_STATIC_ROUTE_DONE
+        NEXTHOP_DELETE
     };
 
     StaticRouteRequest(RequestType type, BgpTable *table, BgpRoute *route,
@@ -95,19 +95,30 @@ public:
 
 private:
     template <typename U> friend class StaticRouteTest;
+    typedef std::set<StaticRoutePtr> StaticRouteProcessList;
+    typedef BgpInstanceConfig::StaticRouteList StaticRouteConfigList;
 
     // All static route related actions are performed in the context
     // of this task. This task has exclusion with db::DBTable task.
     static int static_route_task_id_;
 
-    void LocateStaticRoutePrefix(const StaticRouteConfig &cfg);
+    int CompareStaticRoute(typename StaticRouteMap::iterator loc,
+        StaticRouteConfigList::iterator it);
+    void AddStaticRoute(StaticRouteConfigList::iterator it);
+    void DelStaticRoute(typename StaticRouteMap::iterator loc);
+    void UpdateStaticRoute(typename StaticRouteMap::iterator loc,
+        StaticRouteConfigList::iterator it);
+
+    void LocateStaticRoutePrefix(const StaticRouteConfig &config);
     void RemoveStaticRoutePrefix(const PrefixT &static_route);
     void StopStaticRouteDone(BgpTable *table, ConditionMatch *info);
-    bool ResolvePendingStaticRouteConfig();
+    void UnregisterAndResolveStaticRoute(StaticRoutePtr entry);
     bool StaticRouteEventCallback(StaticRouteRequest *req);
 
-    virtual void DisableResolveTrigger();
-    virtual void EnableResolveTrigger();
+    bool ProcessUnregisterList();
+
+    virtual void DisableUnregisterTrigger();
+    virtual void EnableUnregisterTrigger();
 
     virtual void DisableQueue() { static_route_queue_->set_disable(true); }
     virtual void EnableQueue() { static_route_queue_->set_disable(false); }
@@ -118,7 +129,9 @@ private:
     BgpConditionListener *listener_;
     StaticRouteMap  static_route_map_;
     WorkQueue<StaticRouteRequest *> *static_route_queue_;
-    boost::scoped_ptr<TaskTrigger> resolve_trigger_;
+    tbb::mutex mutex_;
+    StaticRouteProcessList unregister_static_route_list_;
+    boost::scoped_ptr<TaskTrigger> unregister_list_trigger_;
 
     DISALLOW_COPY_AND_ASSIGN(StaticRouteMgr);
 };

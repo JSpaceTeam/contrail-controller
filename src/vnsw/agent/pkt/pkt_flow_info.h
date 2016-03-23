@@ -79,8 +79,6 @@ public:
     void Add(const PktInfo *pkt, PktControlInfo *in,
              PktControlInfo *out);
     bool Process(const PktInfo *pkt, PktControlInfo *in, PktControlInfo *out);
-    void SetEcmpFlowInfo(const PktInfo *pkt, const PktControlInfo *in,
-                         const PktControlInfo *out);
     static bool GetIngressNwPolicyAclList(const Interface *intf,
                                           const VnEntry *vn,
                                           MatchPolicy *m_policy);
@@ -116,6 +114,7 @@ public:
                      FlowRouteRefMap &ref_map);
     uint8_t RouteToPrefixLen(const AgentRoute *route);
     void CalculatePort(const PktInfo *p, const Interface *intf);
+    void SetPktInfo(boost::shared_ptr<PktInfo> info);
     bool RouteAllowNatLookupCommon(const AgentRoute *rt,
                                    uint32_t sport,
                                    uint32_t dport,

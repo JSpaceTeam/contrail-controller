@@ -6,6 +6,7 @@
 
 #include "base/task_annotations.h"
 #include "bgp/bgp_log.h"
+#include "bgp/bgp_ribout.h"
 #include "bgp/bgp_route.h"
 #include "bgp/bgp_update_queue.h"
 #include "bgp/bgp_update_monitor.h"
@@ -390,7 +391,7 @@ void RibOutUpdates::UpdateSend(Message *message, const RibPeerSet &dst,
     while (iter.HasNext()) {
         int ix_current = iter.index();
         IPeerUpdate *peer = iter.Next();
-        size_t msgsize;
+        size_t msgsize = 0;
         const uint8_t *data = message->GetData(peer, &msgsize);
         if (Sandesh::LoggingLevel() >= Sandesh::LoggingUtLevel()) {
             BGP_LOG_PEER(Message, peer, Sandesh::LoggingUtLevel(),

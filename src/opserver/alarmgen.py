@@ -17,6 +17,9 @@ import time
 import copy
 import traceback
 import signal
+import logging
+logging.getLogger('kafka').addHandler(logging.StreamHandler())
+logging.getLogger('kafka').setLevel(logging.WARNING)
 try:
     from collections import OrderedDict
 except ImportError:
@@ -453,7 +456,7 @@ class Controller(object):
 
     def reconnect_agg_uve(self, lredis):
         self._logger.error("Connected to Redis for Agg")
-        lredis.ping()
+        lredis.set(self._moduleid+':'+self._instance_id, True)
         for pp in self._workers.keys():
             self._workers[pp].reset_acq_time()
             self._workers[pp].kill(\
@@ -606,6 +609,10 @@ class Controller(object):
                             password=self._conf.redis_password(),
                             db=7)
                     self.reconnect_agg_uve(lredis)
+                else:
+                    if not lredis.exists(self._moduleid+':'+self._instance_id):
+                        self._logger.error('Identified redis restart')
+                        self.reconnect_agg_uve(lredis)
                 gevs = {}
                 pendingset = {}
                 for part in self._uveq.keys():
@@ -817,6 +824,14 @@ class Controller(object):
                 del self.ptab_info[part][tab][uve_name]
                 output[uv] = None
                 
+                if tab in self.tab_alarms:
+                    if uv in self.tab_alarms[tab]:
+                        del self.tab_alarms[tab][uv]
+                        ustruct = UVEAlarms(name = uve_name, deleted = True)
+                        alarm_msg = AlarmTrace(data=ustruct, table=tab, \
+                                sandesh=self._sandesh)
+                        self._logger.info('send del alarm: %s' % (alarm_msg.log()))
+                        alarm_msg.send(sandesh=self._sandesh)
                 # Both alarm and non-alarm contents are gone.
                 # We do not need to do alarm evaluation
                 continue

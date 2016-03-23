@@ -17,8 +17,11 @@ import base64
 
 try:
     from keystoneclient.middleware import auth_token
-except Exception:
-    pass
+except ImportError:
+    try:
+        from keystonemiddleware import auth_token
+    except ImportError:
+        pass
 
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from vnc_bottle import get_bottle_server
@@ -119,9 +122,9 @@ class AuthPostKeystone(object):
         if 'HTTP_X_ROLE' in env:
             roles = env['HTTP_X_ROLE'].split(',')
         if not 'admin' in [x.lower() for x in roles]:
-            resp = auth_token.MiniResp('Permission Denied', env)
-            start_response('403 Permission Denied', resp.headers)
-            return resp.body
+            start_response('403 Permission Denied',
+                [('Content-type', 'text/plain')])
+            return ['403 Permission Denied']
 
         return self.app(env, start_response)
 
@@ -145,6 +148,11 @@ class AuthServiceKeystone(object):
             'max_requests': args.max_requests,
             'insecure':args.insecure,
         }
+        try:
+            if 'v3' in args.auth_url:
+                self._conf_info['auth_version'] = 'v3.0'
+        except AttributeError:
+            pass
         if _kscertbundle:
            self._conf_info['cafile'] = _kscertbundle
         self._server_mgr = server_mgr

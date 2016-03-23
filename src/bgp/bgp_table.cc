@@ -8,6 +8,7 @@
 
 #include "base/task_annotations.h"
 #include "bgp/bgp_log.h"
+#include "bgp/bgp_ribout.h"
 #include "bgp/bgp_ribout_updates.h"
 #include "bgp/bgp_route.h"
 #include "bgp/bgp_server.h"
@@ -78,7 +79,6 @@ void BgpTable::set_routing_instance(RoutingInstance *rtinstance) {
     path_resolver_ = CreatePathResolver();
     if (IsRouteAggregationSupported())
         rtinstance->route_aggregator(family())->Initialize();
-
 }
 
 BgpServer *BgpTable::server() {
@@ -182,59 +182,88 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
             BgpAttr *clone = new BgpAttr(*attr);
 
             // Retain LocalPref value if set, else set default to 100.
-            if (attr->local_pref() == 0)
+            if (clone->local_pref() == 0)
                 clone->set_local_pref(100);
 
             // If the route is locally originated i.e. there's no AsPath,
             // then generate a Nil AsPath i.e. one with 0 length. No need
             // to modify the AsPath if it already exists since this is an
             // iBGP RibOut.
-            if (attr->as_path() == NULL) {
+            if (clone->as_path() == NULL) {
                 AsPathSpec as_path;
                 clone->set_as_path(&as_path);
             }
 
-            attr_ptr = attr->attr_db()->Locate(clone);
+            attr_ptr = clone->attr_db()->Locate(clone);
             attr = attr_ptr.get();
         } else if (ribout->peer_type() == BgpProto::EBGP) {
-            // Don't advertise any routes from non-master instances.
-            // The ribout can only be for bgpaas-clients since that's
-            // the only case with bgp peers in non-master instance.
-            if (!rtinstance_->IsMasterRoutingInstance())
-                return NULL;
-
-            // Sender side AS path loop check.
-            if (attr->as_path() &&
-                attr->as_path()->path().AsPathLoop(ribout->peer_as())) {
+            // Don't advertise routes from non-master instances if there's
+            // no nexthop. The ribout has to be for bgpaas-clients because
+            // that's the only case with bgp peers in non-master instance.
+            if (!rtinstance_->IsMasterRoutingInstance() &&
+                ribout->nexthop().is_unspecified()) {
                 return NULL;
             }
 
             // Handle route-target filtering.
-            if (attr->ext_community() != NULL) {
+            if (IsVpnTable() && attr->ext_community() != NULL) {
                 server()->rtarget_group_mgr()->GetRibOutInterestedPeers(
                     ribout, attr->ext_community(), peerset, &new_peerset);
                 if (new_peerset.empty())
                     return NULL;
             }
 
+            // Sender side AS path loop check and split horizon within RibOut.
+            if (!ribout->as_override()) {
+                if (attr->as_path() &&
+                    attr->as_path()->path().AsPathLoop(ribout->peer_as())) {
+                    return NULL;
+                }
+            } else {
+                if (peer && peer->PeerType() == BgpProto::EBGP) {
+                    ribout->GetSubsetPeerSet(&new_peerset, peer);
+                    if (new_peerset.empty())
+                        return NULL;
+                }
+            }
+
             BgpAttr *clone = new BgpAttr(*attr);
 
+            // Remove non-transitive attributes.
+            // Note that med is handled further down.
+            clone->set_originator_id(Ip4Address());
+            clone->set_cluster_list(NULL);
+
+            // Update nexthop.
+            if (!ribout->nexthop().is_unspecified())
+                clone->set_nexthop(ribout->nexthop());
+
             // Reset LocalPref.
-            if (attr->local_pref())
+            if (clone->local_pref())
                 clone->set_local_pref(0);
 
             // Reset Med if the path did not originate from an xmpp peer.
             // The AS path is NULL if the originating xmpp peer is locally
             // connected. It's non-NULL but empty if the originating xmpp
             // peer is connected to another bgp speaker in the iBGP mesh.
-            if (attr->med() && attr->as_path() && !attr->as_path()->empty())
+            if (clone->med() && clone->as_path() && !clone->as_path()->empty())
                 clone->set_med(0);
 
-            // Prepend the local AS to AsPath.
             as_t local_as =
-                attr->attr_db()->server()->local_autonomous_system();
-            if (attr->as_path() != NULL) {
-                const AsPathSpec &as_path = attr->as_path()->path();
+                clone->attr_db()->server()->local_autonomous_system();
+
+            // Override the peer AS with local AS in AsPath.
+            if (ribout->as_override() && clone->as_path() != NULL) {
+                const AsPathSpec &as_path = clone->as_path()->path();
+                AsPathSpec *as_path_ptr =
+                    as_path.Replace(ribout->peer_as(), local_as);
+                clone->set_as_path(as_path_ptr);
+                delete as_path_ptr;
+            }
+
+            // Prepend the local AS to AsPath.
+            if (clone->as_path() != NULL) {
+                const AsPathSpec &as_path = clone->as_path()->path();
                 AsPathSpec *as_path_ptr = as_path.Add(local_as);
                 clone->set_as_path(as_path_ptr);
                 delete as_path_ptr;
@@ -245,7 +274,7 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
                 delete as_path_ptr;
             }
 
-            attr_ptr = attr->attr_db()->Locate(clone);
+            attr_ptr = clone->attr_db()->Locate(clone);
             attr = attr_ptr.get();
         }
     }
@@ -268,11 +297,11 @@ bool BgpTable::PathSelection(const Path &path1, const Path &path2) {
     return res;
 }
 
-void BgpTable::InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
+bool BgpTable::InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
                            const IPeer *peer, DBRequest *req,
                            DBRequest::DBOperation oper, BgpAttrPtr attrs,
                            uint32_t path_id, uint32_t flags, uint32_t label) {
-    bool is_stale = false;
+    bool notify_rt = false;
 
     switch (oper) {
     case DBRequest::DB_ENTRY_ADD_CHANGE: {
@@ -287,7 +316,6 @@ void BgpTable::InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
                 (path->GetFlags() != flags) ||
                 (path->GetLabel() != label)) {
                 // Update Attributes and notify (if needed)
-                is_stale = path->IsStale();
                 if (path->NeedsResolution())
                     path_resolver_->StopPathResolution(root->index(), path);
                 rt->DeletePath(path);
@@ -301,12 +329,6 @@ void BgpTable::InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
         new_path =
             new BgpPath(peer, path_id, BgpPath::BGP_XMPP, attrs, flags, label);
 
-        // If the path is being staled (by bringing down the local pref,
-        // mark the same in the new path created.
-        if (is_stale) {
-            new_path->SetStale();
-        }
-
         if (new_path->NeedsResolution()) {
             Address::Family family = new_path->GetAttr()->nexthop_family();
             BgpTable *table = rtinstance_->GetTable(family);
@@ -314,7 +336,7 @@ void BgpTable::InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
                 table);
         }
         rt->InsertPath(new_path);
-        root->Notify(rt);
+        notify_rt = true;
         break;
     }
 
@@ -327,13 +349,7 @@ void BgpTable::InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
             if (path->NeedsResolution())
                 path_resolver_->StopPathResolution(root->index(), path);
             rt->RemovePath(BgpPath::BGP_XMPP, peer, path_id);
-
-            // Delete the route only if all paths are gone.
-            if (rt->front() == NULL) {
-                root->Delete(rt);
-            } else {
-                root->Notify(rt);
-            }
+            notify_rt = true;
         }
         break;
     }
@@ -343,6 +359,7 @@ void BgpTable::InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
         break;
     }
     }
+    return notify_rt;
 }
 
 void BgpTable::Input(DBTablePartition *root, DBClient *client,
@@ -386,12 +403,17 @@ void BgpTable::Input(DBTablePartition *root, DBClient *client,
     // Mark this peer's all paths as deleted.
     for (Route::PathList::iterator it = rt->GetPathList().begin();
          it != rt->GetPathList().end(); ++it) {
-        // Skip secondary paths.
-        if (dynamic_cast<BgpSecondaryPath *>(it.operator->())) continue;
-
         BgpPath *path = static_cast<BgpPath *>(it.operator->());
-        if (path->GetPeer() == peer &&
-                path->GetSource() == BgpPath::BGP_XMPP) {
+
+        // Skip resolved paths.
+        if (path->IsResolved())
+            continue;
+
+        // Skip secondary paths.
+        if (dynamic_cast<BgpSecondaryPath *>(path))
+            continue;
+
+        if (path->GetPeer() == peer && path->GetSource() == BgpPath::BGP_XMPP) {
             deleted_paths.insert(make_pair(path, true));
         }
     }
@@ -399,6 +421,7 @@ void BgpTable::Input(DBTablePartition *root, DBClient *client,
     int count = 0;
     ExtCommunityDB *extcomm_db = rtinstance_->server()->extcomm_db();
     BgpAttrPtr attr = data ? data->attrs() : NULL;
+    bool notify_rt = false;
 
     // Process each of the paths sourced and create/update paths accordingly.
     if (data) {
@@ -417,12 +440,7 @@ void BgpTable::Input(DBTablePartition *root, DBClient *client,
             }
 
             path = rt->FindPath(BgpPath::BGP_XMPP, peer, path_id);
-            if (path && req->oper != DBRequest::DB_ENTRY_DELETE) {
-                if (path->IsStale()) {
-                    path->ResetStale();
-                }
-                deleted_paths.erase(path);
-            }
+            deleted_paths.erase(path);
 
             if (data->attrs() && count > 0) {
                 BgpAttr *clone = new BgpAttr(*data->attrs());
@@ -435,8 +453,9 @@ void BgpTable::Input(DBTablePartition *root, DBClient *client,
                 attr = data->attrs()->attr_db()->Locate(clone);
             }
 
-            InputCommon(root, rt, path, peer, req, req->oper, attr, path_id,
-                nexthop.flags_, nexthop.label_);
+            notify_rt |= InputCommon(root, rt, path, peer, req, req->oper,
+                                     attr, path_id, nexthop.flags_,
+                                     nexthop.label_);
         }
     }
 
@@ -444,9 +463,23 @@ void BgpTable::Input(DBTablePartition *root, DBClient *client,
     for (map<BgpPath *, bool>::iterator it = deleted_paths.begin();
          it != deleted_paths.end(); it++) {
         BgpPath *path = it->first;
-        InputCommon(root, rt, path, peer, req, DBRequest::DB_ENTRY_DELETE,
-                    NULL, path->GetPathId(), 0, 0);
+        notify_rt |= InputCommon(root, rt, path, peer, req,
+                                 DBRequest::DB_ENTRY_DELETE, NULL,
+                                 path->GetPathId(), 0, 0);
     }
+
+    InputCommonPostProcess(root, rt, notify_rt);
+}
+
+void BgpTable::InputCommonPostProcess(DBTablePartBase *root,
+                                      BgpRoute *rt, bool notify_rt) {
+    if (!notify_rt)
+        return;
+
+    if (rt->front() == NULL)
+        root->Delete(rt);
+    else
+        root->Notify(rt);
 }
 
 bool BgpTable::MayDelete() const {

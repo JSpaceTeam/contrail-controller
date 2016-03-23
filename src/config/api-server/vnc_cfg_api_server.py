@@ -77,8 +77,7 @@ from provision_defaults import Provision
 from vnc_quota import *
 from gen.resource_xsd import *
 from gen.resource_common import *
-from gen.resource_server import *
-import gen.vnc_api_server_gen
+from gen.vnc_api_client_gen import all_resource_types
 import cfgm_common
 from cfgm_common.utils import cgitb_hook
 from cfgm_common.rest import LinkObject, hdr_server_tenant
@@ -205,6 +204,7 @@ class SHARETYPE(object):
     @classmethod
     def allowed(cls):
         return [1, 2]
+
 
 class VncApiServer(object):
     """
@@ -1143,7 +1143,7 @@ class VncApiServer(object):
 
     @classmethod
     def _generate_resource_crud_methods(cls, obj):
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             obj_type = resource_type.replace('-', '_')
             create_method = functools.partial(obj.http_resource_create,
                                               resource_type)
@@ -1187,7 +1187,7 @@ class VncApiServer(object):
 
     @classmethod
     def _generate_resource_crud_uri(cls, obj):
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             # CRUD + list URIs of the form
             # obj.route('/virtual-network/<id>', 'GET', obj.virtual_network_http_get)
             # obj.route('/virtual-network/<id>', 'PUT', obj.virtual_network_http_put)
@@ -1222,15 +1222,18 @@ class VncApiServer(object):
         self._post_common = None
 
         self._resource_classes = {}
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             camel_name = cfgm_common.utils.CamelCase(resource_type)
             r_class_name = '%sServer' %(camel_name)
-            common_class = cfgm_common.utils.str_to_class(camel_name, __name__)
-            # Create Placeholder classes derived from Resource, <Type> so
-            # r_class methods can be invoked in CRUD methods without
-            # checking for None
-            r_class = type(r_class_name,
-                (vnc_cfg_types.Resource, common_class, object), {})
+            try:
+                r_class = getattr(vnc_cfg_types, r_class_name)
+            except AttributeError:
+                common_class = cfgm_common.utils.str_to_class(camel_name, __name__)
+                # Create Placeholder classes derived from Resource, <Type> so
+                # r_class methods can be invoked in CRUD methods without
+                # checking for None
+                r_class = type(r_class_name,
+                    (vnc_cfg_types.Resource, common_class, object), {})
             self.set_resource_class(resource_type, r_class)
 
         self._args = None
@@ -1251,13 +1254,13 @@ class VncApiServer(object):
         links.append(LinkObject('root', self._base_url , '/config-root',
                                 'config-root'))
 
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             link = LinkObject('collection',
                            self._base_url , '/%s' %(resource_type),
                            '%s' %(resource_type))
             links.append(link)
 
-        for resource_type in gen.vnc_api_server_gen.all_resource_types:
+        for resource_type in all_resource_types:
             link = LinkObject('resource-base',
                            self._base_url , '/%s' %(resource_type),
                            '%s' %(resource_type))
@@ -1277,41 +1280,6 @@ class VncApiServer(object):
         self._post_validate = self._http_post_validate
         self._post_common = self._http_post_common
 
-        # Type overrides from generated code
-        self.set_resource_class('global-system-config',
-            vnc_cfg_types.GlobalSystemConfigServer)
-        self.set_resource_class('floating-ip', vnc_cfg_types.FloatingIpServer)
-        self.set_resource_class('instance-ip', vnc_cfg_types.InstanceIpServer)
-        self.set_resource_class('logical-router',
-            vnc_cfg_types.LogicalRouterServer)
-        self.set_resource_class('security-group',
-            vnc_cfg_types.SecurityGroupServer)
-        self.set_resource_class('virtual-machine-interface',
-            vnc_cfg_types.VirtualMachineInterfaceServer)
-        self.set_resource_class('virtual-network',
-            vnc_cfg_types.VirtualNetworkServer)
-        self.set_resource_class('network-policy',
-            vnc_cfg_types.NetworkPolicyServer)
-        self.set_resource_class('network-ipam',
-            vnc_cfg_types.NetworkIpamServer)
-        self.set_resource_class('virtual-DNS', vnc_cfg_types.VirtualDnsServer)
-        self.set_resource_class('virtual-DNS-record',
-            vnc_cfg_types.VirtualDnsRecordServer)
-        self.set_resource_class('logical-interface',
-            vnc_cfg_types.LogicalInterfaceServer)
-        self.set_resource_class('physical-interface',
-            vnc_cfg_types.PhysicalInterfaceServer)
-
-        self.set_resource_class('virtual-ip', vnc_cfg_types.VirtualIpServer)
-        self.set_resource_class('loadbalancer-healthmonitor',
-            vnc_cfg_types.LoadbalancerHealthmonitorServer)
-        self.set_resource_class('loadbalancer-member',
-            vnc_cfg_types.LoadbalancerMemberServer)
-        self.set_resource_class('loadbalancer-pool',
-            vnc_cfg_types.LoadbalancerPoolServer)
-        # service appliance set
-        self.set_resource_class('service-appliance-set',
-            vnc_cfg_types.ServiceApplianceSetServer)
         # TODO default-generation-setting can be from ini file
         self.get_resource_class('bgp-router').generate_default_instance = False
         self.get_resource_class(
@@ -1357,6 +1325,9 @@ class VncApiServer(object):
         self.get_resource_class('api-access-list').generate_default_instance = False
         self.get_resource_class('dsa-rule').generate_default_instance = False
         self.get_resource_class('bgp-as-a-service').generate_default_instance = False
+
+        self.get_resource_class('routing-policy').generate_default_instance = False
+        self.get_resource_class('route-aggregate').generate_default_instance = False
 
         for act_res in _ACTION_RESOURCES:
             uri = act_res['uri']
@@ -2017,6 +1988,7 @@ class VncApiServer(object):
 
         self._set_api_audit_info(apiConfig)
         self.vnc_api_config_log(apiConfig)
+
     # end prop_collection_update_http_post
 
     def ref_update_http_post(self):
@@ -2037,7 +2009,8 @@ class VncApiServer(object):
                         %(obj_type, obj_uuid, ref_type, operation)
             raise cfgm_common.exceptions.HttpError(400, err_msg)
 
-        if operation.upper() not in ['ADD', 'DELETE']:
+        operation = operation.upper()
+        if operation not in ['ADD', 'DELETE']:
             err_msg = 'Bad Request: operation should be add or delete: %s' \
                       %(operation)
             raise cfgm_common.exceptions.HttpError(400, err_msg)
@@ -2053,6 +2026,18 @@ class VncApiServer(object):
             except NoIdError:
                 raise cfgm_common.exceptions.HttpError(
                     404, 'Name ' + pformat(ref_fq_name) + ' not found')
+
+        # To verify existence of the reference being added
+        if operation == 'ADD':
+            try:
+                (read_ok, read_result) = self._db_conn.dbe_read(
+                    ref_type, {'uuid': ref_uuid}, obj_fields=['fq_name'])
+            except NoIdError:
+                raise cfgm_common.exceptions.HttpError(
+                    404, 'Object Not Found: ' + ref_uuid)
+            except Exception as e:
+                read_ok = False
+                read_result = cfgm_common.utils.detailed_traceback()
 
         # To invoke type specific hook and extension manager
         try:
@@ -2433,7 +2418,6 @@ class VncApiServer(object):
     # end sigchld_handler
 
     def sigterm_handler(self):
-        self.cleanup()
         exit()
 
     def _load_extensions(self):
@@ -3257,6 +3241,12 @@ class VncApiServer(object):
         pass
     # end cleanup
 
+    def reset(self):
+        # cleanup internal state/in-flight operations
+        if self._db_conn:
+            self._db_conn.reset()
+    # end reset
+
     # allocate block of IP addresses from VN. Subnet info expected in request
     # body
     def vn_ip_alloc_http_post(self, id):
@@ -3457,7 +3447,7 @@ def main(args_str=None):
         raise
     finally:
         # always cleanup gracefully
-        vnc_api_server.cleanup()
+        vnc_api_server.reset()
 
 # end main
 

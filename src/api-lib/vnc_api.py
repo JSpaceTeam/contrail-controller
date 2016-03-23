@@ -462,6 +462,7 @@ class VncApi(object):
         for prop_name in obj._pending_field_map_updates:
             operations.extend(obj._pending_field_map_updates[prop_name])
 
+
         for oper, elem_val, elem_pos in operations:
             if isinstance(elem_val, GeneratedsSuper):
                 serialized_elem_value = elem_val.exportDict('')
@@ -471,6 +472,7 @@ class VncApi(object):
             prop_coll_body['updates'].append(
                 {'field': prop_name, 'operation': oper,
                  'value': serialized_elem_value, 'position': elem_pos})
+
 
         if prop_coll_body['updates']:
             prop_coll_json = json.dumps(prop_coll_body)

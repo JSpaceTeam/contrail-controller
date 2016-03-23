@@ -50,6 +50,9 @@ TEST_F(FlowTest, Agent_Conf_file_1) {
     EXPECT_STREQ(param.tunnel_type().c_str(), "MPLSoGRE");
     EXPECT_EQ(param.dhcp_relay_mode(), true);
     EXPECT_STREQ(param.metadata_shared_secret().c_str(), "contrail");
+    EXPECT_EQ(param.metadata_proxy_port(), 8998);
+    EXPECT_EQ(param.dns_client_port(), 8997);
+    EXPECT_EQ(param.mirror_client_port(), 8999);
     EXPECT_EQ(param.max_vm_flows(), 50);
     EXPECT_EQ(param.linklocal_system_flows(), 1024);
     EXPECT_EQ(param.linklocal_vm_flows(), 512);
@@ -82,6 +85,80 @@ TEST_F(FlowTest, Agent_Conf_file_2) {
     EXPECT_EQ(param.agent_mode(), AgentParam::VROUTER_AGENT);
     EXPECT_EQ(param.dhcp_relay_mode(), false);
     EXPECT_EQ(param.subnet_hosts_resolvable(), false);
+    EXPECT_EQ(param.metadata_proxy_port(), 8097);
+    EXPECT_EQ(param.dns_client_port(), 8098);
+    EXPECT_EQ(param.mirror_client_port(), 8097);
+}
+
+TEST_F(FlowTest, Agent_Flows_Option_1) {
+    int argc = 1;
+    char *argv[] = {
+        (char *) "",
+    };
+
+    AgentParam param;
+    param.ParseArguments(argc, argv);
+    param.Init("controller/src/vnsw/agent/init/test/flows.ini", "test-param");
+    EXPECT_EQ(param.flow_thread_count(), 4);
+    EXPECT_EQ(param.max_vm_flows(), 50);
+    EXPECT_EQ(param.linklocal_system_flows(), 1024);
+    EXPECT_EQ(param.linklocal_vm_flows(), 512);
+}
+
+TEST_F(FlowTest, Agent_Flows_Option_Arguments) {
+    int argc = 9;
+    char *argv[] = {
+        (char *) "",
+        (char *) "--FLOWS.thread_count",                   (char *)"8",
+        (char *) "--FLOWS.max_vm_flows",                   (char *)"100",
+        (char *) "--FLOWS.max_system_linklocal_flows",     (char *)"24",
+        (char *) "--FLOWS.max_vm_linklocal_flows",         (char *)"20",
+    };
+
+    AgentParam param;
+    param.ParseArguments(argc, argv);
+    param.Init("controller/src/vnsw/agent/init/test/flows.ini", "test-param");
+
+    EXPECT_EQ(param.flow_thread_count(), 8);
+    EXPECT_EQ(param.max_vm_flows(), 100);
+    EXPECT_EQ(param.linklocal_system_flows(), 24);
+    EXPECT_EQ(param.linklocal_vm_flows(), 20);
+}
+
+TEST_F(FlowTest, Agent_Tbb_Option_1) {
+    int argc = 1;
+    char *argv[] = {
+        (char *) "",
+    };
+
+    AgentParam param;
+    param.ParseArguments(argc, argv);
+    param.Init("controller/src/vnsw/agent/init/test/tbb.ini", "test-param");
+
+    EXPECT_EQ(param.tbb_thread_count(), 8);
+    EXPECT_EQ(param.tbb_exec_delay(), 10);
+    EXPECT_EQ(param.tbb_schedule_delay(), 25);
+    EXPECT_EQ(param.tbb_keepawake_timeout(), 50);
+}
+
+TEST_F(FlowTest, Agent_Tbb_Option_Arguments) {
+    int argc = 9;
+    char *argv[] = {
+        (char *) "",
+        (char *) "--TASK.thread_count",                 (char *)"4",
+        (char *) "--TASK.log_exec_threshold",           (char *)"100",
+        (char *) "--TASK.log_schedule_threshold",      (char *)"200",
+        (char *) "--TASK.tbb_keepawake_timeout",      (char *)"300",
+    };
+
+    AgentParam param;
+    param.ParseArguments(argc, argv);
+    param.Init("controller/src/vnsw/agent/init/test/tbb.ini", "test-param");
+
+    EXPECT_EQ(param.tbb_thread_count(), 4);
+    EXPECT_EQ(param.tbb_exec_delay(), 100);
+    EXPECT_EQ(param.tbb_schedule_delay(), 200);
+    EXPECT_EQ(param.tbb_keepawake_timeout(), 300);
 }
 
 TEST_F(FlowTest, Agent_Flows_Option_1) {
@@ -318,7 +395,7 @@ TEST_F(FlowTest, Default_Cmdline_arg2) {
                "test-param");
     EXPECT_EQ(param.flow_cache_timeout(), flow_timeout);
     EXPECT_EQ(param.http_server_port(), http_server_port);
-    EXPECT_STREQ(param.log_category().c_str(), "*");
+    EXPECT_STREQ(param.log_category().c_str(), "");
     EXPECT_STREQ(param.log_file().c_str(),
                  Agent::GetInstance()->log_file().c_str());
     EXPECT_STREQ(param.log_level().c_str(), "SYS_DEBUG");

@@ -2,6 +2,7 @@
  *  * Copyright (c) 2014 Juniper Networks, Inc. All rights reserved.
  *   */
 
+#include <stdint.h>
 #include "base/os.h"
 #include <map>
 #include "vr_defs.h"
@@ -43,7 +44,6 @@ void DiagPktHandler::Reply() {
     SetReply();
     Swap();
     SetDiagChkSum();
-    pkt_info_->set_len(GetLength() - (2 * EncapHeaderLen()));
     Send(GetInterfaceIndex(), GetVrfIndex(), AgentHdr::TX_ROUTE,
          CMD_PARAM_PACKET_CTRL, CMD_PARAM_1_DIAG, PktHandler::DIAG);
 }

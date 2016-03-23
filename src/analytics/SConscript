@@ -7,6 +7,7 @@
 
 import os
 import sys
+import platform
 
 Import('BuildEnv')
 AnalyticsEnv = BuildEnv.Clone()
@@ -53,8 +54,16 @@ AnalyticsEnv.Prepend(LIBS=['cpuinfo',
         'pugixml',
         'hiredis',
         'protobuf',
+        'zookeeper_client',
+        'zookeeper_mt',
         'boost_filesystem',
         'boost_program_options'])
+
+(PLATFORM, VERSION, EXTRA) = platform.linux_distribution()
+if PLATFORM.lower() != 'ubuntu':
+    AnalyticsEnv.Prepend(LIBS=['ssl',
+        'crypto',
+        'sasl2'])
 
 if AnalyticsEnv.UseCassandraCql():
     database_libs = ['cassandra_cql', 'cassandra']
@@ -73,10 +82,10 @@ libs = MapBuildDir(['sandesh',
         'discovery/client',
         'http/client',
         'xml',
+	'database',
         'base',
         'io',
 	'net'])
-libs.extend('/usr/lib/')
 AnalyticsEnv.Append(LIBPATH=libs)
 
 includes = MapBuildDir(['http/client', 'discovery/client', 'analytics'])
@@ -111,13 +120,15 @@ main_obj = AnalyticsEnv_excep.Object('main.o', 'main.cc')
 AnalyticsEnv_excep.Depends(main_obj, 'buildinfo.cc')
 
 lib_cpuinfo = File('../base/libcpuinfo.a')
+lib_base = File('../base/libbase.a')
 if sys.platform != 'darwin':
     AnalyticsEnv.Prepend(LINKFLAGS =
                          ['-Wl,--whole-archive',
-                          '-lcpuinfo',
+                          '-lbase', '-lcpuinfo',
                           '-l:librdkafka.a', '-l:librdkafka++.a',
                           '-Wl,--no-whole-archive'])
 else:
+    AnalyticsEnv.Prepend(LINKFLAGS = ['-Wl,-force_load,' + lib_base.path])
     AnalyticsEnv.Prepend(LINKFLAGS = ['-Wl,-force_load,' + lib_cpuinfo.path])
 
 def RedisLuaBuild(env, scr_name):

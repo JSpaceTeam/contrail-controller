@@ -6,6 +6,7 @@
 #define SRC_BGP_BGP_PATH_H_
 
 #include <string>
+#include <vector>
 
 #include "base/util.h"
 #include "route/path.h"
@@ -102,6 +103,10 @@ public:
 
     bool IsResolutionFeasible() const {
         return ((flags_ & (INFEASIBLE_MASK & ~ResolveNexthop)) == 0);
+    }
+
+    bool IsResolved() const {
+        return ((flags_ & ResolvedPath) != 0);
     }
 
     uint32_t GetFlags() const {

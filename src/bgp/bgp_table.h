@@ -12,15 +12,18 @@
 #include <vector>
 
 #include "base/lifetime.h"
-#include "bgp/bgp_ribout.h"
+#include "bgp/bgp_rib_policy.h"
 #include "db/db_table_walker.h"
 #include "route/table.h"
 
 class BgpServer;
 class BgpRoute;
 class BgpPath;
+class IPeer;
 class Path;
 class PathResolver;
+class RibOut;
+class RibPeerSet;
 class Route;
 class RoutingInstance;
 class SchedulingGroupManager;
@@ -114,10 +117,12 @@ public:
 
     virtual void Input(DBTablePartition *root, DBClient *client,
                        DBRequest *req);
-    void InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
+    bool InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
                      const IPeer *peer, DBRequest *req,
                      DBRequest::DBOperation oper, BgpAttrPtr attrs,
                      uint32_t path_id, uint32_t flags, uint32_t label);
+    void InputCommonPostProcess(DBTablePartBase *root, BgpRoute *rt,
+                                bool notify_rt);
 
     LifetimeActor *deleter();
     const LifetimeActor *deleter() const;

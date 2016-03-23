@@ -7,6 +7,8 @@
 #include "pkt/flow_mgmt.h"
 #include "pkt/flow_mgmt_request.h"
 #include "pkt/flow_mgmt_dbclient.h"
+#include "uve/flow_ace_stats_request.h"
+#include "uve/agent_uve_stats.h"
 #include "vrouter/flow_stats/flow_stats_collector.h"
 const string FlowMgmtManager::kFlowMgmtTask = "Flow::Management";
 
@@ -160,8 +162,22 @@ void FlowMgmtManager::RetryVrfDeleteEvent(const VrfEntry *vrf) {
     request_queue_.Enqueue(req);
 }
 
+void FlowMgmtManager::DummyEvent() {
+    boost::shared_ptr<FlowMgmtRequest>req
+        (new FlowMgmtRequest(FlowMgmtRequest::DUMMY));
+    request_queue_.Enqueue(req);
+}
+
 void FlowMgmtManager::EnqueueFlowEvent(FlowEvent *event) {
     agent_->pkt()->get_flow_proto()->EnqueueFlowEvent(event);
+}
+
+void FlowMgmtManager::FlowUpdateQueueDisable(bool disabled) {
+    request_queue_.set_disable(disabled);
+}
+
+size_t FlowMgmtManager::FlowUpdateQueueLength() {
+    return request_queue_.Length();
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -307,6 +323,7 @@ void BgpAsAServiceFlowMgmtTree::DeleteAll() {
         BgpAsAServiceFlowMgmtKey *key =
             static_cast<BgpAsAServiceFlowMgmtKey *>(it->first);
         mgr_->BgpAsAServiceNotify(key->uuid(), key->source_port());
+        it++;
     }
 }
 
@@ -375,29 +392,16 @@ bool FlowMgmtManager::RequestHandler(boost::shared_ptr<FlowMgmtRequest> req) {
         break;
     }
 
+    case FlowMgmtRequest::DUMMY:
+        break;
+
     default:
          assert(0);
 
     }
 
-    // Flow management runs in parallel to flow processing. As a result,
-    // we need to ensure that last reference for flow will go away from
-    // kTaskFlowEvent context only. This is ensured by following 2 actions
-    //
-    // 1. On return from here reference to the flow is removed which can
-    //    potentially be last reference. So, enqueue a dummy request to
-    //    flow-table queue.
-    // 2. Due to OS scheduling, its possible that the request we are
-    //    enqueuing completes even before this function is returned. So,
-    //    drop the reference immediately after allocating the event
     if (req->flow().get()) {
-        tbb::mutex::scoped_lock lock(req->flow()->mutex());
-        if (req->flow()->deleted()) {
-            FlowEvent *event = new FlowEvent(FlowEvent::FREE_FLOW_REF,
-                                             req->flow().get());
-            req->set_flow(NULL);
-            EnqueueFlowEvent(event);
-        }
+        agent_->pkt()->get_flow_proto()->EnqueueFreeFlowReference(req->flow());
     }
 
     return true;
@@ -432,11 +436,41 @@ void FlowMgmtManager::MakeFlowMgmtKeyTree(FlowEntry *flow,
     }
 }
 
+void FlowMgmtManager::EnqueueUveAddEvent(const FlowEntry *flow) const {
+    AgentUveStats *uve = dynamic_cast<AgentUveStats *>(agent_->uve());
+    if (uve) {
+        const Interface *itf = flow->intf_entry();
+        const VmInterface *vmi = dynamic_cast<const VmInterface *>(itf);
+        const VnEntry *vn = flow->vn_entry();
+        string vn_name = vn? vn->GetName() : "";
+        string itf_name = vmi? vmi->cfg_name() : "";
+        if ((!itf_name.empty() && !flow->sg_rule_uuid().empty()) ||
+            (!vn_name.empty() && !flow->nw_ace_uuid().empty())) {
+            boost::shared_ptr<FlowAceStatsRequest> req(new FlowAceStatsRequest
+                (FlowAceStatsRequest::ADD_FLOW, flow->uuid(), itf_name,
+                 flow->sg_rule_uuid(), vn_name, flow->nw_ace_uuid()));
+            uve->stats_manager()->EnqueueEvent(req);
+        }
+    }
+}
+
+void FlowMgmtManager::EnqueueUveDeleteEvent(const FlowEntry *flow) const {
+    AgentUveStats *uve = dynamic_cast<AgentUveStats *>(agent_->uve());
+    if (uve) {
+        boost::shared_ptr<FlowAceStatsRequest> req(new FlowAceStatsRequest
+            (FlowAceStatsRequest::DELETE_FLOW, flow->uuid()));
+        uve->stats_manager()->EnqueueEvent(req);
+    }
+}
+
 void FlowMgmtManager::AddFlow(FlowEntryPtr &flow) {
     LogFlow(flow.get(), "ADD");
 
     //Enqueue Add request to flow-stats-collector
     agent_->flow_stats_manager()->AddEvent(flow);
+
+    //Enqueue Add request to UVE module for ACE stats
+    EnqueueUveAddEvent(flow.get());
 
     // Trace the flow add/change
     FlowMgmtKeyTree new_tree;
@@ -499,13 +533,16 @@ void FlowMgmtManager::AddFlow(FlowEntryPtr &flow) {
 void FlowMgmtManager::DeleteFlow(FlowEntryPtr &flow) {
     LogFlow(flow.get(), "DEL");
 
+    //Enqueue Delete request to flow-stats-collector
+    agent_->flow_stats_manager()->DeleteEvent(flow.get());
+
     // Delete entries for flow from the tree
     FlowEntryInfo *old_info = FindFlowEntryInfo(flow);
     if (old_info == NULL)
         return;
 
-    //Enqueue Delete request to flow-stats-collector
-    agent_->flow_stats_manager()->DeleteEvent(flow);
+    //Enqueue Add request to UVE module for ACE stats
+    EnqueueUveDeleteEvent(flow.get());
 
     FlowMgmtKeyTree *old_tree = &old_info->tree_;
     assert(old_tree);
@@ -1334,6 +1371,14 @@ void InetRouteFlowMgmtTree::ExtractKeys(FlowEntry *flow,
         ExtractKeys(flow, tree, flow->data().flow_source_vrf,
                     flow->key().src_addr, flow->data().source_plen);
     }
+
+    if (flow->data().acl_assigned_vrf_index_ != VrfEntry::kInvalidIndex) {
+        ExtractKeys(flow, tree, flow->data().acl_assigned_vrf_index_,
+                    flow->key().src_addr, flow->data().source_plen);
+        ExtractKeys(flow, tree, flow->data().acl_assigned_vrf_index_,
+                    flow->key().dst_addr, flow->data().dest_plen);
+    }
+
     ExtractKeys(flow, tree, flow->key().src_addr,
                 &flow->data().flow_source_plen_map);
 
@@ -1509,8 +1554,13 @@ bool VrfFlowMgmtEntry::CanDelete() const {
 
 VrfFlowMgmtEntry::Data::Data(VrfFlowMgmtEntry *vrf_mgmt_entry,
                              const VrfEntry *vrf, AgentRouteTable *table) :
-    deleted_(false), table_ref_(this, table->deleter()),
+    deleted_(false), table_ref_(this, NULL),
     vrf_mgmt_entry_(vrf_mgmt_entry), vrf_(vrf) {
+    if (vrf->IsDeleted() == false) {
+        table_ref_.Reset(table->deleter());
+    } else {
+        deleted_ = true;
+    }
 }
 
 VrfFlowMgmtEntry::Data::~Data() {

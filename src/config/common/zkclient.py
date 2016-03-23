@@ -175,14 +175,13 @@ class IndexAllocator(object):
         except ResourceExistsError:
             self.set_in_use(idx)
             existing_value = self.read(idx)
-            if (value == existing_value or
-                existing_value is None): # upgrade case
+            if (value == existing_value):
                 # idempotent reserve
                 return idx
             msg = 'For index %s reserve conflicts with existing value %s.' \
                   %(idx, existing_value)
             self._zookeeper_client.syslog(msg, level='notice')
-            return None
+            raise
     # end reserve
 
     def delete(self, idx):
@@ -261,6 +260,7 @@ class ZookeeperClient(object):
         self._conn_state = None
         self._sandesh_connection_info_update(status='INIT', message='')
         self._lost_cb = None
+        self._suspend_cb = None
         self.connect()
     # end __init__
 
@@ -308,6 +308,12 @@ class ZookeeperClient(object):
         self._lost_cb = lost_cb
     # end set_lost_cb
 
+    def set_suspend_cb(self, suspend_cb=None):
+        # set a callback to be called when kazoo state is suspend
+        # set to None for default action
+        self._suspend_cb = suspend_cb
+    # end set_suspend_cb
+
     def _zk_listener(self, state):
         if state == KazooState.CONNECTED:
             if self._election:
@@ -328,6 +334,8 @@ class ZookeeperClient(object):
             # Update connection info
             self._sandesh_connection_info_update(status='INIT',
                 message = 'Connection to zookeeper lost. Retrying')
+            if self._suspend_cb:
+                self._suspend_cb()
 
     # end
 
@@ -378,6 +386,7 @@ class ZookeeperClient(object):
             if propogate_error:
                 raise
             return []
+
     # end read_node
 
     def get_children_with_data(self, path):
@@ -401,6 +410,15 @@ class ZookeeperClient(object):
     def transaction(self):
         return self._zk_client.transaction()
     # end transaction
+
+    def exists(self, path):
+        try:
+            retry = self._retry.copy()
+            return retry(self._zk_client.exists, path)
+        except Exception:
+            return []
+    # end exists
+
 
     def _sandesh_connection_info_update(self, status, message):
         from pysandesh.connection_info import ConnectionState

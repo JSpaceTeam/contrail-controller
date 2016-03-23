@@ -156,6 +156,10 @@ void HealthCheckInstance::OnExit(InstanceTask *task,
     service_->table_->InstanceEventEnqueue(event);
 }
 
+bool HealthCheckInstance::IsRunning() const {
+    return (task_.get() != NULL ? task_->is_running(): false);
+}
+
 HealthCheckInstanceEvent::HealthCheckInstanceEvent(HealthCheckInstance *inst,
                                                    EventType type,
                                                    const std::string &message) :
@@ -212,8 +216,7 @@ bool HealthCheckService::DBEntrySandesh(Sandesh *sresp,
         inst_data.set_health_check_ip
             (it->second->ip_->destination_ip().to_string());
         inst_data.set_active(it->second->active_);
-        inst_data.set_running(it->second->task_.get() != NULL ?
-                              it->second->task_->is_running(): false);
+        inst_data.set_running(it->second->IsRunning());
         inst_data.set_last_update_time(it->second->last_update_time_);
         inst_list.push_back(inst_data);
         it++;
@@ -427,7 +430,8 @@ static HealthCheckServiceData *BuildData(Agent *agent, IFMapNode *node,
         boost::system::error_code ec;
         dest_ip = Ip4Address::from_string(p.url_path, ec);
         url_path = p.url_path;
-    } else {
+    } else if (!p.url_path.empty()) {
+        // parse url if available
         struct http_parser_url urldata;
         int ret = http_parser_parse_url(p.url_path.c_str(), p.url_path.size(),
                                         false, &urldata);

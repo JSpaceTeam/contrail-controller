@@ -784,9 +784,15 @@ InetInterface *InetInterfaceGet(const char *ifname) {
     return static_cast<InetInterface *>(Agent::GetInstance()->interface_table()->FindActiveEntry(&key));
 }
 
+CfgIntEntry *CfgPortGet(boost::uuids::uuid u) {
+    CfgIntKey key(u);
+    return static_cast<CfgIntEntry *>(Agent::GetInstance()->
+        interface_config_table()->Find(&key));
+}
+
 Interface *VmPortGet(int id) {
     VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(id), "");
-    return static_cast<Interface *>(Agent::GetInstance()->interface_table()->FindActiveEntry(&key));
+    return static_cast<Interface *>(Agent::GetInstance()->interface_table()->Find(&key, false));
 }
 
 bool VmPortFloatingIpCount(int id, unsigned int count) {
@@ -2345,7 +2351,7 @@ bool FlowStats(FlowIp *input, int id, uint32_t bytes, uint32_t pkts) {
     }
     FlowStatsCollector *fec =
         agent->flow_stats_manager()->default_flow_stats_collector();
-    FlowExportInfo *info = fec->FindFlowExportInfo(fe->key());
+    FlowExportInfo *info = fec->FindFlowExportInfo(fe->uuid());
 
     if (info) {
         LOG(DEBUG, " bytes " << info->bytes() << " pkts " << info->packets());
@@ -2831,6 +2837,9 @@ bool FlowDelete(const string &vrf_name, const char *sip, const char *dip,
     key.dst_addr = IpAddress::from_string(dip);
     key.src_port = sport;
     key.dst_port = dport;
+    if (proto == IPPROTO_ICMPV6) {
+        key.dst_port = ICMP6_ECHO_REPLY;
+    }
     key.protocol = proto;
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
@@ -3214,9 +3223,13 @@ bool FlowStatsMatch(const string &vrf_name, const char *sip,
     if (fe == NULL) {
         return false;
     }
-    FlowStatsCollector *fec = 
-        agent->flow_stats_manager()->default_flow_stats_collector();
-    FlowExportInfo *info = fec->FindFlowExportInfo(key);
+    FlowStatsCollector *fec = NULL;
+    if (proto == IPPROTO_TCP) {
+        fec = agent->flow_stats_manager()->tcp_flow_stats_collector();
+    } else {
+        fec = agent->flow_stats_manager()->default_flow_stats_collector();
+    }
+    FlowExportInfo *info = fec->FindFlowExportInfo(fe->uuid());
     if (info) {
         LOG(DEBUG, " bytes " << info->bytes() << " pkts " << info->packets());
         if (info->bytes() == bytes && info->packets() == pkts) {

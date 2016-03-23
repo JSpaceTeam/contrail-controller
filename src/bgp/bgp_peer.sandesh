@@ -39,27 +39,45 @@ struct ShowBgpNeighborFamily {
     1: string family;
     2: u32 loop_count;
     3: u32 prefix_limit;
+    4: string gateway_address;
+}
+
+struct PeerCloseInfo {
+    1: string state;
+    2: bool close_again;
+    3: u64 init;
+    4: u64 close;
+    5: u64 nested;
+    6: u64 deletes;
+    7: u64 stale;
+    8: u64 sweep;
+    9: u64 gr_timer;
+    10: u64 deleted_state_paths;
+    11: u64 deleted_paths;
+    12: u64 marked_state_paths;
 }
 
 struct BgpNeighborResp {
     53: string instance_name;
     1: string peer (link="BgpNeighborReq"); // Peer name
     36: bool deleted;           // Deletion in progress
-    43: string deleted_at;
-    47: bool admin_down;
-    48: bool passive;
     2: string peer_address (link="BgpNeighborReq");
     25: string peer_id;
     3: u32 peer_asn;
-    50: u32 peer_port;
-    51: string transport_address;
     6: string encoding;         // BGP/XMPP
     7: string peer_type         // internal/external
-    52: string router_type;     // bgp_schema.xsd:BgpRouterType
     8: string state;
+    43: string closed_at;
+    52: string router_type;     // bgp_schema.xsd:BgpRouterType
+    47: bool admin_down;
+    48: bool passive;
+    55: bool as_override;
+    50: u32 peer_port;
+    51: string transport_address;
     4: string local_address;    // local ip address and port
     26: string local_id;
     5: u32 local_asn;
+    54: optional PeerCloseInfo peer_close_info;
     9: optional string send_state;       // in sync/not in sync
     10: optional string last_event;
     11: optional string last_state;
@@ -109,6 +127,7 @@ request sandesh ShowBgpNeighborSummaryReq {
 struct ShowRoutePathBrief {
     1: string protocol;
     2: u32 local_preference;
+    6: u32 med;
     3: string source;
     4: string next_hop;
     5: u32 label;
@@ -136,6 +155,7 @@ struct ShowRoutePath {
     1: string protocol;
     3: string last_modified;
     5: u32 local_preference;
+    25: u32 med;
     6: u32 local_as;
     7: u32 peer_as;
     8: string peer_router_id;           // neighbor neighbor route id
@@ -452,8 +472,19 @@ struct ShowBgpServiceChainConfig {
 
 struct ShowBgpStaticRouteConfig {
     1: string prefix;
-    2: list<string> targets;
     3: string nexthop;
+    4: list<string> communities;
+    2: list<string> targets;
+}
+
+struct ShowBgpInstanceRoutingPolicyConfig {
+    1: string policy_name (link="ShowBgpRoutingPolicyConfigReq");
+    2: string sequence;
+}
+
+struct ShowBgpRouteAggregateConfig {
+    1: string prefix;
+    2: string nexthop;
 }
 
 struct ShowBgpInstanceRoutingPolicyConfig {
@@ -522,6 +553,7 @@ struct ShowBgpNeighborFamilyConfig {
     1: string family;
     2: i32 loop_count;
     3: i32 prefix_limit;
+    4: string gateway_address;
 }
 
 struct ShowBgpNeighborConfig {
@@ -529,6 +561,7 @@ struct ShowBgpNeighborConfig {
     2: string name;
     13: bool admin_down;
     15: bool passive;
+    20: bool as_override;
     18: string router_type;
     8: string local_identifier;
     9: i32 local_as;
@@ -581,6 +614,7 @@ struct BgpPeerInfoData {
     2: optional bool deleted
     23: optional bool admin_down;
     24: optional bool passive;
+    27: optional bool as_override;
     25: optional string router_type;      // bgp_schema.xsd:BgpRouterType
     3: optional string peer_type;         // internal/external
     20: optional string peer_address;

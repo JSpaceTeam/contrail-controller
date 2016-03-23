@@ -44,9 +44,10 @@ struct FlowStatsCollectorReq {
     };
 
     FlowStatsCollectorReq(Event ev, const FlowAgingTableKey &k,
-                          uint64_t interval, uint64_t timeout) :
+                          uint64_t interval, uint64_t timeout,
+                          bool user_cfgd) :
         event(ev), key(k), flow_stats_interval(interval),
-        flow_cache_timeout(timeout) {}
+        flow_cache_timeout(timeout), user_configured(user_cfgd) {}
 
     FlowStatsCollectorReq(Event ev, const FlowAgingTableKey &k):
         event(ev), key(k) {}
@@ -55,6 +56,7 @@ struct FlowStatsCollectorReq {
     FlowAgingTableKey key;
     uint64_t flow_stats_interval;
     uint64_t flow_cache_timeout;
+    bool user_configured;
 };
 
 class FlowStatsManager {
@@ -77,11 +79,14 @@ public:
     FlowStatsCollector* default_flow_stats_collector() {
         return default_flow_stats_collector_.get();
     }
+    FlowStatsCollector* tcp_flow_stats_collector() {
+        return protocol_list_[IPPROTO_TCP];
+    }
 
     //Add protocol + port based flow aging table
     void Add(const FlowAgingTableKey &key,
              uint64_t flow_stats_interval,
-             uint64_t flow_cache_timeout);
+             uint64_t flow_cache_timeout, bool user_configured);
     void Delete(const FlowAgingTableKey &key);
     void Free(const FlowAgingTableKey &key);
 
@@ -103,7 +108,7 @@ public:
         return flow_aging_table_map_.end();
     }
 
-    FlowStatsCollector* GetFlowStatsCollector(const FlowKey &key) const;
+    FlowStatsCollector* GetFlowStatsCollector(const FlowEntry *p) const;
     const FlowStatsCollector* Find(uint32_t proto, uint32_t port) const;
 
     bool RequestHandler(boost::shared_ptr<FlowStatsCollectorReq> req);

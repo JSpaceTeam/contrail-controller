@@ -1,3 +1,4 @@
+#
 # Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
 #
 import gevent
@@ -26,9 +27,9 @@ import requests
 import stevedore
 
 from vnc_api.vnc_api import *
-import keystoneclient.apiclient.exceptions as kc_exceptions
+import keystoneclient.exceptions as kc_exceptions
 import keystoneclient.v2_0.client as keystone
-from keystoneclient.middleware import auth_token
+from keystonemiddleware import auth_token
 from cfgm_common import rest, utils
 import cfgm_common
 
@@ -321,7 +322,8 @@ class TestPermissions(test_case.ApiServerTestCase):
     fqdn = [domain_name]
     vn_name='alice-vn'
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         extra_mocks = [(keystone.Client,
                             '__new__', test_utils.FakeKeystoneClient),
                        (vnc_api.vnc_api.VncApi,
@@ -332,9 +334,11 @@ class TestPermissions(test_case.ApiServerTestCase):
             ('DEFAULTS', 'multi_tenancy_with_rbac', 'True'),
             ('DEFAULTS', 'auth', 'keystone'),
         ]
-        super(TestPermissions, self).setUp(extra_mocks=extra_mocks,
+        super(TestPermissions, cls).setUpClass(extra_mocks=extra_mocks,
             extra_config_knobs=extra_config_knobs)
 
+    def setUp(self):
+        super(TestPermissions, self).setUp()
         ip = self._api_server_ip
         port = self._api_server_port
         # kc = test_utils.get_keystone_client()
@@ -343,9 +347,9 @@ class TestPermissions(test_case.ApiServerTestCase):
                        auth_url='http://127.0.0.1:5000/v2.0')
 
         # prepare token before vnc api invokes keystone
-        alice = User(ip, port, kc, 'alice', 'alice123', 'alice-role', 'alice-proj')
-        bob =   User(ip, port, kc, 'bob', 'bob123', 'bob-role', 'bob-proj')
-        admin = User(ip, port, kc, 'admin', 'contrail123', 'admin', 'admin')
+        alice = User(ip, port, kc, 'alice', 'alice123', 'alice-role', 'alice-proj-%s' % self.id())
+        bob =   User(ip, port, kc, 'bob', 'bob123', 'bob-role', 'bob-proj-%s' % self.id())
+        admin = User(ip, port, kc, 'admin', 'contrail123', 'admin', 'admin-%s' % self.id())
 
         self.alice = alice
         self.bob   = bob
@@ -388,10 +392,10 @@ class TestPermissions(test_case.ApiServerTestCase):
 
     # delete api-access-list for alice and bob and disallow api access to their projects
     # then try to create VN in the project. This should fail
-    #@unittest.skip("need refactor since collection urls are changed")
     def test_api_access(self):
-	logger.info('')
+        logger.info('')
         logger.info( '########### API ACCESS (CREATE) ##################')
+
         alice = self.alice
         bob   = self.bob
         admin = self.admin
@@ -414,13 +418,14 @@ class TestPermissions(test_case.ApiServerTestCase):
             self.assertTrue(False, '*** Created virtual network ... test failed!')
         except PermissionDenied as e:
             self.assertTrue(True, 'Failed to create VN ... Test passes!')
+
         # allow permission to create virtual-network
         for user in self.users:
             logger.info( "%s: project %s to allow full access to role %s" % \
                 (user.name, user.project, user.role))
             # note that collection API is set for create operation
             vnc_fix_api_access_list(self.admin.vnc_lib, user.project_obj,
-                rule_str = 'virtual-network %s:C' % user.role)
+                rule_str = 'virtual-networks %s:C' % user.role)
 
         logger.info( '')
         logger.info( 'alice: trying to create VN in her project')
@@ -601,51 +606,50 @@ class TestPermissions(test_case.ApiServerTestCase):
             self.assertTrue(True, 'Succeeded in updating VN. Test passed!')
         except PermissionDenied as e:
             self.assertTrue(False, '*** Failed to update VN ... Test failed!!')
-	# Disabline collection since we dont have the 's anymore
-	
-        #logger.info( '')
-        #logger.info( '########################### COLLECTIONS #################')
-        #logger.info( 'User should be able to see VN in own project and any shared')
-        #logger.info( 'alice: get virtual network collection ... should fail')
 
-        #try:
-        #    x = alice.vnc_lib.virtual_networks_list(parent_id = alice.project_uuid)
-        #    self.assertTrue(False,
-        #        '*** Read VN collection without list permission ... test failed!')
-        #except PermissionDenied as e:
-        #    self.assertTrue(True, 'Failed to read VN collection ... test passed')
+        logger.info( '')
+        logger.info( '########################### COLLECTIONS #################')
+        logger.info( 'User should be able to see VN in own project and any shared')
+        logger.info( 'alice: get virtual network collection ... should fail')
+
+        try:
+            x = alice.vnc_lib.virtual_networks_list(parent_id = alice.project_uuid)
+            self.assertTrue(False,
+                '*** Read VN collection without list permission ... test failed!')
+        except PermissionDenied as e:
+            self.assertTrue(True, 'Failed to read VN collection ... test passed')
 
         # allow permission to read virtual-network collection
-        #for user in [alice, bob]:
-        #    logger.info( "%s: project %s to allow collection access to role %s" % \
-        #        (user.name, user.project, user.role))
+        for user in [alice, bob]:
+            logger.info( "%s: project %s to allow collection access to role %s" % \
+                (user.name, user.project, user.role))
             # note that collection API is set for create operation
-        #    vnc_fix_api_access_list(admin.vnc_lib, user.project_obj,
-        #        rule_str = 'virtual-network %s:CR' % user.role)
+            vnc_fix_api_access_list(admin.vnc_lib, user.project_obj,
+                rule_str = 'virtual-networks %s:CR' % user.role)
 
         # create one more VN in alice project to differentiate from what bob sees
-        #vn2 = VirtualNetwork('second-vn', alice.project_obj)
-        #alice.vnc_lib.virtual_network_create(vn2)
-        #logger.info( 'Alice: created additional VN %s in her project' % vn2.get_fq_name())
+        vn2 = VirtualNetwork('second-vn', alice.project_obj)
+        alice.vnc_lib.virtual_network_create(vn2)
+        logger.info( 'Alice: created additional VN %s in her project' % vn2.get_fq_name())
 
-        #logger.info( 'Alice: network list')
-        #x = alice.vnc_lib.virtual_networks_list(parent_id = alice.project_uuid)
-        #for item in x['virtual-network']:
-        #    logger.info( '    %s: %s' % (item['uuid'], item['fq_name']))
-        #expected = set(['alice-vn', 'second-vn'])
-        #received = set([item['fq_name'][-1] for item in x['virtual-network']])
-        #self.assertEquals(expected, received)
+        logger.info( 'Alice: network list')
+        x = alice.vnc_lib.virtual_networks_list(parent_id = alice.project_uuid)
+        for item in x['virtual-networks']:
+            logger.info( '    %s: %s' % (item['uuid'], item['fq_name']))
+        expected = set(['alice-vn', 'second-vn'])
+        received = set([item['fq_name'][-1] for item in x['virtual-networks']])
+        self.assertEquals(expected, received)
 
-        #logger.info('')
-        #logger.info( 'Bob: network list')
-        #y = bob.vnc_lib.virtual_networks_list(parent_id = bob.project_uuid)
-        #for item in y['virtual-network']:
-        #    logger.info( '    %s: %s' % (item['uuid'], item['fq_name']))
+        logger.info('')
+        logger.info( 'Bob: network list')
+        y = bob.vnc_lib.virtual_networks_list(parent_id = bob.project_uuid)
+        for item in y['virtual-networks']:
+            logger.info( '    %s: %s' % (item['uuid'], item['fq_name']))
         # need changes in auto code generation for lists
-        #expected = set(['alice-vn'])
-        #received = set([item['fq_name'][-1] for item in y['virtual-network']])
+        expected = set(['alice-vn'])
+        received = set([item['fq_name'][-1] for item in y['virtual-networks']])
 
-        #self.assertEquals(expected, received)
+        self.assertEquals(expected, received)
 
     def test_check_obj_perms_api(self):
         logger.info('')
@@ -661,7 +665,7 @@ class TestPermissions(test_case.ApiServerTestCase):
                 (user.name, user.project, user.role))
             # note that collection API is set for create operation
             vnc_fix_api_access_list(self.admin.vnc_lib, user.project_obj,
-                rule_str = 'virtual-network %s:CRUD' % user.role)
+                rule_str = 'virtual-networks %s:CRUD' % user.role)
 
         logger.info( '')
         logger.info( 'alice: trying to create VN in her project')
@@ -728,10 +732,6 @@ class TestPermissions(test_case.ApiServerTestCase):
 
 
     def tearDown(self):
-        self._api_svr_greenlet.kill()
-        self._api_server._db_conn._msgbus.shutdown()
-        test_utils.FakeIfmapClient.reset()
-        test_utils.CassandraCFs.reset()
         super(TestPermissions, self).tearDown()
     # end tearDown
 

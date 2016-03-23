@@ -300,6 +300,7 @@ void BgpRoute::FillRouteInfo(const BgpTable *table,
 
         const BgpAttr *attr = path->GetAttr();
         srp.set_local_preference(attr->local_pref());
+        srp.set_med(attr->med());
         srp.set_next_hop(attr->nexthop().to_string());
         srp.set_label(path->GetLabel());
         show_route_paths.push_back(srp);
@@ -394,7 +395,7 @@ static void FillPmsiTunnelInfo(const PmsiTunnel *pmsi_tunnel, bool label_is_vni,
     ShowPmsiTunnel spt;
     spt.set_type(pmsi_tunnel->pmsi_tunnel().GetTunnelTypeString());
     spt.set_ar_type(pmsi_tunnel->pmsi_tunnel().GetTunnelArTypeString());
-    spt.set_identifier(pmsi_tunnel->identifier.to_string());
+    spt.set_identifier(pmsi_tunnel->identifier().to_string());
     spt.set_label(pmsi_tunnel->GetLabel(label_is_vni));
     spt.set_flags(pmsi_tunnel->pmsi_tunnel().GetTunnelFlagsStrings());
     show_path->set_pmsi_tunnel(spt);
@@ -431,6 +432,7 @@ void BgpRoute::FillRouteInfo(const BgpTable *table,
         if (attr->as_path() != NULL)
             srp.set_as_path(attr->as_path()->path().ToString());
         srp.set_local_preference(attr->local_pref());
+        srp.set_med(attr->med());
         srp.set_next_hop(attr->nexthop().to_string());
         srp.set_label(path->GetLabel());
         srp.set_flags(path->GetFlagsStringList());
@@ -461,7 +463,8 @@ void BgpRoute::FillRouteInfo(const BgpTable *table,
         if (attr->ext_community()) {
             FillRoutePathExtCommunityInfo(table, attr->ext_community(), &srp);
         }
-        if (srp.get_origin_vn().empty() && !table->IsVpnTable() && path->IsVrfOriginated()) {
+        if (srp.get_origin_vn().empty() &&
+            !table->IsVpnTable() && path->IsVrfOriginated()) {
             srp.set_origin_vn(ri->GetVirtualNetworkName());
         }
         if (attr->origin_vn_path()) {

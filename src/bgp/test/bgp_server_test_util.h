@@ -6,6 +6,7 @@
 #define __BGP_SERVER_TEST_UTIL_H__
 
 #include <boost/any.hpp>
+#include <boost/foreach.hpp>
 #include <boost/shared_ptr.hpp>
 
 #include "base/util.h"
@@ -23,6 +24,7 @@
 #include "bgp/routing-instance/routing_instance.h"
 #include "db/db.h"
 #include "db/db_graph.h"
+#include "io/tcp_session.h"
 #include "xmpp/xmpp_lifetime.h"
 #include "xmpp/xmpp_server.h"
 
@@ -90,6 +92,8 @@ public:
     bool XmppServerIsPeerCloseGraceful() {
         return XmppServer::IsPeerCloseGraceful();
     }
+
+    const ConnectionMap &connection_map() const { return connection_map_; }
 
     // Protect connection db with mutex as it is queried from main thread which
     // does not adhere to control-node scheduler policy.
@@ -175,9 +179,22 @@ public:
         keepalive_time_msecs_ = keepalive_time_msecs;
     }
 
+    static TcpSession::Event get_skip_tcp_event() { return skip_tcp_event_; }
+    static void set_skip_tcp_event(TcpSession::Event event) {
+        skip_tcp_event_ = event;
+    }
+
+    virtual void OnSessionEvent(TcpSession *session, TcpSession::Event event) {
+        if (skip_tcp_event_ != event)
+            StateMachine::OnSessionEvent(session, event);
+        else
+            skip_tcp_event_ = TcpSession::EVENT_NONE;
+    }
+
 private:
     static int hold_time_msecs_;
     static int keepalive_time_msecs_;
+    static TcpSession::Event skip_tcp_event_;
 };
 
 class BgpServerTest : public BgpServer {
@@ -195,7 +212,7 @@ public:
                               const std::string &name);
     void DisableAllPeers();
     void EnableAllPeers();
-    void Shutdown(bool verify = true);
+    void Shutdown(bool verify = true, bool wait_for_idle = true);
     void VerifyShutdown() const;
 
     DB *config_db() { return config_db_.get(); }
@@ -256,6 +273,11 @@ public:
   
     bool BgpPeerIsReady();
     void SetDataCollectionKey(BgpPeerInfo *peer_info) const;
+    void SendEorMarker() {
+        BOOST_FOREACH(std::string family, negotiated_families()) {
+            SendEndOfRIB(Address::FamilyFromString(family));
+        }
+    }
 
     virtual bool IsReady() const {
         return IsReady_fnc_();
@@ -265,6 +287,9 @@ public:
         vpn_tables_registered_ = registered;
     }
 
+    const int id() const { return id_; }
+    void set_id(int id) { id_ = id; }
+
     boost::function<bool(const uint8_t *, size_t)> SendUpdate_fnc_;
     boost::function<bool(uint16_t, uint8_t)> MpNlriAllowed_fnc_;
     boost::function<bool()> IsReady_fnc_;
@@ -273,6 +298,7 @@ public:
 
 private:
     static bool verbose_name_;
+    int id_;
 };
 
 class PeerManagerTest : public PeerManager {
@@ -339,8 +365,20 @@ public:
         hold_time_msecs_ = hold_time_msecs;
     }
 
+    static TcpSession::Event get_skip_tcp_event() { return skip_tcp_event_; }
+    static void set_skip_tcp_event(TcpSession::Event event) {
+        skip_tcp_event_ = event;
+    }
+    virtual void OnSessionEvent(TcpSession *session, TcpSession::Event event) {
+        if (skip_tcp_event_ != event)
+            XmppStateMachine::OnSessionEvent(session, event);
+        else
+            skip_tcp_event_ = TcpSession::EVENT_NONE;
+    }
+
 private:
     static int hold_time_msecs_;
+    static TcpSession::Event skip_tcp_event_;
 };
 
 class XmppLifetimeManagerTest : public XmppLifetimeManager {

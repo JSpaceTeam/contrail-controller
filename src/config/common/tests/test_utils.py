@@ -88,6 +88,10 @@ class FakeSystemManager(object):
     def create_column_family(self, *args, **kwargs):
         pass
 
+    def drop_keyspace(self, ks_name):
+        if name in self._keyspaces:
+            self._keyspaces.remove(name)
+
 class CassandraCFs(object):
     _all_cfs = {}
 
@@ -102,7 +106,12 @@ class CassandraCFs(object):
     # end get_cf
 
     @classmethod
-    def reset(cls):
+    def reset(cls, cf_list=None):
+        if cf_list:
+            for name in cf_list:
+                if name in cls._all_cfs:
+                    del cls._all_cfs[name]
+            return
         cls._all_cfs = {}
 # end CassandraCFs
 
@@ -128,8 +137,12 @@ class FakeCF(object):
         include_timestamp = kwargs.get('include_timestamp', False)
 
         for key in self._rows:
-            yield (key, self.get(key, columns, column_start, column_finish,
-                     column_count, include_timestamp))
+            try:
+                col_dict = self.get(key, columns, column_start, column_finish,
+                                    column_count, include_timestamp)
+                yield (key, col_dict)
+            except pycassa.NotFoundException:
+                pass
     # end get_range
 
     def _column_within_range(self, column_name, column_start, column_finish):
@@ -195,6 +208,8 @@ class FakeCF(object):
                 else:
                     col_dict[col_name] = col_value
 
+        if len(col_dict) == 0:
+            raise pycassa.NotFoundException
         sorted_col_dict = OrderedDict(
             (k, col_dict[k]) for k in sorted(col_dict))
         return sorted_col_dict
@@ -239,7 +254,7 @@ class FakeCF(object):
     # end remove
 
     def xget(self, key, column_start=None, column_finish=None,
-             include_timestamp=False, include_ttl=False):
+             column_count=0, include_timestamp=False, include_ttl=False):
         col_names = []
         if key in self._rows:
             col_names = self._rows[key].keys()
@@ -379,7 +394,8 @@ class FakeNovaClient(object):
 
     @staticmethod
     def delete_vm(vm):
-        for if_ref in vm.get_virtual_machine_interfaces() or vm.get_virtual_machine_interface_back_refs():
+        for if_ref in (vm.get_virtual_machine_interfaces() or
+                       vm.get_virtual_machine_interface_back_refs() or []):
             intf = FakeNovaClient.vnc_lib.virtual_machine_interface_read(
                 id=if_ref['uuid'])
             for ip_ref in intf.get_instance_ip_back_refs() or []:
@@ -689,6 +705,14 @@ class FakeIfmapClient(object):
 class FakeKombu(object):
     _queues = {}
 
+    @classmethod
+    def is_empty(cls, qname):
+        for name, q in FakeKombu._queues.items():
+            if name.startswith(qname) and q.qsize() > 0:
+                return False
+        return True
+    # end is_empty
+
     class Exchange(object):
         def __init__(self, *args, **kwargs):
             pass
@@ -976,6 +1000,7 @@ class FakeAuthProtocol(object):
         auth_protocol = conf['auth_protocol']
         auth_host = conf['auth_host']
         auth_port = conf['auth_port']
+        self.delay_auth_decision = conf.get('delay_auth_decision', False)
         self.request_uri = '%s://%s:%s' % (auth_protocol, auth_host, auth_port)
         self.auth_uri = self.request_uri
         # print 'FakeAuthProtocol init: auth-uri %s, conf %s' % (self.auth_uri, self.conf)
@@ -1062,6 +1087,9 @@ class FakeAuthProtocol(object):
         if user_token:
             # print '****** user token %s ***** ' % user_token
             pass
+        elif self.delay_auth_decision:
+            self._add_headers(env, {'X-Identity-Status': 'Invalid'})
+            return self.app(env, start_response)
         else:
             # print 'Missing token or Unable to authenticate token'
             return self._reject_request(env, start_response)
@@ -1211,7 +1239,6 @@ class ZnodeStat(object):
 # end ZnodeStat
 
 class FakeKazooClient(object):
-    # database values same across client instances
     _values = {}
     class Election(object):
         __init__ = stub
@@ -1405,7 +1432,6 @@ class FakeVncApiStatsLog(object):
             pprint(x)
             print "\n"
 # class FakeVncApiStatsLog
-
 
 class FakeESIndicesClient(object):
 

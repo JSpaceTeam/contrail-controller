@@ -42,6 +42,7 @@ from cfgm_common.vnc_kombu import VncKombuClient
 from cfgm_common.utils import cgitb_hook
 from oslo_utils.importutils import import_class
 
+
 import copy
 from cfgm_common import jsonutils as json
 import uuid
@@ -126,6 +127,7 @@ class VncIfmapClient(object):
                                server_addrs=["%s:%s" % (ifmap_srv_ip, ifmap_srv_port)])
         self._conn_state = ConnectionStatus.INIT
         self._ifmap_disable = ifmap_disable
+        self.reset()
         # Set the signal handler
         signal.signal(signal.SIGUSR2, self.handler)
         if not self._ifmap_disable:
@@ -387,15 +389,23 @@ class VncIfmapClient(object):
 
     # end _get_api_server
 
-    def _reset(self):
+    def reset(self, drain_inflight=False):
         # Cache of metas populated in ifmap server. Useful in update to find
         # what things to remove in ifmap server
         self._id_to_metas = {}
+        if drain_inflight:
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except Empty:
+                    break
+        # end drained in flight messages
+
         self._queue = Queue(self._get_api_server()._args.ifmap_queue_size)
         if self._dequeue_greenlet is None:
             self._dequeue_greenlet = gevent.spawn(self._ifmap_dequeue_task)
+    # end reset
 
-    # end _reset
 
 
     def _publish_config_root(self):
@@ -553,7 +563,7 @@ class VncIfmapClient(object):
                     server_addrs=["%s:%s" % (self._ifmap_srv_ip,
                                              self._ifmap_srv_port)])
 
-                self._reset()
+                self.reset()
                 self._get_api_server().un_publish_ifmap_to_discovery()
                 # this will block till connection is re-established
                 self._init_conn()
@@ -793,22 +803,22 @@ class VncServerCassandraClient(VncCassandraClient):
                     prop_elem_pos = oper_param['position']
                     # modify is practically an insert so use add
                     self._add_to_prop_list(bch, obj_uuid,
-                                           prop_name, prop_elem_val, prop_elem_pos)
+                        prop_name, prop_elem_val, prop_elem_pos)
                 elif oper == 'delete':
                     prop_elem_pos = oper_param['position']
                     self._delete_from_prop_list(bch, obj_uuid,
-                                                prop_name, prop_elem_pos)
+                        prop_name, prop_elem_pos)
             elif prop_name in obj_class.prop_map_fields:
                 key_name = obj_class.prop_map_field_key_names[prop_name]
                 if oper == 'set':
                     prop_elem_val = oper_param['value']
                     position = prop_elem_val[key_name]
-                    self._set_in_prop_map(bch, obj_uuid,
-                                          prop_name, prop_elem_val, position)
+
+                        prop_name, prop_elem_val, position)
                 elif oper == 'delete':
                     position = oper_param['position']
                     self._delete_from_prop_map(bch, obj_uuid,
-                                               prop_name, position)
+                        prop_name, position)
         # end for all updates
 
         self.update_last_modified(bch, obj_uuid)
@@ -842,17 +852,17 @@ class VncServerCassandraClient(VncCassandraClient):
             send = True
             bch = self._obj_uuid_cf.batch()
         bch.insert(ref_uuid, {'relaxbackref:%s' % (obj_uuid):
-                                  json.dumps(None)})
+                               json.dumps(None)})
         if send:
             bch.send()
-
     # end _relax_ref_for_delete
 
     def get_relaxed_refs(self, obj_uuid):
         try:
             relaxed_cols = self._obj_uuid_cf.get(obj_uuid,
-                                                 column_start='relaxbackref:',
-                                                 column_finish='relaxbackref;')
+
+                column_start='relaxbackref:',
+                column_finish='relaxbackref;')
         except pycassa.NotFoundException:
             return []
 
@@ -1271,7 +1281,6 @@ class VncZkClient(object):
         self._zk_client.master_election(
             self._zk_path_pfx + "/api-server-election", os.getpid(),
             func, *args)
-
     # end master_election
 
     def _reconnect_zk(self):
@@ -1448,6 +1457,7 @@ class VncDbClient(object):
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
         self._ifmap_db = VncIfmapClient(
             self, ifmap_srv_ip, ifmap_srv_port, uname, passwd, ssl_options, ifmap_disable=ifmap_disable)
+
 
         msg = "Connecting to zookeeper on %s" % (zk_server_ip)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
@@ -2212,7 +2222,6 @@ class VncDbClient(object):
         (ok, cassandra_result) = self._cassandra_db.prop_collection_read(
             obj_type, obj_uuid, obj_fields, position)
         return ok, cassandra_result
-
     # end prop_collection_get
 
     def prop_collection_update(self, obj_type, obj_uuid, updates):
@@ -2312,6 +2321,10 @@ class VncDbClient(object):
         # suggest
 
 
+    def reset(self):
+        self._ifmap_db.reset(drain_inflight=True)
+        self._msgbus.reset()
+    # end reset
 # end class VncDbClient
 
 class VncSearchItf(object):

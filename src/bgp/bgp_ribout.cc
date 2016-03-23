@@ -2,9 +2,9 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 
-#include <algorithm>
-
 #include <boost/bind.hpp>
+
+#include <algorithm>
 
 #include "base/string_util.h"
 #include "bgp/bgp_ribout.h"
@@ -19,43 +19,6 @@
 
 using std::find;
 
-//
-// Implement operator< for RibExportPolicy by comparing each of the fields.
-//
-bool RibExportPolicy::operator<(const RibExportPolicy &rhs) const {
-    if (encoding < rhs.encoding) {
-        return true;
-    }
-    if (encoding > rhs.encoding) {
-        return false;
-    }
-    if (type < rhs.type) {
-        return true;
-    }
-    if (type > rhs.type) {
-        return false;
-    }
-    if (as_number < rhs.as_number) {
-        return true;
-    }
-    if (as_number > rhs.as_number) {
-        return false;
-    }
-    if (affinity < rhs.affinity)  {
-        return true;
-    }
-    if (affinity > rhs.affinity) {
-        return false;
-    }
-    if (cluster_id < rhs.cluster_id) {
-        return true;
-    }
-    if (cluster_id > rhs.cluster_id) {
-        return false;
-    }
-    return false;
-}
-
 RibOutAttr::NextHop::NextHop(const BgpTable *table, IpAddress address,
                              uint32_t label, const ExtCommunity *ext_community,
                              bool vrf_originated)
@@ -67,10 +30,8 @@ RibOutAttr::NextHop::NextHop(const BgpTable *table, IpAddress address,
         origin_vn_index_ = ext_community->GetOriginVnIndex();
     }
     if (origin_vn_index_ < 0 && vrf_originated) {
-        if (table)
-            origin_vn_index_ = table->routing_instance()->virtual_network_index();
-        else
-            origin_vn_index_ = 0;
+        origin_vn_index_ =
+            table ? table->routing_instance()->virtual_network_index() : 0;
     }
 }
 
@@ -99,14 +60,27 @@ bool RibOutAttr::NextHop::operator!=(const NextHop &rhs) const {
 }
 
 RibOutAttr::RibOutAttr(const BgpTable *table, const BgpAttr *attr,
-                       uint32_t label, bool include_nh) : attr_out_(attr) {
-    if (attr && include_nh) {
+    uint32_t label)
+    : attr_out_(attr),
+      vrf_originated_(false) {
+    if (attr) {
         nexthop_list_.push_back(NextHop(table, attr->nexthop(), label,
-                                        attr->ext_community(), false));
+            attr->ext_community(), false));
     }
 }
 
-RibOutAttr::RibOutAttr(BgpRoute *route, const BgpAttr *attr, bool is_xmpp) {
+RibOutAttr::RibOutAttr(const BgpTable *table, const BgpRoute *route,
+    const BgpAttr *attr, uint32_t label, bool include_nh)
+    : attr_out_(attr),
+      vrf_originated_(route->BestPath()->IsVrfOriginated()) {
+    if (attr && include_nh) {
+        nexthop_list_.push_back(NextHop(table, attr->nexthop(), label,
+            attr->ext_community(), vrf_originated_));
+    }
+}
+
+RibOutAttr::RibOutAttr(const BgpRoute *route, const BgpAttr *attr,
+    bool is_xmpp) : vrf_originated_(false) {
     // Attribute should not be set already
     assert(!attr_out_);
 
@@ -123,9 +97,9 @@ RibOutAttr::RibOutAttr(BgpRoute *route, const BgpAttr *attr, bool is_xmpp) {
     set_attr(table, attr, route->BestPath()->GetLabel(),
              route->BestPath()->IsVrfOriginated());
 
-    for (Route::PathList::iterator it = route->GetPathList().begin();
-        it != route->GetPathList().end(); it++) {
-        const BgpPath *path = static_cast<BgpPath *>(it.operator->());
+    for (Route::PathList::const_iterator it = route->GetPathList().begin();
+        it != route->GetPathList().end(); ++it) {
+        const BgpPath *path = static_cast<const BgpPath *>(it.operator->());
 
         // Skip the best path.
         if (path == route->BestPath())
@@ -195,13 +169,8 @@ void RibOutAttr::set_attr(const BgpTable *table, const BgpAttrPtr &attrp,
         return;
     }
 
-    bool nexthop_changed = attr_out_->nexthop() != attrp->nexthop();
+    assert(attr_out_->nexthop() == attrp->nexthop());
     attr_out_ = attrp;
-
-    // Update the next-hop list ? We would need label too then.
-    if (nexthop_changed) {
-        assert(false);
-    }
 }
 
 RouteState::RouteState() {
@@ -272,7 +241,12 @@ RibOut::RibOut(BgpTable *table, SchedulingGroupManager *mgr,
         name_ += " Type: IBGP";
     } else {
         name_ += " Type: EBGP";
-        name_ += " (AS " + integerToString(policy_.as_number) + ")";
+        name_ += " (AS " + integerToString(policy_.as_number);
+        if (!policy_.nexthop.is_unspecified())
+            name_ += " Nexthop " + policy_.nexthop.to_string();
+        if (policy_.as_override)
+            name_ += " ASOverride";
+        name_ += ")";
     }
 }
 
@@ -425,6 +399,20 @@ SchedulingGroup *RibOut::GetSchedulingGroup() {
 //
 const RibPeerSet &RibOut::PeerSet() const {
     return active_peerset_;
+}
+
+//
+// Clear the bit index corresponding to the specified peer.
+// Used to implement split horizon within an EBGP Ribout.
+//
+void RibOut::GetSubsetPeerSet(RibPeerSet *peerset,
+    const IPeerUpdate *cpeer) const {
+    assert(policy_.type == BgpProto::EBGP);
+    IPeerUpdate *peer = const_cast<IPeerUpdate *>(cpeer);
+    int index = GetPeerIndex(peer);
+    if (index < 0)
+        return;
+    peerset->reset(index);
 }
 
 //

@@ -429,7 +429,8 @@ class VncCassandraClient(object):
         # Properties
         for prop_field in obj_class.prop_fields:
             field = obj_dict.get(prop_field)
-            if not field:
+            # Specifically checking for None
+            if field is None:
                 continue
             if prop_field == 'id_perms':
                 field['created'] = datetime.datetime.utcnow().isoformat()
@@ -486,6 +487,7 @@ class VncCassandraClient(object):
         fq_name_cols = {utils.encode_string(fq_name_str) + ':' + obj_id:
                         json.dumps(None)}
         self._obj_fq_name_cf.insert(self._get_obj_type_to_db_type(obj_type), fq_name_cols)
+
 
         return (True, '')
     # end object_create
@@ -928,7 +930,7 @@ class VncCassandraClient(object):
             else: # grab all resources of this type
                 obj_fq_name_cf = self._obj_fq_name_cf
                 try:
-                    cols = obj_fq_name_cf.get(self._get_obj_type_to_db_type('%s' %(obj_type)),
+                    cols = obj_fq_name_cf.xget(self._get_obj_type_to_db_type('%s' %(obj_type)),
                         column_count=self._MAX_COL)
                 except pycassa.NotFoundException:
                     if count:
@@ -938,7 +940,7 @@ class VncCassandraClient(object):
 
                 def filter_rows_no_anchor():
                     all_obj_infos = {}
-                    for col_name, col_val in cols.items():
+                    for col_name, _ in cols:
                         # give chance for zk heartbeat/ping
                         gevent.sleep(0)
                         col_name_arr = utils.decode_string(col_name).split(':')
@@ -1218,5 +1220,3 @@ class VncCassandraClient(object):
 
         result['%s_back_refs' % (back_ref_type)].append(back_ref_info)
     # end _read_back_ref
-
-

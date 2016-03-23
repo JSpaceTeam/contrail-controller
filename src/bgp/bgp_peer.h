@@ -2,14 +2,17 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 
-#ifndef __BGP_PEER_H__
-#define __BGP_PEER_H__
+#ifndef SRC_BGP_BGP_PEER_H__
+#define SRC_BGP_BGP_PEER_H__
 
-#include <set>
-#include <memory>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <tbb/spin_mutex.h>
+
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
 
 #include "base/lifetime.h"
 #include "base/util.h"
@@ -19,7 +22,7 @@
 #include "bgp/bgp_debug.h"
 #include "bgp/bgp_peer_key.h"
 #include "bgp/bgp_proto.h"
-#include "bgp/bgp_ribout.h"
+#include "bgp/bgp_rib_policy.h"
 #include "bgp/ipeer.h"
 #include "bgp/bgp_peer_close.h"
 #include "bgp/state_machine.h"
@@ -27,13 +30,13 @@
 
 class BgpNeighborConfig;
 class BgpPeerInfo;
+class BgpPeerInfoData;
 class BgpServer;
 class BgpSession;
-class RoutingInstance;
 class BgpSession;
-class BgpPeerInfo;
 class BgpNeighborResp;
 class BgpSandeshContext;
+class RoutingInstance;
 
 //
 // This contains per address family attributes.
@@ -46,6 +49,7 @@ struct BgpPeerFamilyAttributes {
         const BgpFamilyAttributesConfig &family_config);
     uint8_t loop_count;
     uint32_t prefix_limit;
+    IpAddress gateway_address;
 };
 
 //
@@ -57,6 +61,7 @@ struct BgpPeerFamilyAttributesCompare {
         if (lhs && rhs) {
             KEY_COMPARE(lhs->loop_count, rhs->loop_count);
             KEY_COMPARE(lhs->prefix_limit, rhs->prefix_limit);
+            KEY_COMPARE(lhs->gateway_address, rhs->gateway_address);
         } else {
             KEY_COMPARE(lhs, rhs);
         }
@@ -131,13 +136,14 @@ public:
     virtual BgpServer *server() { return server_; }
     const BgpServer *server() const { return server_; }
 
-    unsigned long PeerAddress() const { return peer_key_.Address(); }
+    uint32_t PeerAddress() const { return peer_key_.address(); }
     const std::string peer_address_string() const {
         return peer_key_.endpoint.address().to_string();
     }
     const BgpPeerKey &peer_key() const { return peer_key_; }
     uint16_t peer_port() const { return peer_port_; }
     std::string transport_address_string() const;
+    std::string gateway_address_string(Address::Family family) const;
     const std::string &peer_name() const { return peer_name_; }
     const std::string &peer_basename() const { return peer_basename_; }
     std::string router_type() const { return router_type_; }
@@ -209,7 +215,7 @@ public:
 
     void increment_flap_count();
     void reset_flap_count();
-    uint64_t flap_count() const { return flap_count_; };
+    uint64_t flap_count() const { return flap_count_; }
 
     std::string last_flap_at() const;
 
@@ -285,6 +291,12 @@ public:
     void ClearListenSocketAuthKey();
     void SetSessionSocketAuthKey(TcpSession *session);
 
+protected:
+    std::vector<std::string> &negotiated_families() {
+        return negotiated_families_;
+    }
+    void SendEndOfRIB(Address::Family family);
+
 private:
     friend class BgpConfigTest;
     friend class BgpPeerTest;
@@ -302,17 +314,17 @@ private:
     virtual void StartKeepaliveTimerUnlocked();
     void StopKeepaliveTimerUnlocked();
     bool KeepaliveTimerExpired();
- 
+
+    RibExportPolicy BuildRibExportPolicy(Address::Family family) const;
     void ReceiveEndOfRIB(Address::Family family, size_t msgsize);
-    void SendEndOfRIB(Address::Family family);
     void StartEndOfRibTimer();
     bool EndOfRibTimerExpired();
     void EndOfRibTimerErrorHandler(std::string error_name,
                                    std::string error_message);
 
     virtual void BindLocalEndpoint(BgpSession *session);
-
     void UnregisterAllTables();
+    void BGPPeerInfoSend(const BgpPeerInfoData &peer_info) const;
 
     uint32_t GetPathFlags(Address::Family family, const BgpAttr *attr) const;
     virtual bool MpNlriAllowed(uint16_t afi, uint8_t safi);
@@ -336,11 +348,11 @@ private:
     void CustomClose();
 
     void FillBgpNeighborFamilyAttributes(BgpNeighborResp *nbr) const;
+    void FillCloseInfo(BgpNeighborResp *resp) const;
 
     std::string BytesToHexString(const u_int8_t *msg, size_t size);
 
     BgpServer *server_;
-    // Backpointer to routing instance
     RoutingInstance *rtinstance_;
     TcpSession::Endpoint endpoint_;
     BgpPeerKey peer_key_;
@@ -381,6 +393,7 @@ private:
     bool admin_down_;
     bool passive_;
     bool resolve_paths_;
+    bool as_override_;
 
     uint64_t membership_req_pending_;
     bool defer_close_;
@@ -395,7 +408,6 @@ private:
     std::vector<std::string> configured_families_;
     std::vector<std::string> negotiated_families_;
     BgpProto::BgpPeerType peer_type_;
-    RibExportPolicy policy_;
     boost::scoped_ptr<StateMachine> state_machine_;
     boost::scoped_ptr<PeerClose> peer_close_;
     boost::scoped_ptr<PeerStats> peer_stats_;
@@ -412,4 +424,4 @@ private:
     DISALLOW_COPY_AND_ASSIGN(BgpPeer);
 };
 
-#endif
+#endif  // SRC_BGP_BGP_PEER_H__

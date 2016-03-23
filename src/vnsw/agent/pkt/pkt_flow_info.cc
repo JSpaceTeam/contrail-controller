@@ -212,6 +212,12 @@ static bool NhDecode(const NextHop *nh, const PktInfo *pkt, PktFlowInfo *info,
             info->ecmp = true;
             const CompositeNH *comp_nh = static_cast<const CompositeNH *>(nh);
 
+            if (pkt->type == PktType::MESSAGE &&
+                info->out_component_nh_idx ==
+                CompositeNH::kInvalidComponentNHIdx) {
+                info->out_component_nh_idx = 0;
+            }
+
             // Compute out_component_nh_idx if,
             // 1. out_compoenent_nh_idx was set, but points to a deleted NH
             //    This can happen if flow is trapped for ECMP resolution from
@@ -548,6 +554,7 @@ static void SetInEcmpIndex(const PktInfo *pkt, PktFlowInfo *flow_info,
         }
     }
 
+    flow_info->ecmp = true;
     if (nh && nh->GetType() == NextHop::COMPOSITE) {
         const CompositeNH *comp_nh = static_cast<const CompositeNH *>(nh);
         //Find component entry index in composite NH
@@ -606,21 +613,6 @@ bool PktFlowInfo::EgressRouteAllowNatLookup(const AgentRoute *in_rt,
     }
 
     return true;
-}
-
-void PktFlowInfo::SetEcmpFlowInfo(const PktInfo *pkt, const PktControlInfo *in,
-                                  const PktControlInfo *out) {
-    nat_ip_daddr = pkt->ip_daddr;
-    nat_ip_saddr = pkt->ip_saddr;
-    nat_dport = pkt->dport;
-    nat_sport = pkt->sport;
-    if (out->intf_ && out->intf_->type() == Interface::VM_INTERFACE) {
-        dest_vrf = out->vrf_->vrf_id();
-    } else {
-        dest_vrf = pkt->vrf;
-    }
-    nat_vrf = dest_vrf;
-    nat_dest_vrf = pkt->vrf;
 }
 
 void PktFlowInfo::CheckLinkLocal(const PktInfo *pkt) {
@@ -1120,7 +1112,6 @@ void PktFlowInfo::IngressProcess(const PktInfo *pkt, PktControlInfo *in,
         return;
     }
 
-    CalculatePort(pkt, in->intf_);
     // We always expect route for source-ip for ingress flows.
     // If route not present, return from here so that a short flow is added
     UpdateRoute(&in->rt_, in->vrf_, pkt->ip_saddr, pkt->smac,
@@ -1195,6 +1186,11 @@ void PktFlowInfo::IngressProcess(const PktInfo *pkt, PktControlInfo *in,
     }
     if (out->rt_) {
         const NextHop* nh = out->rt_->GetActiveNextHop();
+        if (nh && nh->GetType() == NextHop::COMPOSITE) {
+            const CompositeNH *comp_nh = static_cast<const CompositeNH *>(nh);
+            nh = comp_nh->GetNH(out_component_nh_idx);
+        }
+
         if (nh && nh->GetType() == NextHop::TUNNEL) {
             const TunnelNH* tunnel_nh = static_cast<const TunnelNH *>(nh);
             const Ip4Address *ip = tunnel_nh->GetDip();
@@ -1265,7 +1261,6 @@ void PktFlowInfo::EgressProcess(const PktInfo *pkt, PktControlInfo *in,
     }
 
     if (out->intf_ && out->intf_->type() == Interface::VM_INTERFACE) {
-        CalculatePort(pkt, out->intf_);
         const VmInterface *vm_intf = static_cast<const VmInterface *>(out->intf_);
         if (vm_intf->IsFloatingIp(pkt->ip_daddr)) {
             pkt->l3_forwarding = true;
@@ -1457,56 +1452,12 @@ bool PktFlowInfo::Process(const PktInfo *pkt, PktControlInfo *in,
         SetInEcmpIndex(pkt, this, in, out);
     }
 
-    if (ecmp == true && nat_done == false) {
-        SetEcmpFlowInfo(pkt, in, out);
+    if (out->rt_ && out->rt_->GetActiveNextHop() &&
+            out->rt_->GetActiveNextHop()->GetType() == NextHop::COMPOSITE) {
+        ecmp = true;
     }
 
     return true;
-}
-
-//Mask source port or destination port if a port has fat flow
-//configuration. If both source port and destination port are
-//present in configuration then the lowest of the port takes
-//priority
-void PktFlowInfo::CalculatePort(const PktInfo *cpkt, const Interface *in) {
-    const VmInterface *intf = NULL;
-    PktInfo *pkt = const_cast<PktInfo *>(cpkt);
-
-    if (in == NULL || in->type() != Interface::VM_INTERFACE) {
-        return;
-    }
-
-    intf = static_cast<const VmInterface *>(in);
-    if (intf->fat_flow_list().list_.size() == 0) {
-        return;
-    }
-
-    uint16_t sport = pkt->sport;
-    if (pkt->ip_proto == IPPROTO_ICMP) {
-        sport = 0;
-    }
-    if (pkt->sport < pkt->dport) {
-        if (intf->IsFatFlow(pkt->ip_proto, sport)) {
-            pkt->dport = 0;
-            return;
-        }
-
-        if (intf->IsFatFlow(pkt->ip_proto, pkt->dport)) {
-            pkt->sport = 0;
-            return;
-        }
-        return;
-    }
-
-    if (intf->IsFatFlow(pkt->ip_proto, pkt->dport)) {
-        pkt->sport = 0;
-        return;
-    }
-
-    if (intf->IsFatFlow(pkt->ip_proto, sport)) {
-        pkt->dport = 0;
-        return;
-    }
 }
 
 // A flow can mean that traffic is seen on an interface. The path preference
@@ -1557,11 +1508,13 @@ void PktFlowInfo::ApplyFlowLimits(const PktControlInfo *in,
     }
 
     bool limit_exceeded = false;
-    if (in->vm_ && ((in->vm_->flow_count() + 2) > agent->max_vm_flows())) {
+    if (agent->max_vm_flows() &&
+        (in->vm_ && ((in->vm_->flow_count() + 2) > agent->max_vm_flows()))) {
         limit_exceeded = true;
     }
 
-    if (out->vm_ && ((out->vm_->flow_count() + 2) > agent->max_vm_flows())) {
+    if (agent->max_vm_flows() &&
+        (out->vm_ && ((out->vm_->flow_count() + 2) > agent->max_vm_flows()))) {
         limit_exceeded = true;
     }
 
@@ -1581,9 +1534,13 @@ void PktFlowInfo::ApplyFlowLimits(const PktControlInfo *in,
         limit_exceeded = true;
     }
 
-    if (in->vm_ && in->vm_->linklocal_flow_count() >=
-        agent->params()->linklocal_vm_flows()) {
-        limit_exceeded = true;
+    // Check per-vm linklocal flow-limits if specified
+    if ((agent->params()->linklocal_vm_flows() !=
+         agent->params()->linklocal_system_flows())) {
+        if (in->vm_ && in->vm_->linklocal_flow_count() >=
+            agent->params()->linklocal_vm_flows()) {
+            limit_exceeded = true;
+        }
     }
 
     if (limit_exceeded) {
@@ -1611,7 +1568,7 @@ void PktFlowInfo::LinkLocalPortBind(const PktInfo *pkt,
     if (short_flow)
         return;
 
-    if (flow->in_vm_flow_ref()->AllocateFd(agent, flow, pkt->ip_proto) == false) {
+    if (flow->in_vm_flow_ref()->AllocateFd(agent, pkt->ip_proto) == false) {
         // Could not allocate FD. Make it short flow
         agent->stats()->incr_flow_drop_due_to_max_limit();
         short_flow = true;
@@ -1639,12 +1596,16 @@ void PktFlowInfo::UpdateEvictedFlowStats(const PktInfo *pkt) {
 void PktFlowInfo::Add(const PktInfo *pkt, PktControlInfo *in,
                       PktControlInfo *out) {
     bool update = false;
-    if (pkt->agent_hdr.cmd == AgentHdr::TRAP_FLOW_MISS) {
-        UpdateEvictedFlowStats(pkt);
+    if (pkt->type != PktType::MESSAGE &&
+        pkt->agent_hdr.cmd == AgentHdr::TRAP_FLOW_MISS) {
+        if (pkt->agent_hdr.cmd_param != FlowEntry::kInvalidFlowHandle) {
+            UpdateEvictedFlowStats(pkt);
+        }
     }
 
-    if (pkt->type == PktType::MESSAGE &&
-        pkt->agent_hdr.cmd == AgentHdr::TRAP_FLOW_MISS) {
+    if ((pkt->type == PktType::MESSAGE &&
+        pkt->agent_hdr.cmd == AgentHdr::TRAP_FLOW_MISS) ||
+        pkt->agent_hdr.cmd == AgentHdr::TRAP_ECMP_RESOLVE) {
         update = true;
     }
 
@@ -1696,7 +1657,7 @@ void PktFlowInfo::Add(const PktInfo *pkt, PktControlInfo *in,
 
     bool swap_flows = false;
     // If this is message processing, then retain forward and reverse flows
-    if (pkt->type == PktType::MESSAGE &&
+    if (pkt->type == PktType::MESSAGE && !short_flow &&
         flow_entry->is_flags_set(FlowEntry::ReverseFlow)) {
         // for cases where we need to swap flows rflow should always
         // be Non-NULL
@@ -1835,3 +1796,8 @@ void PktFlowInfo::RewritePktInfo(uint32_t flow_index) {
     }
     return;
 }
+void PktFlowInfo::SetPktInfo(boost::shared_ptr<PktInfo> pkt_info) {
+     l3_flow = pkt_info->l3_forwarding;
+     family = pkt_info->family;
+     pkt = pkt_info;
+ }

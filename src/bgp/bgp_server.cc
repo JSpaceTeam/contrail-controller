@@ -4,6 +4,7 @@
 
 #include "bgp/bgp_server.h"
 
+#include <boost/tuple/tuple.hpp>
 
 #include "base/connection_info.h"
 #include "base/task_annotations.h"
@@ -24,6 +25,7 @@
 #include "bgp/routing-policy/routing_policy.h"
 
 using boost::system::error_code;
+using boost::tie;
 using process::ConnectionState;
 using std::boolalpha;
 using std::make_pair;
@@ -36,15 +38,14 @@ class BgpServer::ConfigUpdater {
 public:
     explicit ConfigUpdater(BgpServer *server) : server_(server) {
         BgpConfigManager::Observers obs;
-        obs.instance =
-            boost::bind(&ConfigUpdater::ProcessInstanceConfig, this, _1, _2);
-        obs.protocol =
-            boost::bind(&ConfigUpdater::ProcessProtocolConfig, this, _1, _2);
-        obs.neighbor =
-            boost::bind(&ConfigUpdater::ProcessNeighborConfig, this, _1, _2);
-        obs.policy =
-            boost::bind(&ConfigUpdater::ProcessRoutingPolicyConfig, this, _1, _2);
-
+        obs.instance = boost::bind(&ConfigUpdater::ProcessInstanceConfig,
+            this, _1, _2);
+        obs.protocol = boost::bind(&ConfigUpdater::ProcessProtocolConfig,
+            this, _1, _2);
+        obs.neighbor = boost::bind(&ConfigUpdater::ProcessNeighborConfig,
+            this, _1, _2);
+        obs.policy = boost::bind(&ConfigUpdater::ProcessRoutingPolicyConfig,
+            this, _1, _2);
         server->config_manager()->RegisterObservers(obs);
     }
 
@@ -257,6 +258,20 @@ void BgpServer::RetryDelete() {
 bool BgpServer::IsReadyForDeletion() {
     CHECK_CONCURRENCY("bgp::Config");
 
+    static TaskScheduler *scheduler = TaskScheduler::GetInstance();
+    static int resolver_path_task_id =
+        scheduler->GetTaskId("bgp::ResolverPath");
+    static int resolver_nexthop_task_id =
+        scheduler->GetTaskId("bgp::ResolverNexthop");
+
+    // Check if any PathResolver is active.
+    // Need to ensure that there's no pending deletes of BgpPaths added by
+    // PathResolver since they hold pointers to IPeer.
+    if (!scheduler->IsTaskGroupEmpty(resolver_path_task_id) ||
+        !scheduler->IsTaskGroupEmpty(resolver_nexthop_task_id)) {
+        return false;
+    }
+
     // Check if the IPeer membership manager queue is empty.
     if (!membership_mgr_->IsQueueEmpty()) {
         return false;
@@ -322,12 +337,12 @@ BgpServer::BgpServer(EventManager *evm)
       config_mgr_(BgpObjectFactory::Create<BgpConfigManager>(this)),
       updater_(new ConfigUpdater(this)) {
     num_up_peer_ = 0;
-    closing_count_ = 0;
+    deleting_count_ = 0;
     message_build_error_ = 0;
 }
 
 BgpServer::~BgpServer() {
-    assert(closing_count_ == 0);
+    assert(deleting_count_ == 0);
     assert(srt_manager_list_.empty());
 }
 
@@ -354,7 +369,12 @@ bool BgpServer::HasSelfConfiguration() const {
 }
 
 int BgpServer::RegisterPeer(BgpPeer *peer) {
-    peer_list_.insert(make_pair(peer->peer_name(), peer));
+    CHECK_CONCURRENCY("bgp::Config");
+    BgpPeerList::iterator loc;
+    bool result;
+    tie(loc, result) = peer_list_.insert(make_pair(peer->peer_name(), peer));
+    assert(result);
+    assert(loc->second == peer);
 
     size_t bit = peer_bmap_.find_first();
     if (bit == peer_bmap_.npos) {
@@ -366,8 +386,10 @@ int BgpServer::RegisterPeer(BgpPeer *peer) {
 }
 
 void BgpServer::UnregisterPeer(BgpPeer *peer) {
-    size_t count = peer_list_.erase(peer->peer_name());
-    assert(count == 1);
+    CHECK_CONCURRENCY("bgp::Config");
+    BgpPeerList::iterator loc = peer_list_.find(peer->peer_name());
+    assert(loc != peer_list_.end());
+    peer_list_.erase(loc);
 
     peer_bmap_.set(peer->GetIndex());
     for (size_t i = peer_bmap_.size(); i != 0; i--) {
@@ -639,7 +661,7 @@ void BgpServer::InsertStaticRouteMgr(IStaticRouteMgr *srt_manager) {
 }
 
 void BgpServer::RemoveStaticRouteMgr(IStaticRouteMgr *srt_manager) {
-    CHECK_CONCURRENCY("bgp::StaticRoute");
+    CHECK_CONCURRENCY("bgp::Config");
     srt_manager_list_.erase(srt_manager);
 }
 

@@ -128,7 +128,8 @@ struct Inet4FlowKeyCmp {
 
 class FlowTable {
 public:
-    static boost::uuids::random_generator rand_gen_;
+    static const uint32_t kPortNatFlowTableInstance = 0;
+    static const uint32_t kInvalidFlowTableInstance = 0xFF;
 
     typedef std::map<FlowKey, FlowEntry *, Inet4FlowKeyCmp> FlowEntryMap;
     typedef std::pair<FlowKey, FlowEntry *> FlowEntryMapPair;
@@ -162,8 +163,8 @@ public:
     FlowEntry *Find(const FlowKey &key);
     void Add(FlowEntry *flow, FlowEntry *rflow);
     void Update(FlowEntry *flow, FlowEntry *rflow);
+    //bool Delete(const FlowKey &flow_key);
     bool Delete(const FlowKey &key, bool del_reverse_flow);
-    bool Delete(const FlowKey &flow_key);
     void DeleteAll();
     // Test code only used method
     void DeleteFlow(const AclDBEntry *acl, const FlowKey &key,
@@ -191,7 +192,7 @@ public:
 
     static const char *TaskName() { return kTaskFlowEvent; }
     // Sandesh routines
-    void Copy(FlowEntry *lhs, const FlowEntry *rhs);
+    void Copy(FlowEntry *lhs, FlowEntry *rhs, bool update);
     void SetAclFlowSandeshData(const AclDBEntry *acl, AclFlowResp &data, 
                                const int last_count);
     void SetAceSandeshData(const AclDBEntry *acl, AclFlowCountResp &data, 
@@ -220,6 +221,7 @@ public:
     bool RevaluateSgList(FlowEntry *flow, const AgentRoute *rt,
                          const SecurityGroupList &sg_list);
     bool RevaluateRpfNH(FlowEntry *flow, const AgentRoute *rt);
+    boost::uuids::uuid rand_gen();
 
     void UpdateKSync(FlowEntry *flow, bool update);
     void DeleteKSync(FlowEntry *flow);
@@ -231,6 +233,11 @@ public:
     // Free list
     void GrowFreeList();
     FlowEntryFreeList *free_list() { return &free_list_; }
+    bool ProcessFlowEvent(const FlowEvent *req);
+
+    // Concurrency check to ensure all flow-table and free-list manipulations
+    // are done from FlowEvent task context only
+    bool ConcurrencyCheck();
 
     // Concurrency check to ensure all flow-table and free-list manipulations
     // are done from FlowEvent task context only
@@ -245,20 +252,39 @@ public:
 private:
     bool IsEvictedFlow(const FlowKey &key);
 
-    void DeleteInternal(FlowEntryMap::iterator &it, uint64_t t);
+    void DeleteInternal(FlowEntry *fe, uint64_t t);
     void ResyncAFlow(FlowEntry *fe);
     void DeleteFlowInfo(FlowEntry *fe);
 
     void AddFlowInfo(FlowEntry *fe);
     void UpdateReverseFlow(FlowEntry *flow, FlowEntry *rflow);
 
+    void UpdateUnLocked(FlowEntry *flow, FlowEntry *rflow);
     void AddInternal(FlowEntry *flow, FlowEntry *new_flow, FlowEntry *rflow,
-                     FlowEntry *new_rflow, bool update);
+                     FlowEntry *new_rflow, bool fwd_flow_update,
+                     bool rev_flow_update);
     void Add(FlowEntry *flow, FlowEntry *new_flow, FlowEntry *rflow,
-             FlowEntry *new_rflow, bool update);
+             FlowEntry *new_rflow, bool fwd_flow_update, bool rev_flow_update);
     void GetMutexSeq(tbb::mutex &mutex1, tbb::mutex &mutex2,
                      tbb::mutex **mutex_ptr_1, tbb::mutex **mutex_ptr_2);
+    void EvictFlow(FlowEntry *flow, FlowEntry *rflow);
+    bool DeleteFlows(FlowEntry *flow, FlowEntry *rflow);
+    bool DeleteUnLocked(const FlowKey &key, bool del_reverse_flow);
+    bool DeleteUnLocked(bool del_reverse_flow, FlowEntry *flow, FlowEntry *rflow);
+    void PopulateFlowEntriesUsingKey(const FlowKey &key, bool reverse_flow,
+                                     FlowEntry** flow, FlowEntry** rflow);
+    bool PopulateFlowPointersFromRequest(const FlowEvent *req,
+                                         FlowEntry **flow,
+                                         FlowEntry **rflow);
+    bool ProcessFlowEventInternal(const FlowEvent *req,
+                                  FlowEntry *flow,
+                                  FlowEntry *rflow);
+    bool FlowResponseHandlerUnLocked(const FlowEvent *resp,
+                                     FlowEntry *flow,
+                                     FlowEntry *rflow);
+
     Agent *agent_;
+    boost::uuids::random_generator rand_gen_;
     uint16_t table_index_;
     FlowTableKSyncObject *ksync_object_;
     FlowEntryMap flow_entry_map_;

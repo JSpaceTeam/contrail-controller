@@ -21,11 +21,11 @@
 #include "pkt/pkt_handler.h"
 #include "pkt/proto.h"
 #include "pkt/flow_table.h"
+#include "pkt/flow_proto.h"
 #include "pkt/pkt_types.h"
 #include "pkt/pkt_init.h"
 #include "cmn/agent_stats.h"
 #include "pkt/packet_buffer.h"
-
 #include "vr_types.h"
 #include "vr_defs.h"
 #include "vr_mpls.h"
@@ -42,7 +42,9 @@ const std::size_t PktTrace::kPktMaxTraceSize;
 ////////////////////////////////////////////////////////////////////////////////
 
 PktHandler::PktHandler(Agent *agent, PktModule *pkt_module) :
-    stats_(), agent_(agent), pkt_module_(pkt_module) {
+    stats_(), agent_(agent), pkt_module_(pkt_module),
+    work_queue_(TaskScheduler::GetInstance()->GetTaskId("Agent::PktHandler"), 0,
+                boost::bind(&PktHandler::ProcessPacket, this, _1)) {
     for (int i = 0; i < MAX_MODULES; ++i) {
         if (i == PktHandler::DHCP || i == PktHandler::DHCPV6 ||
             i == PktHandler::DNS)
@@ -53,6 +55,7 @@ PktHandler::PktHandler(Agent *agent, PktModule *pkt_module) :
 }
 
 PktHandler::~PktHandler() {
+    work_queue_.Shutdown();
 }
 
 void PktHandler::Register(PktModuleName type, Proto *proto) {
@@ -72,6 +75,64 @@ void PktHandler::Send(const AgentHdr &hdr, const PacketBufferPtr &buff) {
         PKT_TRACE(Err, "Error sending packet");
     }
     return;
+}
+
+void PktHandler::CalculatePort(PktInfo *pkt) {
+    const Interface *in = NULL;
+    const VmInterface *intf = NULL;
+
+    const NextHop *nh =
+        agent()->nexthop_table()->FindNextHop(pkt->agent_hdr.nh);
+    if (!nh) {
+        return;
+    }
+
+    if (nh->GetType() == NextHop::INTERFACE) {
+        const InterfaceNH *intf_nh = static_cast<const InterfaceNH *>(nh);
+        in = intf_nh->GetInterface();
+    } else if (nh->GetType() == NextHop::VLAN) {
+        const VlanNH *vlan_nh = static_cast<const VlanNH *>(nh);
+        in = vlan_nh->GetInterface();
+    }
+
+    if (in) {
+        intf = dynamic_cast<const VmInterface *>(in);
+    }
+
+    if (!intf) {
+        return;
+    }
+
+    if (intf->fat_flow_list().list_.size() == 0) {
+        return;
+    }
+
+    uint16_t sport = pkt->sport;
+    if (pkt->ip_proto == IPPROTO_ICMP) {
+        sport = 0;
+    }
+    if (pkt->sport < pkt->dport) {
+        if (intf->IsFatFlow(pkt->ip_proto, sport)) {
+            pkt->dport = 0;
+            return;
+        }
+
+        if (intf->IsFatFlow(pkt->ip_proto, pkt->dport)) {
+            pkt->sport = 0;
+            return;
+        }
+        return;
+    }
+
+    if (intf->IsFatFlow(pkt->ip_proto, pkt->dport)) {
+        pkt->sport = 0;
+        return;
+    }
+
+    if (intf->IsFatFlow(pkt->ip_proto, sport)) {
+        pkt->dport = 0;
+        return;
+    }
 }
 
 // Process the packet received from tap interface
@@ -104,6 +165,21 @@ PktHandler::PktModuleName PktHandler::ParsePacket(const AgentHdr &hdr,
     // Compute L2/L3 forwarding mode for packet
     pkt_info->l3_forwarding = ComputeForwardingMode(pkt_info);
 
+    pkt_info->vrf = pkt_info->agent_hdr.vrf;
+
+    // Look for DHCP packets if corresponding service is enabled
+    // Service processing over-rides ACL/Flow and forwarding configuration
+    if (intf->dhcp_enabled() && (pkt_type == PktType::UDP)) {
+        if (pkt_info->dport == DHCP_SERVER_PORT ||
+            pkt_info->sport == DHCP_CLIENT_PORT) {
+            return DHCP;
+        }
+        if (pkt_info->dport == DHCPV6_SERVER_PORT ||
+            pkt_info->sport == DHCPV6_CLIENT_PORT) {
+            return DHCPV6;
+        }
+    }
+
     if (intf->type() == Interface::VM_INTERFACE) {
         VmInterface *vm_itf = static_cast<VmInterface *>(intf);
         if (pkt_info->l3_forwarding && vm_itf->layer3_forwarding() == false) {
@@ -120,8 +196,6 @@ PktHandler::PktModuleName PktHandler::ParsePacket(const AgentHdr &hdr,
         }
     }
 
-    pkt_info->vrf = pkt_info->agent_hdr.vrf;
-
     // Handle ARP packet
     if (pkt_type == PktType::ARP) {
         return ARP;
@@ -129,6 +203,7 @@ PktHandler::PktModuleName PktHandler::ParsePacket(const AgentHdr &hdr,
 
     // Packets needing flow
     if (IsFlowPacket(pkt_info)) {
+        CalculatePort(pkt_info);
         if ((pkt_info->ip && pkt_info->family == Address::INET) ||
             (pkt_info->ip6 && pkt_info->family == Address::INET6)) {
             return FLOW;
@@ -139,24 +214,8 @@ PktHandler::PktModuleName PktHandler::ParsePacket(const AgentHdr &hdr,
         }
     }
 
-    // Handle ARP packet
-    if (pkt_type == PktType::ARP) {
-        return ARP;
-    }
-
-    // Look for DHCP and DNS packets if corresponding service is enabled
+    // Look for DNS packets if corresponding service is enabled
     // Service processing over-rides ACL/Flow
-    if (intf->dhcp_enabled() && (pkt_type == PktType::UDP)) {
-        if (pkt_info->dport == DHCP_SERVER_PORT ||
-            pkt_info->sport == DHCP_CLIENT_PORT) {
-            return DHCP;
-        }
-        if (pkt_info->dport == DHCPV6_SERVER_PORT ||
-            pkt_info->sport == DHCPV6_CLIENT_PORT) {
-            return DHCPV6;
-        }
-    } 
-    
     if (intf->dns_enabled() && (pkt_type == PktType::UDP)) {
         if (pkt_info->dport == DNS_SERVER_PORT) {
             return DNS;
@@ -178,9 +237,14 @@ PktHandler::PktModuleName PktHandler::ParsePacket(const AgentHdr &hdr,
     }
 
     if (pkt_type == PktType::ICMPV6) {
-        if(hdr.cmd == AgentHdr::TRAP_HANDLE_DF)
-           return ICMPV6_ERROR;
+        if (hdr.cmd == AgentHdr::TRAP_HANDLE_DF) {
+            return ICMPV6_ERROR;
+        }
         return ICMPV6;
+    }
+
+    if(pkt_info->ip6 && hdr.cmd == AgentHdr::TRAP_HANDLE_DF) {
+       return ICMPV6_ERROR;
     }
 
     if (pkt_info->ip && hdr.cmd == AgentHdr::TRAP_HANDLE_DF) {
@@ -195,20 +259,54 @@ PktHandler::PktModuleName PktHandler::ParsePacket(const AgentHdr &hdr,
 }
 
 void PktHandler::HandleRcvPkt(const AgentHdr &hdr, const PacketBufferPtr &buff){
-    boost::shared_ptr<PktInfo> pkt_info(new PktInfo(buff));
-    PktModuleName mod = INVALID;
-    mod = ParsePacket(hdr, pkt_info.get(), pkt_info->packet_buffer()->data());
-    pkt_info->packet_buffer()->set_module(mod);
-    pkt_info->module = mod;
-    stats_.PktRcvd(mod);
-    if (mod == INVALID) {
-        AddPktTrace(mod, PktTrace::In, pkt_info.get());
-        agent_->stats()->incr_pkt_dropped();
+     // Enqueue Flow packets directly to the flow module and avoid additional
+    // work queue hop.
+    if (IsFlowPacket(hdr)) {
+        boost::shared_ptr<PktInfo> pkt_info (new PktInfo(buff, hdr));
+        agent_->pkt()->get_flow_proto()->EnqueueFlowEvent(new FlowEvent(
+                                    FlowEvent::VROUTER_FLOW_MSG, pkt_info));
         return;
     }
 
+    // Other packets are enqueued to a workqueue to decouple from ASIO and
+    // run in exclusion with DB.
+    boost::shared_ptr<PacketBufferEnqueueItem>
+        info(new PacketBufferEnqueueItem(hdr, buff));
+    work_queue_.Enqueue(info);
+ 
+}
+
+bool PktHandler::ProcessPacket(boost::shared_ptr<PacketBufferEnqueueItem> item) {
+    const AgentHdr &hdr = item->hdr;
+    const PacketBufferPtr &buff = item->buff;
+    boost::shared_ptr<PktInfo> pkt_info (new PktInfo(buff));
+    uint8_t *pkt = buff->data();
+    PktModuleName mod = ParsePacket(hdr, pkt_info.get(), pkt);
+    PktModuleEnqueue(mod, hdr, pkt_info, pkt);
+    return true;
+}
+
+void PktHandler::PktModuleEnqueue(PktModuleName mod, const AgentHdr &hdr,
+                                  boost::shared_ptr<PktInfo> pkt_info, 
+                                  uint8_t * pkt) {
+    pkt_info->packet_buffer()->set_module(mod);
+    stats_.PktRcvd(mod);
+    if (mod == INVALID) {
+        agent_->stats()->incr_pkt_dropped();
+        pkt_trace_.at(mod).AddPktTrace(PktTrace::In, pkt_info->len, pkt, &hdr);
+        return;
+    }
     Enqueue(mod, pkt_info);
-    return;
+}
+
+PktHandler::PktModuleName PktHandler::ParseFlowPacket(
+                          boost::shared_ptr<PktInfo> pkt_info, uint8_t *pkt) {
+    PktModuleName mod = ParsePacket(pkt_info->agent_hdr, pkt_info.get(), pkt);
+    // In case it is not a flow packet, enqueue it back to the right module
+    if (mod != FLOW) {
+        PktModuleEnqueue(mod, pkt_info->agent_hdr, pkt_info, pkt);
+    }
+    return mod;
 }
 
 // Compute L2/L3 forwarding mode for pacekt.
@@ -392,6 +490,21 @@ int PktHandler::ParseIpPacket(PktInfo *pkt_info, PktType::Type &pkt_type,
             icmp->icmp6_type == ICMP6_ECHO_REPLY) {
             pkt_info->dport = ICMP6_ECHO_REPLY;
             pkt_info->sport = htons(icmp->icmp6_id);
+        } else if (IsFlowPacket(pkt_info) &&
+                icmp->icmp6_type < ICMP6_ECHO_REQUEST) {
+            //Agent has to look at inner payload
+            //and recalculate the parameter
+            //Handle this only for packets requiring flow miss
+            ParseIpPacket(pkt_info, pkt_type, pkt + len + sizeof(icmp));
+            //Swap the key parameter, which would be used as key
+            IpAddress src_ip = pkt_info->ip_saddr;
+            pkt_info->ip_saddr = pkt_info->ip_daddr;
+            pkt_info->ip_daddr = src_ip;
+            if (pkt_info->ip_proto != IPPROTO_ICMPV6) {
+                uint16_t port = pkt_info->sport;
+                pkt_info->sport = pkt_info->dport;
+                pkt_info->dport = port;
+            }
         } else {
             pkt_info->sport = 0;
         }
@@ -760,6 +873,15 @@ bool PktHandler::IsFlowPacket(PktInfo *pkt_info) {
     return false;
 }
 
+bool PktHandler::IsFlowPacket(const AgentHdr &agent_hdr) {
+    if (agent_hdr.cmd == AgentHdr::TRAP_FLOW_MISS ||
+        agent_hdr.cmd == AgentHdr::TRAP_ECMP_RESOLVE ||
+        agent_hdr.cmd == AgentHdr::TRAP_FLOW_ACTION_HOLD) {
+        return true;
+    }
+    return false;
+}
+
 bool PktHandler::IsDiagPacket(PktInfo *pkt_info) {
     if (pkt_info->agent_hdr.cmd == AgentHdr::TRAP_ZERO_TTL ||
         pkt_info->agent_hdr.cmd == AgentHdr::TRAP_ICMP_ERROR)
@@ -859,6 +981,15 @@ PktInfo::PktInfo(const PacketBufferPtr &buff) :
     transp.tcp = 0;
 }
 
+PktInfo::PktInfo(const PacketBufferPtr &buff, const AgentHdr &hdr) :
+    pkt(buff->data()), len(buff->data_len()), max_pkt_len(buff->buffer_len()),
+    data(), ipc(), family(Address::UNSPEC), type(PktType::INVALID),
+    agent_hdr(hdr), ether_type(-1), ip_saddr(), ip_daddr(), ip_proto(), sport(),
+    dport(), tcp_ack(false), tunnel(), l3_forwarding(false), l3_label(false),
+    eth(), arp(), ip(), ip6(), packet_buffer_(buff) {
+    transp.tcp = 0;
+}
+
 PktInfo::PktInfo(Agent *agent, uint32_t buff_len, PktHandler::PktModuleName mod,
                  uint32_t mdata) :
     module(mod),
@@ -881,8 +1012,7 @@ PktInfo::PktInfo(PktHandler::PktModuleName mod, InterTaskMsg *msg) :
     pkt(), len(), max_pkt_len(0), data(), ipc(msg), family(Address::UNSPEC),
     type(PktType::MESSAGE), agent_hdr(), ether_type(-1), ip_saddr(), ip_daddr(),
     ip_proto(), sport(), dport(), tcp_ack(false), tunnel(),
-    l3_forwarding(false), l3_label(false), eth(), arp(), ip(), ip6(),
-    packet_buffer_() {
+    l3_forwarding(false), l3_label(false), eth(), arp(), ip(), ip6(), packet_buffer_() {
     transp.tcp = 0;
 }
 

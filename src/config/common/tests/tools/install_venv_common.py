@@ -30,6 +30,15 @@ import optparse
 import os
 import subprocess
 import sys
+import fnmatch
+import re
+
+
+def find_files(directory, file_pattern):
+    for root, dirs, files in os.walk(directory):
+        for afile in files:
+            if fnmatch.fnmatch(afile, file_pattern):
+                yield os.path.join(root, afile)
 
 
 class InstallVenv(object):
@@ -109,11 +118,38 @@ class InstallVenv(object):
         find_links_str = ' '.join('--find-links file://'+x for x in find_links)
         cmd_array = ['%stools/with_venv.sh' %(os.environ.get('tools_path', '')),
                          'python', '.venv/bin/pip', 'install', 
-                         '--upgrade']
+                         '--upgrade', '--no-cache-dir']
         for link in find_links:
             cmd_array.extend(['--find-links', 'file://'+link])
         self.run_command(cmd_array + list(args),
                           redirect_output=False)
+
+    def get_requirements(self):
+        with open(self.requirements, 'r+') as fd:
+            reqs = [req.strip() for req in fd.readlines()]
+        gteq_or_lteq_or_eqeq = re.compile('(.*)[>=<]+[>=<]+')
+        gt_or_lt_or_eq = re.compile('(.*)[>=<]+')
+        requirements = []
+        for req in reqs:
+            for regexp in [gteq_or_lteq_or_eqeq, gt_or_lt_or_eq]:
+                match = regexp.match(req)
+                if match:
+                    requirements.append(match.group(1))
+                    continue
+            else:
+                requirements.append(req)
+        return requirements
+
+    def pip_clear_cache(self, find_links):
+        contrail_reqs = []
+        for req in self.get_requirements():
+            for find_link in find_links:
+                if find_files(find_link, req):
+                    contrail_reqs.append(req)
+        for contrail_req in contrail_reqs:
+            cache_dir = os.path.expanduser('~/.cache/pip')
+            for cachefile in find_files(cache_dir, contrail_req):
+                os.remove(cachefile)
 
     def install_dependencies(self, find_links):
         print('Installing dependencies with pip (this can take a while)...')
@@ -121,9 +157,10 @@ class InstallVenv(object):
         # First things first, make sure our venv has the latest pip and
         # setuptools and pbr
         self.pip_install(find_links, 'pip>=6.0')
-        self.pip_install(find_links, 'setuptools<=20.1.1')
+        self.pip_install(find_links, 'setuptools')
         self.pip_install(find_links, 'pbr')
 
+        self.pip_clear_cache(find_links)
         self.pip_install(find_links, '-r', self.requirements,
                          '-r', self.test_requirements, '--pre')
 

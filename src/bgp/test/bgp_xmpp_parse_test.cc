@@ -22,11 +22,14 @@ public:
     XmppChannelMock() { }
     virtual ~XmppChannelMock() { }
     void Close() { }
+    void CloseComplete() { }
+    bool IsCloseInProgress() const { return false; }
     bool Send(const uint8_t *, size_t, xmps::PeerId, SendReadyCb) {
         return true;
     }
     void RegisterReceive(xmps::PeerId id, ReceiveCb callback) { }
     void UnRegisterReceive(xmps::PeerId id) { }
+    void UnRegisterWriteReady(xmps::PeerId id) { }
     string ToString() const { return string("fake"); }
     string StateName() const { return string("Established"); }
 
@@ -118,7 +121,7 @@ protected:
     }
 
     virtual void TearDown() {
-        bx_channel_->set_peer_deleted();
+        bx_channel_->set_peer_closed(true);
     }
 
     bool ProcessItem(const xml_node &item) {

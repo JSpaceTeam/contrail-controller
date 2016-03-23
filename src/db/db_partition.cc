@@ -148,7 +148,12 @@ bool DBPartition::IsDBQueueEmpty() const {
 }
 
 void DBPartition::SetQueueDisable(bool disable) {
-    work_queue_->set_disable(disable);
+    if (disable) {
+        work_queue_->set_disable(true);
+    } else {
+        work_queue_->set_disable(false);
+        work_queue_->MaybeStartRunner();
+    }
 }
 
 class DBPartition::QueueRunner : public Task {
@@ -162,19 +167,24 @@ public:
     virtual bool Run() {
         int count = 0;
 
-        //
-        // Skip if the queue is disabled from running
-        //
-        if (queue_->disable()) return false;
+        // Skip if the queue is disabled.
+        if (queue_->disable())
+            return queue_->RunnerDone();
 
         RemoveQueueEntry *rm_entry = NULL;
         while (queue_->DequeueRemove(&rm_entry)) {
-            if (rm_entry->db_entry->IsDeleted() &&
-                !rm_entry->db_entry->is_onlist() &&
-                rm_entry->db_entry->is_state_empty(rm_entry->tpart)) {
-                rm_entry->tpart->Remove(rm_entry->db_entry);
-            } else {
-                rm_entry->db_entry->ClearOnRemoveQ();
+            DBEntryBase *db_entry = rm_entry->db_entry;
+            {
+                tbb::spin_rw_mutex::scoped_lock
+                    lock(rm_entry->tpart->dbstate_mutex(), false);
+                if (!db_entry->IsDeleted() || db_entry->is_onlist() ||
+                    !db_entry->is_state_empty_unlocked(rm_entry->tpart)) {
+                    db_entry->ClearOnRemoveQ();
+                    db_entry = NULL;
+                }
+            }
+            if (db_entry) {
+                rm_entry->tpart->Remove(db_entry);
             }
             delete rm_entry;
             if (++count == kMaxIterations) {
@@ -228,7 +238,7 @@ void DBPartition::WorkQueue::MaybeStartRunner() {
 
 bool DBPartition::WorkQueue::RunnerDone() {
     tbb::mutex::scoped_lock lock(mutex_);
-    if (request_queue_.empty() && remove_queue_.empty()) {
+    if (disable_ || (request_queue_.empty() && remove_queue_.empty())) {
         running_ = false;
         return true;
     }
