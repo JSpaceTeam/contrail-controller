@@ -16,6 +16,7 @@ from oslo_config import cfg
 _WEB_HOST = '0.0.0.0'
 _WEB_PORT = 8082
 _ADMIN_PORT = 8095
+_CLOUD_ADMIN_ROLE = 'admin'
 
 
 def parse_args(args_str):
@@ -72,6 +73,7 @@ def parse_args(args_str):
         'ifmap_health_check_interval': '60',  # in seconds
         'stale_lock_seconds': '5',  # lock but no resource past this => stale
         'disable_ifmap': False
+        'cloud_admin_role': _CLOUD_ADMIN_ROLE,
     }
     # ssl options
     secopts = {
@@ -301,6 +303,8 @@ def parse_args(args_str):
     parser.add_argument(
         "--service_lookup_file",
         help="Service lookup yaml file", default='/opt/csp-service/lookup.yaml')
+    parser.add_argument( "--cloud_admin_role",
+        help="Role name of cloud administrator")
     args_obj, remaining_argv = parser.parse_known_args(remaining_argv)
     args_obj.config_sections = config
     if type(args_obj.cassandra_server_list) is str:
