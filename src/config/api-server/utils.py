@@ -72,7 +72,7 @@ def parse_args(args_str):
         'sandesh_send_rate_limit': SandeshSystem.get_sandesh_send_rate_limit(),
         'ifmap_health_check_interval': '60',  # in seconds
         'stale_lock_seconds': '5',  # lock but no resource past this => stale
-        'disable_ifmap': False
+        'disable_ifmap': False,
         'cloud_admin_role': _CLOUD_ADMIN_ROLE,
     }
     # ssl options
