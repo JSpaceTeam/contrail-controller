@@ -135,6 +135,8 @@ void Agent::SetAgentTaskPolicy() {
         "Agent::Uve",
         "Agent::KSync",
         "Agent::PktFlowResponder",
+        "Agent::Profile",
+        "Agent::PktHandler",
         kTaskHealthCheck,
         AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
@@ -143,7 +145,9 @@ void Agent::SetAgentTaskPolicy() {
                      sizeof(db_exclude_list) / sizeof(char *));
 
     const char *flow_table_exclude_list[] = {
-        AGENT_SHUTDOWN_TASKNAME,
+         "Agent::PktFlowResponder",
+         "sandesh::RecvQueue",
+         AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne(kTaskFlowEvent, flow_table_exclude_list,
@@ -211,8 +215,6 @@ void Agent::SetAgentTaskPolicy() {
                      sizeof(walk_cancel_exclude_list) / sizeof(char *));
 
     const char *ksync_exclude_list[] = {
-        kTaskFlowEvent,
-        kTaskFlowUpdate,
         "Agent::StatsCollector",
         "db::DBTable",
         "Agent::PktFlowResponder",
@@ -771,7 +773,11 @@ Agent::ForwardingMode Agent::TranslateForwardingMode
 
 void Agent::set_flow_table_size(uint32_t count) {
     flow_table_size_ = count;
-    max_vm_flows_ = (count * params_->max_vm_flows()) / 100;
+    if (params_->max_vm_flows() >= 100) {
+        max_vm_flows_ = 0;
+    } else {
+        max_vm_flows_ = (count * params_->max_vm_flows()) / 100;
+    }
 }
 
 void Agent::set_controller_xmpp_channel(AgentXmppChannel *channel, uint8_t idx) {

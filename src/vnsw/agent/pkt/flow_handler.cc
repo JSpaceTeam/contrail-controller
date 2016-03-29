@@ -62,7 +62,20 @@ bool FlowHandler::Run() {
                      flow_proto_->GetTable(flow_table_index_));
     std::auto_ptr<FlowTaskMsg> ipc;
 
-    if (pkt_info_->type == PktType::MESSAGE) {
+    if (pkt_info_->type == PktType::INVALID) {
+        // packet parsing is not done, invoke the same here
+        uint8_t *pkt = pkt_info_->packet_buffer()->data();
+        PktHandler::PktModuleName mod = agent_->pkt()->pkt_handler()->
+                                        ParseFlowPacket(pkt_info_, pkt);
+        // if packet wasnt for flow module, it would've got enqueued to the
+        // correct module in the above call. Nothing else to do.
+        if (mod != PktHandler::FLOW) {
+            return true;
+        }
+        flow_proto_->FreeBuffer(pkt_info_.get());
+        info.SetPktInfo(pkt_info_);
+        info.l3_flow = pkt_info_->l3_forwarding = IsL3ModeFlow();
+    } else if (pkt_info_->type == PktType::MESSAGE) {
         ipc = std::auto_ptr<FlowTaskMsg>(static_cast<FlowTaskMsg *>(pkt_info_->ipc));
         pkt_info_->ipc = NULL;
         FlowEntry *fe = ipc->fe_ptr.get();
@@ -103,12 +116,23 @@ bool FlowHandler::Run() {
         pkt_info_->vrf = fe->data().vrf;
         pkt_info_->l3_forwarding = fe->l3_flow();
         info.l3_flow = fe->l3_flow();
-    } else {
-        info.l3_flow = pkt_info_->l3_forwarding = IsL3ModeFlow();
-    }
+        info.out_component_nh_idx = fe->data().component_nh_idx;
+    } 
 
     if (info.Process(pkt_info_.get(), &in, &out) == false) {
         info.short_flow = true;
+    }
+
+    //Identify port nat and enqueue port nat to specific flow table
+    if (((pkt_info_->sport != info.nat_sport) ||
+        (pkt_info_->dport != info.nat_dport)) &&
+        (info.nat_sport != 0) && (info.nat_dport != 0) &&
+        (flow_table_index_ != FlowTable::kPortNatFlowTableInstance)) {
+        //Enqueue flow evaluation to
+        //FlowTable::kPortNatFlowTableInstance instance.
+        flow_proto_->EnqueueReentrant(pkt_info_,
+                                      FlowTable::kPortNatFlowTableInstance);
+        return true;
     }
 
     if (in.intf_ && ((in.intf_->type() != Interface::VM_INTERFACE) &&

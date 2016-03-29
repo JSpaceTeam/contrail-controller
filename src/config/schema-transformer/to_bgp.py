@@ -66,14 +66,14 @@ class SchemaTransformer(object):
             'virtual_network': ['virtual_machine', 'port_tuple',
                                 'bgp_as_a_service'],
             'logical_router': ['virtual_network'],
-            'instance_ip': ['virtual_machine', 'port_tuple', 'bgp_as_a_service'],
+            'instance_ip': ['virtual_machine', 'port_tuple', 'bgp_as_a_service', 'virtual_network'],
             'floating_ip': ['virtual_machine', 'port_tuple'],
-            'virtual_machine': [],
-            'port_tuple': [],
+            'virtual_machine': ['virtual_network'],
+            'port_tuple': ['virtual_network'],
             'bgp_as_a_service': [],
         },
         'virtual_network': {
-            'self': ['network_policy'],
+            'self': ['network_policy', 'route_table'],
             'routing_instance': ['network_policy'],
             'network_policy': [],
             'virtual_machine_interface': [],
@@ -90,7 +90,8 @@ class SchemaTransformer(object):
             'service_instance': ['virtual_machine_interface']
         },
         'service_instance': {
-            'self': ['network_policy'],
+            'self': ['network_policy', 'virtual_machine', 'port_tuple'],
+            'route_table': ['network_policy', 'virtual_machine', 'port_tuple'],
             'routing_policy': ['network_policy'],
             'route_aggregate': ['network_policy'],
             'virtual_machine': ['network_policy'],
@@ -109,7 +110,8 @@ class SchemaTransformer(object):
             'security_group': [],
         },
         'route_table': {
-            'self': ['virtual_network'],
+            'self': ['virtual_network', 'service_instance'],
+            'virtual_network': ['service_instance'],
         },
         'logical_router': {
             'self': [],
@@ -349,6 +351,7 @@ class SchemaTransformer(object):
         vn_list = list(VirtualNetworkST.list_vnc_obj())
         vn_id_list = [vn.uuid for vn in vn_list]
         ri_dict = {}
+        service_ri_dict = {}
         for ri in DBBaseST.list_vnc_obj('routing_instance'):
             delete = False
             if ri.parent_uuid not in vn_id_list:
@@ -358,8 +361,11 @@ class SchemaTransformer(object):
                 # longer exists, delete the RI
                 sc_id = RoutingInstanceST._get_service_id_from_ri(
                     ri.get_fq_name_str())
-                if sc_id and sc_id not in ServiceChain:
-                    delete = True
+                if sc_id:
+                    if sc_id not in ServiceChain:
+                        delete = True
+                    else:
+                        service_ri_dict[ri.get_fq_name_str()] = ri
                 else:
                     ri_dict[ri.get_fq_name_str()] = ri
             if delete:
@@ -420,6 +426,9 @@ class SchemaTransformer(object):
             VirtualNetworkST.locate(vn.get_fq_name_str(), vn, vn_acl_dict)
         for ri_name, ri_obj in ri_dict.items():
             RoutingInstanceST.locate(ri_name, ri_obj)
+        # Initialize service instance RI's after Primary RI's
+        for si_ri_name, si_ri_obj in service_ri_dict.items():
+            RoutingInstanceST.locate(si_ri_name, si_ri_obj)
 
         NetworkPolicyST.reinit()
         gevent.sleep(0.001)

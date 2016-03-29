@@ -21,16 +21,24 @@ public:
         UPDATE_FLOW_STATS
     };
 
-    FlowExportReq(Event event, const FlowKey &key, FlowExportInfo info) :
-        event_(event), key_(key), info_(info), time_(0), index_(0) { 
+    FlowExportReq(Event event, const boost::uuids::uuid &u,
+                  FlowExportInfo info) :
+        event_(event), uuid_(u), info_(info), time_(0), index_(0) {
     }
 
-    FlowExportReq(Event event, const FlowKey &key, uint64_t time) : 
-        event_(event), key_(key), time_(time), index_(0) { 
+    FlowExportReq(Event event, const boost::uuids::uuid &u, uint64_t time) :
+        event_(event), uuid_(u), time_(time), index_(0) {
     }
 
-    FlowExportReq(Event event, const FlowKey &key, uint64_t t, uint32_t idx) :
-        event_(event), key_(key), time_(t), index_(idx) { 
+    FlowExportReq(Event event, const boost::uuids::uuid &u, uint64_t t,
+                  uint32_t idx) :
+        event_(event), uuid_(u), time_(t), index_(idx) {
+    }
+
+    FlowExportReq(Event event, const boost::uuids::uuid &u, uint32_t bytes,
+                  uint32_t packets, uint32_t oflow_bytes) :
+                  event_(event), uuid_(u), bytes_(bytes), packets_(packets),
+                  oflow_bytes_(oflow_bytes) {
     }
 
     FlowExportReq(Event event, const FlowKey &key, uint32_t bytes,
@@ -42,7 +50,7 @@ public:
     ~FlowExportReq() { }
 
     Event event() const { return event_; }
-    const FlowKey &key() const { return key_; }
+    const boost::uuids::uuid &uuid() const { return uuid_; }
     FlowExportInfo info() const { return info_; }
     uint64_t time() const { return time_; }
     uint32_t index() const  { return index_; }
@@ -52,7 +60,7 @@ public:
 
 private:
     Event event_;
-    const FlowKey key_;
+    const boost::uuids::uuid uuid_;
     FlowExportInfo info_;
     uint64_t time_;
     uint32_t index_;

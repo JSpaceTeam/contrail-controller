@@ -334,6 +334,7 @@ bool InetUnicastRouteEntry::ModifyEcmpPath(const IpAddress &dest_addr,
                                             uint32_t label, bool local_ecmp_nh,
                                             const string &vrf_name,
                                             SecurityGroupList sg_list,
+                                            const CommunityList &communities,
                                             const PathPreference &path_preference,
                                             TunnelType::TypeBmap tunnel_bmap,
                                             const EcmpLoadBalance &ecmp_load_balance,
@@ -351,33 +352,12 @@ bool InetUnicastRouteEntry::ModifyEcmpPath(const IpAddress &dest_addr,
         ret = true;
     }
 
-    path->set_tunnel_bmap(tunnel_bmap);
-    TunnelType::Type new_tunnel_type =
-        TunnelType::ComputeType(path->tunnel_bmap());
-    if (path->tunnel_type() != new_tunnel_type) {
-        path->set_tunnel_type(new_tunnel_type);
-        ret = true;
-    }
-
-    SecurityGroupList path_sg_list;
-    path_sg_list = path->sg_list();
-    if (path_sg_list != sg_list) {
-        path->set_sg_list(sg_list);
-        ret = true;
-    }
-
-    if (path_preference != path->path_preference()) {
-        path->set_path_preference(path_preference);
-        ret = true;
-    }
+    ret = SyncEcmpPath(path, sg_list, communities, path_preference,
+                       tunnel_bmap, ecmp_load_balance);
 
     path->set_dest_vn_list(vn_list);
     ret = true;
     path->set_unresolved(false);
-    if (path->ecmp_load_balance() != ecmp_load_balance) {
-        path->set_ecmp_load_balance(ecmp_load_balance);
-        ret = true;
-    }
 
     if (path->ChangeNH(agent, nh) == true)
         ret = true;
@@ -428,6 +408,7 @@ AgentPath *InetUnicastRouteEntry::AllocateEcmpPath(Agent *agent,
     InetUnicastRouteEntry::ModifyEcmpPath(addr_, plen_, path2->dest_vn_list(),
                                            label, true, vrf()->GetName(),
                                            path2->sg_list(),
+                                           path2->communities(),
                                            path2->path_preference(),
                                            path2->tunnel_bmap(),
                                            path2->ecmp_load_balance(),
@@ -562,6 +543,53 @@ bool InetUnicastRouteEntry::ReComputePathDeletion(AgentPath *path) {
     return EcmpDeletePath(path);
 }
 
+bool InetUnicastRouteEntry::SyncEcmpPath(AgentPath *path,
+                                         const SecurityGroupList sg_list,
+                                         const CommunityList &communities,
+                                         const PathPreference &path_preference,
+                                         TunnelType::TypeBmap tunnel_bmap,
+                                         const EcmpLoadBalance
+                                         &ecmp_load_balance) {
+    if (!path) {
+        return false;
+    }
+
+    bool ret = false;
+    path->set_tunnel_bmap(tunnel_bmap);
+    TunnelType::Type new_tunnel_type =
+        TunnelType::ComputeType(path->tunnel_bmap());
+    if (path->tunnel_type() != new_tunnel_type) {
+        path->set_tunnel_type(new_tunnel_type);
+        ret = true;
+    }
+
+    SecurityGroupList path_sg_list;
+    path_sg_list = path->sg_list();
+    if (path_sg_list != sg_list) {
+        path->set_sg_list(sg_list);
+        ret = true;
+    }
+
+    CommunityList path_communities;
+    path_communities = path->communities();
+    if (path_communities != communities) {
+        path->set_communities(communities);
+        ret = true;
+    }
+
+    if (path_preference != path->path_preference()) {
+        path->set_path_preference(path_preference);
+        ret = true;
+    }
+
+    if (path->ecmp_load_balance() != ecmp_load_balance) {
+        path->set_ecmp_load_balance(ecmp_load_balance);
+        ret = true;
+    }
+
+    return ret;
+}
+
 // Handle add/update of a path in route. 
 // If there are more than one path of type LOCAL_VM_PORT_PEER, creates/updates
 // Composite-NH for them
@@ -616,14 +644,24 @@ bool InetUnicastRouteEntry::EcmpAddPath(AgentPath *path) {
         return false;
     }
 
+    bool ret = false;
     if (count == 2 && ecmp == NULL) {
         // This is second path being added, make ECMP 
         AllocateEcmpPath(agent, vm_port_path, path);
+        ret = true;
     } else if (count > 2) {
         // ECMP already present, add/update Component-NH for the path
         AppendEcmpPath(agent, path);
+        ret = true;
+    } else if (ecmp) {
+        AgentPath *ecmp_path = FindPath(agent->ecmp_peer());
+        ret = SyncEcmpPath(ecmp_path, path->sg_list(),
+                           path->communities(), path->path_preference(),
+                           path->tunnel_bmap(),
+                           path->ecmp_load_balance());
     }
-    return true;
+
+    return ret;
 }
 
 void InetUnicastRouteEntry::AppendEcmpPath(Agent *agent,
@@ -651,7 +689,8 @@ void InetUnicastRouteEntry::AppendEcmpPath(Agent *agent,
 
     InetUnicastRouteEntry::ModifyEcmpPath(addr_, plen_, path->dest_vn_list(),
                                ecmp_path->label(), true, vrf()->GetName(),
-                               path->sg_list(), path->path_preference(),
+                               path->sg_list(), path->communities(),
+                               path->path_preference(),
                                path->tunnel_bmap(),
                                path->ecmp_load_balance(),
                                nh_req, agent, ecmp_path);
@@ -694,7 +733,8 @@ void InetUnicastRouteEntry::DeleteComponentNH(Agent *agent, AgentPath *path) {
     InetUnicastRouteEntry::ModifyEcmpPath(addr_, plen_,
                                ecmp_path->dest_vn_list(),
                                ecmp_path->label(), true, vrf()->GetName(),
-                               ecmp_path->sg_list(), ecmp_path->path_preference(),
+                               ecmp_path->sg_list(), ecmp_path->communities(),
+                               ecmp_path->path_preference(),
                                ecmp_path->tunnel_bmap(),
                                ecmp_path->ecmp_load_balance(),
                                nh_req, agent, ecmp_path);

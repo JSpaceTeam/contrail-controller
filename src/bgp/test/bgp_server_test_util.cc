@@ -25,6 +25,8 @@ using namespace std;
 int StateMachineTest::hold_time_msecs_ = 0;
 int StateMachineTest::keepalive_time_msecs_ = 0;
 int XmppStateMachineTest::hold_time_msecs_ = 0;
+TcpSession::Event XmppStateMachineTest::skip_tcp_event_ =TcpSession::EVENT_NONE;
+TcpSession::Event StateMachineTest::skip_tcp_event_ = TcpSession::EVENT_NONE;
 
 //
 // This is a static data structure that maps client tcp end points to configured
@@ -78,8 +80,9 @@ void BgpServerTest::PostShutdown() {
     config_db_->Clear();
 }
 
-void BgpServerTest::Shutdown(bool verify) {
-    task_util::WaitForIdle();
+void BgpServerTest::Shutdown(bool verify, bool wait_for_idle) {
+    if (wait_for_idle)
+        task_util::WaitForIdle();
     BgpServer::Shutdown();
     if (verify)
         VerifyShutdown();
@@ -183,7 +186,7 @@ void BgpPeerTest::SetDataCollectionKey(BgpPeerInfo *peer_info) const {
 //
 BgpPeerTest::BgpPeerTest(BgpServer *server, RoutingInstance *rtinst,
                          const BgpNeighborConfig *config)
-        : BgpPeer(server, rtinst, config) {
+        : BgpPeer(server, rtinst, config), id_(0) {
     SendUpdate_fnc_ = boost::bind(&BgpPeerTest::BgpPeerSendUpdate, this,
                                   _1, _2);
     MpNlriAllowed_fnc_ = boost::bind(&BgpPeerTest::BgpPeerMpNlriAllowed, this,

@@ -5,9 +5,8 @@
 #ifndef SRC_BGP_IPEER_H_
 #define SRC_BGP_IPEER_H_
 
-#include <string>
-
 #include "bgp/bgp_proto.h"
+#include "net/address.h"
 #include "tbb/atomic.h"
 
 class BgpServer;
@@ -117,13 +116,19 @@ public:
 
 class IPeerClose {
 public:
+    typedef std::set<Address::Family> Families;
+
     virtual ~IPeerClose() { }
     // Printable name
     virtual std::string ToString() const = 0;
     virtual PeerCloseManager *close_manager() = 0;
     virtual bool IsCloseGraceful() = 0;
     virtual void CustomClose() = 0;
-    virtual bool CloseComplete(bool from_timer, bool gr_cancelled) = 0;
+    virtual void CloseComplete() = 0;
+    virtual void Delete() = 0;
+    virtual void GracefulRestartStale() = 0;
+    virtual void GracefulRestartSweep() = 0;
+    virtual void GetNegotiatedFamilies(Families *) const = 0;
 };
 
 class IPeer : public IPeerUpdate {

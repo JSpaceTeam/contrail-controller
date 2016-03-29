@@ -45,10 +45,6 @@
 #include <pkt/flow_mgmt.h>
 #include <pkt/flow_event.h>
 #include <pkt/flow_entry.h>
-#include <uve/agent_uve.h>
-#include <uve/vm_uve_table.h>
-#include <uve/vn_uve_table.h>
-#include <uve/vrouter_uve_entry.h>
 
 const std::map<FlowEntry::FlowPolicyState, const char*>
     FlowEntry::FlowPolicyStateStr = boost::assign::map_list_of
@@ -65,30 +61,30 @@ const std::map<uint16_t, const char*>
     FlowEntry::FlowDropReasonStr = boost::assign::map_list_of
         ((uint16_t)DROP_UNKNOWN,                 "UNKNOWN")
         ((uint16_t)SHORT_UNAVIALABLE_INTERFACE,
-         "SHORT_UNAVIALABLE_INTERFACE")
-        ((uint16_t)SHORT_IPV4_FWD_DIS,       "SHORT_IPV4_FWD_DIS")
+         "Short flow Interface unavialable")
+        ((uint16_t)SHORT_IPV4_FWD_DIS,       "Short flow Ipv4 forwarding disabled")
         ((uint16_t)SHORT_UNAVIALABLE_VRF,
-         "SHORT_UNAVIALABLE_VRF")
-        ((uint16_t)SHORT_NO_SRC_ROUTE,       "SHORT_NO_SRC_ROUTE")
-        ((uint16_t)SHORT_NO_DST_ROUTE,       "SHORT_NO_DST_ROUTE")
-        ((uint16_t)SHORT_AUDIT_ENTRY,        "SHORT_AUDIT_ENTRY")
-        ((uint16_t)SHORT_VRF_CHANGE,         "SHORT_VRF_CHANGE")
-        ((uint16_t)SHORT_NO_REVERSE_FLOW,    "SHORT_NO_REVERSE_FLOW")
+         "Short flow VRF unavailable")
+        ((uint16_t)SHORT_NO_SRC_ROUTE,       "Short flow No Source route")
+        ((uint16_t)SHORT_NO_DST_ROUTE,       "Short flow No Destination route")
+        ((uint16_t)SHORT_AUDIT_ENTRY,        "Short flow Audit Entry")
+        ((uint16_t)SHORT_VRF_CHANGE,         "Short flow VRF CHANGE")
+        ((uint16_t)SHORT_NO_REVERSE_FLOW,    "Short flow No Reverse flow")
         ((uint16_t)SHORT_REVERSE_FLOW_CHANGE,
-         "SHORT_REVERSE_FLOW_CHANGE")
-        ((uint16_t)SHORT_NAT_CHANGE,         "SHORT_NAT_CHANGE")
-        ((uint16_t)SHORT_FLOW_LIMIT,         "SHORT_FLOW_LIMIT")
+         "Short flow Reverse flow change")
+        ((uint16_t)SHORT_NAT_CHANGE,         "Short flow NAT Changed")
+        ((uint16_t)SHORT_FLOW_LIMIT,         "Short flow Flow Limit Reached")
         ((uint16_t)SHORT_LINKLOCAL_SRC_NAT,
-         "SHORT_LINKLOCAL_SRC_NAT")
+         "Short flow Linklocal source NAT failed")
         ((uint16_t)SHORT_FAILED_VROUTER_INSTALL,
-         "SHORT_FAILED_VROUTER_INST")
-        ((uint16_t)SHORT_INVALID_L2_FLOW,    "SHORT_INVALID_L2_FLOW")
-        ((uint16_t)DROP_POLICY,              "DROP_POLICY")
-        ((uint16_t)DROP_OUT_POLICY,          "DROP_OUT_POLICY")
-        ((uint16_t)DROP_SG,                  "DROP_SG")
-        ((uint16_t)DROP_OUT_SG,              "DROP_OUT_SG")
-        ((uint16_t)DROP_REVERSE_SG,          "DROP_REVERSE_SG")
-        ((uint16_t)DROP_REVERSE_OUT_SG,      "DROP_REVERSE_OUT_SG");
+         "Short flow vrouter install failed")
+        ((uint16_t)SHORT_INVALID_L2_FLOW,    "Short flow invalid L2 flow")
+        ((uint16_t)DROP_POLICY,              "Flow drop Policy")
+        ((uint16_t)DROP_OUT_POLICY,          "Flow drop Out Policy")
+        ((uint16_t)DROP_SG,                  "Flow drop SG")
+        ((uint16_t)DROP_OUT_SG,              "Flow drop OUT SG")
+        ((uint16_t)DROP_REVERSE_SG,          "Flow drop REVERSE SG")
+        ((uint16_t)DROP_REVERSE_OUT_SG,      "Flow drop REVERSE OUT SG");
 
 tbb::atomic<int> FlowEntry::alloc_count_;
 SecurityGroupList FlowEntry::default_sg_list_;
@@ -97,7 +93,8 @@ SecurityGroupList FlowEntry::default_sg_list_;
 // VmFlowRef
 /////////////////////////////////////////////////////////////////////////////
 const int VmFlowRef::kInvalidFd;
-VmFlowRef::VmFlowRef() : vm_(NULL), fd_(kInvalidFd), port_(0) {
+VmFlowRef::VmFlowRef() :
+    vm_(NULL), fd_(kInvalidFd), port_(0), flow_(NULL) {
 }
 
 VmFlowRef::VmFlowRef(const VmFlowRef &rhs) {
@@ -108,21 +105,46 @@ VmFlowRef::VmFlowRef(const VmFlowRef &rhs) {
 }
 
 VmFlowRef:: ~VmFlowRef() {
-    Reset();
+    Reset(true);
+}
+
+void VmFlowRef::Init(FlowEntry *flow) {
+    flow_ = flow;
 }
 
 void VmFlowRef::operator=(const VmFlowRef &rhs) {
-    // When flow is evicted by vrouter, reuse the older fd and port
-    FreeFd();
-    fd_ = rhs.fd_;
-    port_ = rhs.port_;
-    SetVm(rhs.vm_.get());
+    assert(rhs.fd_ == VmFlowRef::kInvalidFd);
+    assert(rhs.port_ == 0);
+    // For linklocal flows, we should have called Move already. It would
+    // reset vm_. Validate it
+    if (fd_ != VmFlowRef::kInvalidFd)
+        assert(rhs.vm_.get() == NULL);
 }
 
-void VmFlowRef::Reset() {
+// Move is called from Copy() routine when flow is evicted by vrouter and a
+// new flow-add is received by agent. Use the fd_ and port_ from new flow
+// since reverse flow will be setup based on these
+void VmFlowRef::Move(VmFlowRef *rhs) {
+    // Release the old values
+    Reset(false);
+
+    fd_ = rhs->fd_;
+    port_ = rhs->port_;
+    SetVm(rhs->vm_.get());
+
+    // Ownership for fd_ is transferred. Reset RHS fields
+    // Reset VM first before resetting fd_
+    rhs->SetVm(NULL);
+    rhs->fd_ = VmFlowRef::kInvalidFd;
+    rhs->port_ = 0;
+}
+
+void VmFlowRef::Reset(bool reset_flow) {
     FreeRef();
     FreeFd();
     vm_.reset(NULL);
+    if (reset_flow)
+        flow_ = NULL;
 }
 
 void VmFlowRef::FreeRef() {
@@ -132,8 +154,6 @@ void VmFlowRef::FreeRef() {
     vm_->update_flow_count(-1);
     if (fd_ != kInvalidFd) {
         vm_->update_linklocal_flow_count(-1);
-        Agent *agent = static_cast<VmTable *>(vm_->get_table())->agent();
-        agent->pkt()->get_flow_proto()->update_linklocal_flow_count(-1);
     }
 }
 
@@ -143,6 +163,9 @@ void VmFlowRef::FreeFd() {
         return;
     }
 
+    FlowProto *proto = flow_->flow_table()->agent()->pkt()->get_flow_proto();
+    proto->update_linklocal_flow_count(-1);
+    flow_->flow_table()->DelLinkLocalFlowInfo(fd_);
     close(fd_);
     fd_ = kInvalidFd;
     port_ = 0;
@@ -157,24 +180,22 @@ void VmFlowRef::SetVm(const VmEntry *vm) {
     if (vm == NULL)
         return;
 
-    // Add flow-ref-count for both forward and reverse flow
+    // update per-vm flow accounting
     vm->update_flow_count(1);
     if (fd_ != kInvalidFd) {
         vm_->update_linklocal_flow_count(1);
-        Agent *agent = static_cast<VmTable *>(vm->get_table())->agent();
-        agent->pkt()->get_flow_proto()->update_linklocal_flow_count(1);
     }
 
     return;
 }
 
-bool VmFlowRef::AllocateFd(Agent *agent, FlowEntry *flow, uint8_t l3_proto) {
+bool VmFlowRef::AllocateFd(Agent *agent, uint8_t l3_proto) {
     if (fd_ != kInvalidFd)
         return true;
 
     port_ = 0;
     // Short flows are always dropped. Dont allocate FD for short flow
-    if (flow->IsShortFlow())
+    if (flow_->IsShortFlow())
         return false;
 
     if (l3_proto == IPPROTO_TCP) {
@@ -186,6 +207,11 @@ bool VmFlowRef::AllocateFd(Agent *agent, FlowEntry *flow, uint8_t l3_proto) {
     if (fd_ == kInvalidFd) {
         return false;
     }
+
+    // Update agent accounting info
+    agent->pkt()->get_flow_proto()->update_linklocal_flow_count(1);
+    flow_->flow_table()->AddLinkLocalFlowInfo(fd_, flow_->flow_handle(),
+                                              flow_->key(), UTCTimestampUsec());
 
     // allow the socket to be reused upon close
     int optval = 1;
@@ -234,8 +260,8 @@ void FlowData::Reset() {
     match_p.Reset();
     vn_entry.reset(NULL);
     intf_entry.reset(NULL);
-    in_vm_entry.Reset();
-    out_vm_entry.Reset();
+    in_vm_entry.Reset(true);
+    out_vm_entry.Reset(true);
     nh.reset(NULL);
     vrf = VrfEntry::kInvalidIndex;
     mirror_vrf = VrfEntry::kInvalidIndex;
@@ -254,6 +280,8 @@ void FlowData::Reset() {
     l2_rpf_plen = Address::kMaxV4PrefixLen;
     vm_cfg_name = "";
     bgp_as_a_service_port = 0;
+    ecmp_rpf_nh_ = 0;
+    acl_assigned_vrf_index_ = VrfEntry::kInvalidIndex;
 }
 
 static std::vector<std::string> MakeList(const VnListType &ilist) {
@@ -316,7 +344,7 @@ void MatchPolicy::Reset() {
 FlowEntry::FlowEntry(FlowTable *flow_table) :
     flow_table_(flow_table), flags_(0),
     tunnel_type_(TunnelType::INVALID),
-    fip_vmi_(AgentKey::ADD_DEL_CHANGE, nil_uuid(), ""), fsc_(NULL) {
+    fip_vmi_(AgentKey::ADD_DEL_CHANGE, nil_uuid(), "") {
     Reset();
     alloc_count_.fetch_and_increment();
 }
@@ -328,6 +356,7 @@ FlowEntry::~FlowEntry() {
 }
 
 void FlowEntry::Reset() {
+    uuid_ = flow_table_->rand_gen();
     data_.Reset();
     l3_flow_ = true;
     flow_handle_ = kInvalidFlowHandle;
@@ -345,6 +374,7 @@ void FlowEntry::Reset() {
     sg_rule_uuid_= FlowPolicyStateStr.at(NOT_EVALUATED);
     ksync_index_entry_ = std::auto_ptr<KSyncFlowIndexEntry>
         (new KSyncFlowIndexEntry());
+    fsc_ = NULL;
 }
 
 void FlowEntry::Reset(const FlowKey &k) {
@@ -358,17 +388,31 @@ void FlowEntry::Init() {
 
 FlowEntry *FlowEntry::Allocate(const FlowKey &key, FlowTable *flow_table) {
     // flow_table will be NULL for some UT cases
+    FlowEntry *flow;
     if (flow_table == NULL) {
-        FlowEntry *flow = new FlowEntry(flow_table);
+        flow = new FlowEntry(flow_table);
         flow->Reset(key);
-        return flow;
+    } else {
+        flow = flow_table->free_list()->Allocate(key);
     }
 
-    return flow_table->free_list()->Allocate(key);
+    flow->data_.in_vm_entry.Init(flow);
+    flow->data_.out_vm_entry.Init(flow);
+    return flow;
 }
 
 // selectively copy fields from RHS
-void FlowEntry::Copy(const FlowEntry *rhs) {
+void FlowEntry::Copy(FlowEntry *rhs, bool update) {
+    if (update) {
+        rhs->data_.in_vm_entry.FreeFd();
+        rhs->data_.out_vm_entry.FreeFd();
+    } else {
+        // The operator= below will call VmFlowRef operator=. In case of flow
+        // eviction, we want to move ownership from rhs to lhs. However rhs is
+        // const ref in operator so, invode Move API to transfer ownership
+        data_.in_vm_entry.Move(&rhs->data_.in_vm_entry);
+        data_.out_vm_entry.Move(&rhs->data_.out_vm_entry);
+    }
     data_ = rhs->data_;
     flags_ = rhs->flags_;
     short_flow_reason_ = rhs->short_flow_reason_;
@@ -378,7 +422,13 @@ void FlowEntry::Copy(const FlowEntry *rhs) {
     tunnel_type_ = rhs->tunnel_type_;
     fip_ = rhs->fip_;
     fip_vmi_ = rhs->fip_vmi_;
-    flow_handle_ = rhs->flow_handle_;
+    if (update == false) {
+        flow_handle_ = rhs->flow_handle_;
+        /* Flow Entry is being re-used. Generate a new UUID for it. */
+        // results is delete miss for previous uuid to stats collector
+        // with eviction disabled following is not required
+        // uuid_ = flow_table_->rand_gen();
+    }
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -393,7 +443,12 @@ void intrusive_ptr_release(FlowEntry *fe) {
     int prev = fe->refcount_.fetch_and_decrement();
     if (prev == 1) {
         if (fe->on_tree()) {
-            flow_table->ConcurrencyCheck();
+            if (flow_table->ConcurrencyCheck() == false) {
+                FlowEntryPtr ref(fe);
+                FlowProto *proto=flow_table->agent()->pkt()->get_flow_proto();
+                proto->ForceEnqueueFreeFlowReference(ref);
+                return;
+            }
             FlowTable::FlowEntryMap::iterator it =
                 flow_table->flow_entry_map_.find(fe->key());
             assert(it != flow_table->flow_entry_map_.end());
@@ -452,6 +507,8 @@ bool FlowEntry::InitFlowCmn(const PktFlowInfo *info, const PktControlInfo *ctrl,
     data_.in_vm_entry.SetVm(ctrl->vm_);
     data_.out_vm_entry.SetVm(rev_ctrl->vm_);
     l3_flow_ = info->l3_flow;
+    data_.ecmp_rpf_nh_ = 0;
+    data_.acl_assigned_vrf_index_ = VrfEntry::kInvalidIndex;
     return true;
 }
 
@@ -464,9 +521,6 @@ void FlowEntry::InitFwdFlow(const PktFlowInfo *info, const PktInfo *pkt,
         return;
     }
     if (info->linklocal_bind_local_port) {
-        flow_table_->AddLinkLocalFlowInfo(data_.in_vm_entry.fd(),
-                                          flow_handle_,
-                                          key_, UTCTimestampUsec());
         set_flags(FlowEntry::LinkLocalBindLocalSrcPort);
     } else {
         reset_flags(FlowEntry::LinkLocalBindLocalSrcPort);
@@ -677,14 +731,19 @@ const std::string& FlowEntry::acl_assigned_vrf() const {
     return data_.match_p.action_info.vrf_translate_action_.vrf_name();
 }
 
-uint32_t FlowEntry::acl_assigned_vrf_index() const {
+void FlowEntry::set_acl_assigned_vrf_index() {
     VrfKey vrf_key(data_.match_p.action_info.vrf_translate_action_.vrf_name());
     const VrfEntry *vrf = static_cast<const VrfEntry *>(
-            flow_table_->agent()->vrf_table()->FindActiveEntry(&vrf_key));
+            flow_table()->agent()->vrf_table()->FindActiveEntry(&vrf_key));
     if (vrf) {
-        return vrf->vrf_id();
+        data_.acl_assigned_vrf_index_ = vrf->vrf_id();
+        return;
     }
-    return 0;
+    data_.acl_assigned_vrf_index_ = VrfEntry::kInvalidIndex;
+}
+
+uint32_t FlowEntry::acl_assigned_vrf_index() const {
+    return data_.acl_assigned_vrf_index_;
 }
 
 static bool ShouldDrop(uint32_t action) {
@@ -762,8 +821,35 @@ void FlowEntry::UpdateRpf() {
     }
 }
 
+//Given a NH take reference on the NH and set the RPF
+bool FlowEntry::SetRpfNHState(FlowTable *ft, const NextHop *nh) {
+
+    if (data_.nh.get() && nh) {
+        if (data_.nh->GetType() != NextHop::COMPOSITE &&
+            nh->GetType() == NextHop::COMPOSITE) {
+            set_flags(FlowEntry::Trap);
+        }
+    }
+
+    if (data_.nh.get() != nh) {
+        data_.nh = nh;
+        return true;
+    }
+    return false;
+}
+
 bool FlowEntry::SetRpfNH(FlowTable *ft, const AgentRoute *rt) {
     bool ret = false;
+
+    if (data().ecmp_rpf_nh_ != 0) {
+        //Set RPF NH based on reverese flow route
+        return ret;
+    }
+
+    if (!rt) {
+        return SetRpfNHState(ft, NULL);
+    }
+
     //If l2 flow has a ip route entry present in
     //layer 3 table, then use that for calculating
     //rpf nexthop, else use layer 2 route entry(baremetal
@@ -782,9 +868,15 @@ bool FlowEntry::SetRpfNH(FlowTable *ft, const AgentRoute *rt) {
         //and its a host route entry use it for RPF NH
         //For baremetal case since IP address may not be known
         //agent uses layer 2 route entry
-        InetUnicastRouteEntry *ip_rt = static_cast<InetUnicastRouteEntry *>
-            (FlowEntry::GetUcRoute(rt->vrf(), key().src_addr));
-        if (is_flags_set(FlowEntry::IngressDir) ||
+        InetUnicastRouteEntry *ip_rt = static_cast<InetUnicastRouteEntry *>(
+                FlowEntry::GetUcRoute(rt->vrf(), key().src_addr));
+        if (ip_rt &&
+                ip_rt->GetActiveNextHop()->GetType() == NextHop::COMPOSITE) {
+            //L2 flow cant point to composite NH, set RPF NH based on
+            //layer 2 route irrespective prefix lenght of layer 3 route,
+            //this is to avoid packet drop in scenario where transition
+            //happened from non-ecmp to ECMP.
+        } else if (is_flags_set(FlowEntry::IngressDir) ||
                 (ip_rt && ip_rt->IsHostRoute())) {
             rt = ip_rt;
             if (rt) {
@@ -793,54 +885,21 @@ bool FlowEntry::SetRpfNH(FlowTable *ft, const AgentRoute *rt) {
         }
     }
 
-    if (!rt) {
-        if (data_.nh.get() != NULL) {
-            data_.nh = NULL;
-            ret = true;
-        }
-        return ret;
+    const NextHop *nh = NULL;
+    if (rt && rt->GetActiveNextHop()) {
+        nh = rt->GetActiveNextHop();
     }
 
-    const NextHop *nh = rt->GetActiveNextHop();
-    if (nh->GetType() == NextHop::COMPOSITE &&
-        !is_flags_set(FlowEntry::LocalFlow) &&
-        is_flags_set(FlowEntry::IngressDir)) {
-        if (l3_flow_ == false) {
-            if (is_flags_set(FlowEntry::ShortFlow) == false) {
-                MakeShortFlow(SHORT_INVALID_L2_FLOW);
-                data_.nh = NULL;
-                ret = true;
-            }
-            return ret;
-        }
-        //Logic for RPF check for ecmp
-        //  Get reverse flow, and its corresponding ecmp index
-        //  Check if source matches composite nh in reverse flow ecmp index,
-        //  if not DP would trap packet for ECMP resolve.
-        //  If there is only one instance of ECMP in compute node, then 
-        //  RPF NH would only point to local interface NH.
-        //  If there are multiple instances of ECMP in local server
-        //  then RPF NH would point to local composite NH(containing 
-        //  local members only)
-        const InetUnicastRouteEntry *route =
-            static_cast<const InetUnicastRouteEntry *>(rt);
-        nh = route->GetLocalNextHop();
+    return SetRpfNHState(ft, nh);
+}
+
+bool FlowEntry::SetEcmpRpfNH(FlowTable *ft, uint32_t nh_id) {
+    if (!nh_id) {
+        return SetRpfNHState(ft, NULL);
     }
 
-    //If a transistion from non-ecmp to ecmp occurs trap forward flow
-    //such that ecmp index of reverse flow is set.
-    if (data_.nh.get() && nh) {
-        if (data_.nh->GetType() != NextHop::COMPOSITE &&
-            nh->GetType() == NextHop::COMPOSITE) {
-            set_flags(FlowEntry::Trap);
-        }
-    }
-
-    if (data_.nh.get() != nh) {
-        data_.nh = nh;
-        return true;
-    }
-    return false;
+    const NextHop *nh = ft->agent()->nexthop_table()->FindNextHop(nh_id);
+    return SetRpfNHState(ft, nh);
 }
 
 VmInterfaceKey FlowEntry::InterfaceIdToKey(Agent *agent, uint32_t id) {
@@ -1008,7 +1067,8 @@ void FlowEntry::GetVrfAssignAcl() {
     }
 
     if (is_flags_set(FlowEntry::LinkLocalFlow) ||
-        is_flags_set(FlowEntry::Multicast)) {
+        is_flags_set(FlowEntry::Multicast) ||
+        is_flags_set(FlowEntry::BgpRouterService)) {
         return;
     }
 
@@ -1037,7 +1097,8 @@ void FlowEntry::GetVrfAssignAcl() {
 void FlowEntry::GetSgList(const Interface *intf) {
     // Dont apply network-policy for linklocal and multicast flows
     if (is_flags_set(FlowEntry::LinkLocalFlow) ||
-        is_flags_set(FlowEntry::Multicast)) {
+        is_flags_set(FlowEntry::Multicast) ||
+        is_flags_set(FlowEntry::BgpRouterService)) {
         return;
     }
 
@@ -1179,6 +1240,7 @@ void FlowEntry::SetVrfAssignEntry() {
     if (!(data_.match_p.vrf_assign_acl_action &
          (1 << TrafficAction::VRF_TRANSLATE))) {
         data_.vrf_assign_evaluated = true;
+        data_.acl_assigned_vrf_index_ = VrfEntry::kInvalidIndex;
         return;
     }
     std::string vrf_assigned_name =
@@ -1200,6 +1262,8 @@ void FlowEntry::SetVrfAssignEntry() {
         data_.match_p.action_info.vrf_translate_action_.vrf_name()) {
         MakeShortFlow(SHORT_VRF_CHANGE);
     }
+
+    set_acl_assigned_vrf_index();
     if (acl_assigned_vrf_index() == 0) {
         MakeShortFlow(SHORT_VRF_CHANGE);
     }
@@ -1514,6 +1578,7 @@ done:
 void FlowEntry::ResyncFlow() {
     UpdateRpf();
     DoPolicy();
+    UpdateEcmpInfo();
 
     // If this is forward flow, update the SG action for reflexive entry
     FlowEntry *rflow = (is_flags_set(FlowEntry::ReverseFlow) == false) ?
@@ -1522,6 +1587,209 @@ void FlowEntry::ResyncFlow() {
         // Update action for reverse flow
         rflow->UpdateReflexiveAction();
         rflow->ActionRecompute();
+    }
+}
+
+const VrfEntry*
+FlowEntry::GetDestinationVrf() {
+    const VrfEntry *vrf = NULL;
+    VrfTable *vrf_table = flow_table()->agent()->vrf_table();
+
+    if (match_p().action_info.action &
+            (1 << TrafficAction::VRF_TRANSLATE)) {
+        vrf = vrf_table->FindVrfFromId(acl_assigned_vrf_index());
+    } else if (is_flags_set(FlowEntry::NatFlow)) {
+        vrf = vrf_table->FindVrfFromId(data().dest_vrf);
+    } else {
+        vrf = vrf_table->FindVrfFromId(data().vrf);
+    }
+    return vrf;
+}
+
+void FlowEntry::SetComponentIndex(const NextHopKey *nh_key,
+                                  uint32_t label, bool mpls_path_select) {
+
+    const VrfEntry *vrf = GetDestinationVrf();
+    if (vrf == NULL) {
+        FlowInfo flow_info;
+        FillFlowInfo(flow_info);
+        FLOW_TRACE(Trace, "Invalid reverse while setting ECMP index", flow_info);
+        return;
+    }
+
+    FlowEntry *rflow = reverse_flow_entry();
+    const IpAddress dip = rflow->key().src_addr;
+    InetUnicastRouteEntry *rt =
+        static_cast<InetUnicastRouteEntry *>(FlowEntry::GetUcRoute(vrf, dip));
+    if (!rt || rt->GetActiveNextHop()->GetType() != NextHop::COMPOSITE) {
+        rflow->set_ecmp_rpf_nh(0);
+        return;
+    }
+
+    const NextHop *nh = rt->GetActiveNextHop();
+    //Set composite NH based on local mpls label flow
+    if (mpls_path_select) {
+        nh = rt->GetLocalNextHop();
+    }
+
+    if (!nh) {
+        rflow->set_ecmp_rpf_nh(0);
+        return;
+    }
+
+    if (nh->GetType() != NextHop::COMPOSITE) {
+        rflow->set_ecmp_rpf_nh(nh->id());
+        return;
+    }
+
+    const CompositeNH *comp_nh = static_cast<const CompositeNH *>(nh);
+    //If remote destination is TUNNEL nexthop frame the key by
+    //getting the reverse path mpls label that would be used to
+    //send the packet back
+    if (nh_key->GetType() == NextHop::TUNNEL) {
+        const TunnelNHKey *tun_nh = static_cast<const TunnelNHKey *>(nh_key);
+        label = comp_nh->GetRemoteLabel(tun_nh->dip());
+    }
+
+    const NextHop *component_nh_ptr = static_cast<NextHop *>(
+        flow_table()->agent()->nexthop_table()->FindActiveEntry(nh_key));
+    ComponentNH component_nh(label, component_nh_ptr);
+
+    uint32_t idx = 0;
+    if (comp_nh->GetIndex(component_nh, idx)) {
+        if (data_.component_nh_idx != idx) {
+            data_.component_nh_idx = idx;
+        }
+        //Update the reverse flow source RPF check based on this
+        //composite NH
+        rflow->set_ecmp_rpf_nh(nh->id());
+    } else {
+        FlowInfo flow_info;
+        FillFlowInfo(flow_info);
+        FLOW_TRACE(Trace, "Invalid reverse while setting ECMP index", flow_info);
+    }
+}
+
+void FlowEntry::SetLocalFlowEcmpIndex() {
+    //There are 2 scenarios possible when the destination
+    //interface is a VM interface
+    //1> Flow is local flow
+    //   In this scenario component NH Index has to be set based
+    //   on that of BGP path since packets are getting routed
+    //   based on route table
+    //2> Flow is remote i.e packet came with mpls label from a tunnel
+    //   In this sceanrio if mpls label points to composite NH
+    //   pick component index from there, if mpls label points to
+    //   interface NH there is no need to set component index
+    uint32_t label;
+    FlowEntry *rflow = reverse_flow_entry();
+
+    const VmInterface *vm_port = NULL;
+    if (rflow->data().intf_entry->type() == Interface::VM_INTERFACE) {
+        vm_port =
+            static_cast<const VmInterface *>(rflow->data().intf_entry.get());
+        label = vm_port->label();
+    } else {
+        const InetInterface *inet_intf =
+            static_cast<const InetInterface*>(rflow->data().intf_entry.get());
+        label = inet_intf->label();
+    }
+
+    //Find the source NH
+    const NextHop *nh = flow_table()->agent()->nexthop_table()->
+                            FindNextHop(rflow->key().nh);
+    if (nh == NULL) {
+        return;
+    }
+    DBEntryBase::KeyPtr key = nh->GetDBRequestKey();
+    NextHopKey *nh_key = static_cast<NextHopKey *>(key.get());
+
+    //All component nexthop are NULL
+    nh_key->SetPolicy(false);
+
+    if (nh->GetType() == NextHop::VLAN) {
+        const VlanNH *vlan_nh = static_cast<const VlanNH *>(nh);
+        label = vm_port->GetServiceVlanLabel(vlan_nh->GetVrf());
+    }
+
+    bool mpls_path = false;
+    if (!is_flags_set(FlowEntry::LocalFlow)) {
+        mpls_path = true;
+    }
+
+    SetComponentIndex(nh_key, label, mpls_path);
+}
+
+void FlowEntry::SetRemoteFlowEcmpIndex() {
+    uint32_t label;
+
+    //Get tunnel info from reverse flow
+    label = 0;
+    boost::system::error_code ec;
+    Ip4Address dest_ip = Ip4Address::from_string(peer_vrouter_, ec);
+    if (ec.value() != 0) {
+        return;
+    }
+
+    boost::scoped_ptr<NextHopKey> nh_key(
+            new TunnelNHKey(flow_table()->agent()->fabric_vrf_name(),
+                            flow_table()->agent()->router_id(),
+                            dest_ip, false, tunnel_type()));
+    SetComponentIndex(nh_key.get(), label, false);
+}
+
+void FlowEntry::UpdateEcmpInfo() {
+    FlowEntry *rflow = reverse_flow_entry();
+
+    if (is_flags_set(FlowEntry::EcmpFlow) == false ||
+        is_flags_set(FlowEntry::ShortFlow) ||
+        l3_flow() == false) {
+        return;
+    }
+
+    if (rflow == NULL) {
+        FlowInfo flow_info;
+        FillFlowInfo(flow_info);
+        FLOW_TRACE(Trace, "Invalid reverse flow for setting ECMP index", flow_info);
+        return;
+    }
+
+    bool local_flow = false;
+    if (is_flags_set(FlowEntry::LocalFlow) ||
+            !is_flags_set(FlowEntry::IngressDir)) {
+        local_flow = true;
+    }
+
+    if (local_flow) {
+        SetLocalFlowEcmpIndex();
+    } else {
+        SetRemoteFlowEcmpIndex();
+    }
+}
+
+void FlowEntry::set_ecmp_rpf_nh(uint32_t id) {
+    if (data_.ecmp_rpf_nh_ == id) {
+        return;
+    }
+
+    data_.ecmp_rpf_nh_ = id;
+    bool update_ksync = false;
+
+    if (!id) {
+        const VrfEntry *vrf = flow_table()->agent()->vrf_table()->
+            FindVrfFromId(data().flow_source_vrf);
+        if (vrf) {
+            //Flow transitioned from ECMP to non ecmp
+            InetUnicastRouteEntry *ip_rt = static_cast<InetUnicastRouteEntry *>(
+                    FlowEntry::GetUcRoute(vrf, key().src_addr));
+            update_ksync = SetRpfNH(flow_table(), ip_rt);
+        }
+    } else {
+        update_ksync = SetEcmpRpfNH(flow_table(), id);
+    }
+
+    if (ksync_index_entry()->ksync_entry() && update_ksync) {
+        flow_table()->UpdateKSync(this, true);
     }
 }
 
@@ -1922,7 +2190,7 @@ void FlowEntry::SetAclFlowSandeshData(const AclDBEntry *acl,
     if (!fsc_) {
         return;
     }
-    const FlowExportInfo *info = fsc_->FindFlowExportInfo(key_);
+    const FlowExportInfo *info = fsc_->FindFlowExportInfo(uuid_);
     if (!info) {
         return;
     }
@@ -1978,4 +2246,18 @@ void FlowEntry::SetAclFlowSandeshData(const AclDBEntry *acl,
     fe_sandesh_data.set_l3_flow(l3_flow_);
     fe_sandesh_data.set_smac(data_.smac.ToString());
     fe_sandesh_data.set_dmac(data_.dmac.ToString());
+}
+
+string FlowEntry::KeyString() const {
+    std::ostringstream str;
+    int idx = flow_handle_ == FlowEntry::kInvalidFlowHandle ? -1 : flow_handle_;
+    str << " Idx : " << idx
+        << " Key : "
+        << key_.nh << " "
+        << key_.src_addr.to_string() << ":"
+        << key_.src_port << " "
+        << key_.dst_addr.to_string() << ":"
+        << key_.dst_port << " "
+        << (uint16_t)key_.protocol;
+    return str.str();
 }

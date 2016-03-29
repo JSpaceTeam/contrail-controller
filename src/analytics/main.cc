@@ -270,6 +270,8 @@ int main(int argc, char *argv[])
     copy(cassandra_servers.begin(), cassandra_servers.end(),
          ostream_iterator<string>(css, " "));
     LOG(INFO, "COLLECTOR CASSANDRA SERVERS: " << css.str());
+    LOG(INFO, "COLLECTOR ZOOKEEPER SERVERS: " <<
+        options.zookeeper_server_list());
     LOG(INFO, "COLLECTOR SYSLOG LISTEN PORT: " << options.syslog_port());
     LOG(INFO, "COLLECTOR SFLOW LISTEN PORT: " << options.sflow_port());
     LOG(INFO, "COLLECTOR IPFIX LISTEN PORT: " << options.ipfix_port());
@@ -302,12 +304,13 @@ int main(int argc, char *argv[])
     // 3. Redis To
     // 4. Discovery Collector Publish
     // 5. Database global
-    // 6. Database protobuf if enabled
+    // 6. Kafka Pub
+    // 7. Database protobuf if enabled
     ConnectionStateManager<NodeStatusUVE, NodeStatus>::
         GetInstance()->Init(*a_evm->io_service(),
             hostname, module_id, instance_id,
             boost::bind(&GetProcessStateCb, _1, _2, _3,
-            protobuf_server_enabled ? 6 : 5));
+            protobuf_server_enabled ? 7 : 6));
 
     LOG(INFO, "COLLECTOR analytics_data_ttl: " << options.analytics_data_ttl());
     LOG(INFO, "COLLECTOR analytics_flow_ttl: " << options.analytics_flow_ttl());
@@ -328,6 +331,8 @@ int main(int argc, char *argv[])
     //Get Platform info
     //cql not supported in precise, centos 6.4 6.5
     bool use_cql = MiscUtils::IsCqlSupported();
+    std::string zookeeper_server_list(options.zookeeper_server_list());
+    bool use_zookeeper = !zookeeper_server_list.empty();
     VizCollector analytics(a_evm,
             options.collector_port(),
             protobuf_server_enabled,
@@ -346,7 +351,9 @@ int main(int argc, char *argv[])
             options.kafka_prefix(),
             ttl_map, options.cassandra_user(),
             options.cassandra_password(),
-            use_cql);
+            use_cql,
+            zookeeper_server_list,
+            use_zookeeper);
 
 #if 0
     // initialize python/c++ API

@@ -106,6 +106,17 @@
 </xsd:simpleType>
 
 <xsd:complexType name='BgpRouterParams'>
+    <xsd:annotation>
+        <xsd:documentation>
+            The gateway-address and ipv6-gateway-addreess fields are used only
+            for router-type bgpaas-client. They hold the ipv4 and ipv6 gateway
+            address for the ipv4 and ipv6 subnets from which the client has IP
+            addresses. The values are used as nexthops when advertising routes
+            to the client via bgp.
+            Note that the ipv6-gateway-address can be a regular ipv6 address or
+            a ipv4-mapped-ipv6 adddress.
+        </xsd:documentation>
+    </xsd:annotation>
     <xsd:element name="admin-down" type="xsd:boolean" default="false"/>
     <xsd:element name='vendor' type='xsd:string'/>
     <xsd:element name='autonomous-system' type='xsd:integer'/>
@@ -113,11 +124,13 @@
     <xsd:element name='address' type='smi:IpAddress'/>
     <xsd:element name='port' type='xsd:integer'/>
     <xsd:element name='source-port' type='xsd:integer'/>
-    <xsd:element name='hold-time' type='BgpHoldTime' default='90'/>
+    <xsd:element name='hold-time' type='BgpHoldTime' default='0'/>
     <xsd:element name='address-families' type='AddressFamilies'/>
     <xsd:element name='auth-data' type='AuthenticationData'/>
     <xsd:element name='local-autonomous-system' type='xsd:integer'/>
     <xsd:element name='router-type' type='BgpRouterType'/>
+    <xsd:element name='gateway-address' type='smi:IpAddress'/>
+    <xsd:element name='ipv6-gateway-address' type='smi:IpAddress'/>
 </xsd:complexType>
 
 <xsd:element name='instance-bgp-router'/>
@@ -154,11 +167,14 @@
             the attributes apply to both ends of the session.
             A non-zero hold-time overrides the hold-time inherited from the
             bgp-router configuration.
+            AS Override causes the neighbors AS to be replaced with the BGP
+            speaker AS in the AS Path.
         </xsd:documentation>
     </xsd:annotation>
     <xsd:element name='bgp-router' type='xsd:string'/>
     <xsd:element name="admin-down" type="xsd:boolean" default="false"/>
     <xsd:element name="passive" type="xsd:boolean" default="false"/>
+    <xsd:element name="as-override" type="xsd:boolean" default="false"/>
     <xsd:element name='hold-time' type='BgpHoldTime' default='0'/>
     <xsd:element name='loop-count' type='BgpAsPathLoopCount' default='0'/>
     <xsd:element name='address-families' type='AddressFamilies'/>
@@ -284,6 +300,7 @@
         <xsd:element name='prefix' type='xsd:string'/>
         <xsd:element name='next-hop' type='xsd:string'/>
         <xsd:element name='route-target' type='xsd:string' maxOccurs="unbounded"/>
+        <xsd:element name='community' type='xsd:string' maxOccurs="unbounded"/>
     </xsd:all>
 </xsd:complexType>
 

@@ -9,6 +9,7 @@
 #include <db/db_table.h>
 
 #include <cmn/agent_cmn.h>
+#include <init/agent_param.h>
 #include "oper/route_common.h"
 #include "oper/nexthop.h"
 #include "oper/tunnel_nh.h"
@@ -276,7 +277,7 @@ void MirrorTable::ReadHandler(const boost::system::error_code &ec,
                               size_t bytes_transferred) {
 
     if (ec) {
-        LOG(ERROR, "Error reading from Mirroor sock. Error : " << 
+        LOG(ERROR, "Error reading from Mirror sock. Error : " << 
             boost::system::system_error(ec).what());
         return;
     }
@@ -292,7 +293,8 @@ void MirrorTable::MirrorSockInit(void) {
 
     event_mgr = agent()->event_manager();
     boost::asio::io_service &io = *event_mgr->io_service();
-    ip::udp::endpoint ep(ip::udp::v4(), 0);
+    ip::udp::endpoint ep(ip::udp::v4(),
+                         agent()->params()->mirror_client_port());
 
     udp_sock_.reset(new ip::udp::socket(io));
 

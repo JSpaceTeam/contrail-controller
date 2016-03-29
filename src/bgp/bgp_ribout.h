@@ -16,6 +16,7 @@
 #include "base/index_map.h"
 #include "bgp/bgp_attr.h"
 #include "bgp/bgp_proto.h"
+#include "bgp/bgp_rib_policy.h"
 #include "db/db_entry.h"
 #include "net/tunnel_encap_type.h"
 
@@ -68,10 +69,11 @@ public:
 
     typedef std::vector<NextHop> NextHopList;
 
-    RibOutAttr() : attr_out_(NULL) { }
-    RibOutAttr(const BgpTable *table, const BgpAttr *attr, uint32_t label,
-               bool include_nh = true);
-    RibOutAttr(BgpRoute *route, const BgpAttr *attr, bool is_xmpp);
+    RibOutAttr() : attr_out_(NULL), vrf_originated_(false) { }
+    RibOutAttr(const BgpTable *table, const BgpAttr *attr, uint32_t label);
+    RibOutAttr(const BgpTable *table, const BgpRoute *route,
+        const BgpAttr *attr, uint32_t label, bool include_nh = true);
+    RibOutAttr(const BgpRoute *route, const BgpAttr *attr, bool is_xmpp);
 
     bool IsReachable() const { return attr_out_.get() != NULL; }
     bool operator==(const RibOutAttr &rhs) const { return CompareTo(rhs) == 0; }
@@ -89,12 +91,14 @@ public:
     uint32_t label() const {
         return nexthop_list_.empty() ? 0 : nexthop_list_.at(0).label();
     }
+    bool vrf_originated() const { return vrf_originated_; }
 
 private:
     int CompareTo(const RibOutAttr &rhs) const;
 
     BgpAttrPtr attr_out_;
     NextHopList nexthop_list_;
+    bool vrf_originated_;
 };
 
 //
@@ -205,61 +209,6 @@ private:
 };
 
 //
-// This class represents the export policy for a rib. Given that we do not
-// currently support any real policy configuration, this is pretty trivial
-// for now.
-//
-// Including the AS number as part of the policy results in creation of a
-// different RibOut for every neighbor AS that we peer with. This allows a
-// simplified implementation of the sender side AS path loop check. In most
-// practical deployment scenarios all eBGP peers will belong to the same
-// neighbor AS anyway.
-//
-// Including the CPU affinity as part of the RibExportPolicy allows us to
-// artificially create more RibOuts than otherwise necessary. This is used
-// to achieve higher concurrency at the expense of creating more state.
-//
-struct RibExportPolicy {
-    enum Encoding {
-        BGP,
-        XMPP,
-    };
-
-    RibExportPolicy()
-        : type(BgpProto::IBGP), encoding(BGP),
-          as_number(0), affinity(-1), cluster_id(0) {
-    }
-
-    RibExportPolicy(BgpProto::BgpPeerType type, Encoding encoding,
-            int affinity, u_int32_t cluster_id)
-        : type(type), encoding(encoding), as_number(0),
-          affinity(affinity), cluster_id(cluster_id) {
-        if (encoding == XMPP)
-            assert(type == BgpProto::XMPP);
-        if (encoding == BGP)
-            assert(type == BgpProto::IBGP || type == BgpProto::EBGP);
-    }
-
-    RibExportPolicy(BgpProto::BgpPeerType type, Encoding encoding,
-            as_t as_number, int affinity, u_int32_t cluster_id)
-        : type(type), encoding(encoding), as_number(as_number),
-          affinity(affinity), cluster_id(cluster_id) {
-        if (encoding == XMPP)
-            assert(type == BgpProto::XMPP);
-        if (encoding == BGP)
-            assert(type == BgpProto::IBGP || type == BgpProto::EBGP);
-    }
-
-    bool operator<(const RibExportPolicy &rhs) const;
-
-    BgpProto::BgpPeerType type;
-    Encoding encoding;
-    as_t as_number;
-    int affinity;
-    uint32_t cluster_id;
-};
-
-//
 // This class represents per-table state for a collection of peers with the
 // same export policy.  It is effectively a combination of RibExportPolicy
 // and BgpTable. A RibOut has a 1:1 association with RibOutUpdates to which
@@ -310,6 +259,7 @@ public:
 
     // Returns a bitmask with all the peers that are advertising this RibOut.
     const RibPeerSet &PeerSet() const;
+    void GetSubsetPeerSet(RibPeerSet *peerset, const IPeerUpdate *cpeer) const;
 
     BgpTable* table() const { return table_; }
 
@@ -326,6 +276,8 @@ public:
 
     BgpProto::BgpPeerType peer_type() const { return policy_.type; }
     as_t peer_as() const { return policy_.as_number; }
+    bool as_override() const { return policy_.as_override; }
+    const IpAddress &nexthop() const { return policy_.nexthop; }
     bool IsEncodingXmpp() const {
         return (policy_.encoding == RibExportPolicy::XMPP);
     }

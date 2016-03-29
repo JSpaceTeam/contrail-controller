@@ -61,8 +61,9 @@ static void FillBgpInstanceConfigInfo(ShowBgpInstanceConfig *sbic,
             string prefix = static_rt_config.address.to_string() + "/";
             prefix += integerToString(static_rt_config.prefix_length);
             sbsrc.set_prefix(prefix);
-            sbsrc.set_targets(static_rt_config.route_target);
             sbsrc.set_nexthop(static_rt_config.nexthop.to_string());
+            sbsrc.set_targets(static_rt_config.communities);
+            sbsrc.set_targets(static_rt_config.route_targets);
             static_route_list.push_back(sbsrc);
         }
     }
@@ -326,6 +327,7 @@ static void FillBgpNeighborConfigInfo(ShowBgpNeighborConfig *sbnc,
     sbnc->set_name(neighbor->name());
     sbnc->set_admin_down(neighbor->admin_down());
     sbnc->set_passive(neighbor->passive());
+    sbnc->set_as_override(neighbor->as_override());
     sbnc->set_router_type(neighbor->router_type());
     sbnc->set_local_identifier(neighbor->local_identifier_string());
     sbnc->set_local_as(neighbor->local_as());
@@ -349,6 +351,15 @@ static void FillBgpNeighborConfigInfo(ShowBgpNeighborConfig *sbnc,
         sbnfc.family = family_config.family;
         sbnfc.loop_count = family_config.loop_count;
         sbnfc.prefix_limit = family_config.prefix_limit;
+        if (family_config.family == "inet") {
+            IpAddress address = neighbor->gateway_address(Address::INET);
+            if (!address.is_unspecified())
+                sbnfc.gateway_address = address.to_string();
+        } else if (family_config.family == "inet6") {
+            IpAddress address = neighbor->gateway_address(Address::INET6);
+            if (!address.is_unspecified())
+                sbnfc.gateway_address = address.to_string();
+        }
         sbnfc_list.push_back(sbnfc);
     }
     sbnc->set_family_attributes_list(sbnfc_list);

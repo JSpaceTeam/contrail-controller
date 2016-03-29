@@ -21,7 +21,7 @@ public:
         FlowStatsCollectorTest *f = static_cast<FlowStatsCollectorTest *>
                                     (Agent::GetInstance()->flow_stats_manager()
                                      ->default_flow_stats_collector());
-        FlowExportInfo *info = f->FindFlowExportInfo(fe_->key());
+        FlowExportInfo *info = f->FindFlowExportInfo(fe_->uuid());
         if (info) {
             info->SetActionLog();
         }
@@ -95,6 +95,8 @@ public:
     virtual bool Run() {
         Agent::GetInstance()->flow_stats_manager()->
             default_flow_stats_collector()->Run();
+        Agent::GetInstance()->flow_stats_manager()->
+            tcp_flow_stats_collector()->Run();
     }
     std::string Description() const { return "FlowStatsCollectorTask"; }
 };

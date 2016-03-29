@@ -1017,6 +1017,11 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
      Property('virtual-machine-interface-device-owner',
              'virtual-machine-interface') -->
 
+<xsd:element name="virtual-machine-interface-disable-policy"
+                               type="xsd:boolean" default='false'/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('virtual-machine-interface-disable-policy',
+              'virtual-machine-interface') -->
 <xsd:simpleType name="ServiceInterfaceType">
     <xsd:restriction base="xsd:string">
         <xsd:pattern value="management|left|right|other[0-9]*"/>
@@ -1414,6 +1419,26 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <xsd:element name="bgpaas-session-attributes" type="BgpSessionAttributes"/>
 <!--#IFMAP-SEMANTICS-IDL
      Property('bgpaas-session-attributes', 'bgp-as-a-service') -->
+<xsd:element name='bgpaas-ipv4-mapped-ipv6-nexthop' type='xsd:boolean'/>
+    <xsd:annotation>
+        <xsd:documentation>
+            This is used to indicate if the client bgp implementation expects
+            to receive a ipv4-mapped ipv6 address (as opposed to regular ipv6
+            address) as the bgp nexthop for ipv6 routes.
+        </xsd:documentation>
+    </xsd:annotation>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('bgpaas-ipv4-mapped-ipv6-nexthop', 'bgp-as-a-service') -->
+<xsd:element name='bgpaas-suppress-route-advertisement' type='xsd:boolean'/>
+    <xsd:annotation>
+        <xsd:documentation>
+            This is used to indicate that the server should not advertise any
+            routes to the client i.e. the client has static routes (typically
+            a default) configured.
+        </xsd:documentation>
+    </xsd:annotation>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('bgpaas-suppress-route-advertisement', 'bgp-as-a-service') -->
 
 <xsd:element name="virtual-router" type="ifmap:IdentityType"/>
 <xsd:element name="global-system-config-virtual-router"/>
@@ -1586,6 +1611,9 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <!--#IFMAP-SEMANTICS-IDL 
      Link('project-service-instance', 'project', 
              'service-instance', ['has']) -->
+<xsd:element name="service-instance-bindings" type="KeyValuePairs"/>
+<!--#IFMAP-SEMANTICS-IDL
+     MapProperty('service-instance-bindings', 'service-instance', 'key') -->
 <xsd:element name='service-template-properties' type='ServiceTemplateType'/>
 <!-- #IFMAP-SEMANTICS-IDL
      Property('service-template-properties', 'service-template')-->
@@ -1669,8 +1697,8 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
     <xsd:annotation>
         <xsd:documentation>
           List of Community attributes
-          This list indicates the attributes with which routes are tagged while 
-          publishing. The attributes will be represented as bgp community in 
+          This list indicates the attributes with which routes are tagged while
+          publishing. The attributes will be represented as bgp community in
           the path attribute. Each attribute is indicated as string
             1. String with two integer seperated by  ':'. E.g. "64512:123"
             2. Wellknown community as string.  Possible values are

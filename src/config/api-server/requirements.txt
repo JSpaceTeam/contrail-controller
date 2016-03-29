@@ -11,7 +11,7 @@ netaddr>=0.7.5
 bitarray>=0.8.0
 psutil>=0.6.0
 python-novaclient
-python-keystoneclient<=2.0.0
+python-keystoneclient
 kombu
 netifaces
 bottle

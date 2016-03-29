@@ -25,7 +25,6 @@ import context
 from context import get_context, set_context, get_request
 from gen.resource_xsd import *
 from gen.resource_common import *
-from gen.resource_server import *
 from netaddr import IPNetwork
 from pprint import pformat
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
@@ -78,3 +77,17 @@ class ResourceDbMixin(object):
 # end class ResourceDbMixin
 class Resource(ResourceDbMixin):
     server = None
+
+    @classmethod
+    def dbe_read(cls, db_conn, res_type, obj_uuid, obj_fields=None):
+        try:
+            ok, result = db_conn.dbe_read(res_type,
+                                          {'uuid': obj_uuid}, obj_fields)
+        except cfgm_common.exceptions.NoIdError:
+            return (False, (404, 'No %s: %s' %(res_type, obj_uuid)))
+        if not ok:
+            return (False, (500, 'Error in dbe_read of %s %s: %s' %(
+                                 res_type, obj_uuid, pformat(result))))
+
+        return (True, result)
+    # end dbe_read

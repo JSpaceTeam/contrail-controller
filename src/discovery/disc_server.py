@@ -52,6 +52,7 @@ from sandesh_common.vns.constants import ModuleNames, Module2NodeType, NodeTypeN
 from gevent.coros import BoundedSemaphore
 from cfgm_common.rest import LinkObject
 
+import disc_auth_keystone
 
 def obj_to_json(obj):
     # Non-null fields in object get converted to json fields
@@ -78,14 +79,19 @@ class DiscoveryServer():
             'db_upd_hb': 0,
             'throttle_subs':0,
             '503': 0,
-            'count_lb': 0,
-            'auto_lb': 0,
+            'lb_count': 0,
+            'lb_auto': 0,
             'db_exc_unknown': 0,
             'db_exc_info': '',
+            'wl_rejects_pub': 0,
+            'wl_rejects_sub': 0,
+            'auth_failures': 0,
         }
         self._ts_use = 1
         self.short_ttl_map = {}
         self._sem = BoundedSemaphore(1)
+        self._pub_wl = None
+        self._sub_wl = None
 
         self._base_url = "http://%s:%s" % (self._args.listen_ip_addr,
                                            self._args.listen_port)
@@ -219,11 +225,34 @@ class DiscoveryServer():
         # DB interface initialization
         self._db_connect(self._args.reset_config)
         self._db_conn.db_update_service_entry_oper_state()
+        self._db_conn.db_update_service_entry_admin_state()
 
         # build in-memory subscriber data
         self._sub_data = {}
         for (client_id, service_type) in self._db_conn.subscriber_entries():
             self.create_sub_data(client_id, service_type)
+
+        # build white list
+        if self._args.white_list_publish:
+            self._pub_wl = IPSet()
+            for prefix in self._args.white_list_publish.split(" "):
+                self._pub_wl.add(prefix)
+        if self._args.white_list_subscribe:
+            self._sub_wl = IPSet()
+            for prefix in self._args.white_list_subscribe.split(" "):
+                self._sub_wl.add(prefix)
+
+        self._auth_svc = None
+        if self._args.auth == 'keystone':
+            ks_conf = {
+                'auth_host': self._args.auth_host,
+                'auth_port': self._args.auth_port,
+                'auth_protocol': self._args.auth_protocol,
+                'admin_user': self._args.admin_user,
+                'admin_password': self._args.admin_password,
+                'admin_tenant_name': self._args.admin_tenant_name,
+            }
+            self._auth_svc = disc_auth_keystone.AuthServiceKeystone(ks_conf)
     # end __init__
 
     def config_log(self, msg, level):
@@ -373,6 +402,15 @@ class DiscoveryServer():
                 raise
         return error_handler
 
+    # decorator to authenticate request
+    def authenticate(func):
+        def wrapper(self, *args, **kwargs):
+            if self._auth_svc and not self._auth_svc.is_admin(bottle.request):
+                self._debug['auth_failures'] += 1
+                bottle.abort(401, 'Unauthorized')
+            return func(self, *args, **kwargs)
+        return wrapper
+
     # 404 forces republish
     def heartbeat(self, sig):
         # self.syslog('heartbeat from "%s"' % sig)
@@ -424,6 +462,12 @@ class DiscoveryServer():
     @db_error_handler
     def api_publish(self, end_point = None):
         self._debug['msg_pubs'] += 1
+
+        source = bottle.request.headers.get('X-Forwarded-For', None)
+        if source and self._pub_wl and source not in self._pub_wl:
+            self._debug['wl_rejects_pub'] += 1
+            bottle.abort(401, 'Unauthorized request')
+
         ctype = bottle.request.headers['content-type']
         json_req = {}
         try:
@@ -459,7 +503,16 @@ class DiscoveryServer():
         sig = json_req.get('service-id', end_point) or \
             publisher_id(remote, json.dumps(json_req))
 
-        entry = self._db_conn.lookup_service(service_type, service_id=sig)
+        # Avoid reading from db unless service policy is fixed
+        # Fixed policy is anchored on time of entry creation
+        policy = self.get_service_config(service_type, 'policy')
+        if policy == 'fixed':
+            entry = self._db_conn.lookup_service(service_type, service_id=sig)
+            if entry and self.service_expired(entry):
+                entry = None
+        else:
+            entry = None
+
         if not entry:
             entry = {
                 'service_type': service_type,
@@ -468,19 +521,10 @@ class DiscoveryServer():
                 'ts_use': 0,
                 'ts_created': int(time.time()),
                 'oper_state': 'up',
-                'admin_state': 'up',
                 'oper_state_msg': '',
                 'sequence': str(int(time.time())) + socket.gethostname(),
             }
-        elif 'sequence' not in entry or self.service_expired(entry):
-            # handle upgrade or republish after expiry
-            entry['sequence'] = str(int(time.time())) + socket.gethostname()
 
-        if 'admin-state' in json_req:
-            admin_state = json_req['admin-state']
-            if admin_state not in ['up', 'down']:
-                bottle.abort(400, "Invalid admin state")
-            entry['admin_state'] = admin_state
         if 'oper-state' in json_req:
             oper_state = json_req['oper-state']
             if oper_state not in ['up', 'down']:
@@ -509,10 +553,6 @@ class DiscoveryServer():
         msg = 'service=%s, id=%s, info=%s' % (service_type, sig, json.dumps(info))
         m = sandesh.dsPublish(msg=msg, sandesh=self._sandesh)
         m.trace_msg(name='dsPublishTraceBuf', sandesh=self._sandesh)
-
-        if not service_type.lower() in self.service_config:
-            self.service_config[
-                service_type.lower()] = self._args.default_service_opts
 
         return response
     # end api_publish
@@ -557,7 +597,7 @@ class DiscoveryServer():
     def service_list(self, service_type, pubs):
         policy = self.get_service_config(service_type, 'policy') or 'load-balance'
 
-        if policy == 'load-balance':
+        if 'load-balance' in policy:
             f = self.service_list_load_balance
         elif policy == 'fixed':
             f = self.service_list_fixed
@@ -607,21 +647,17 @@ class DiscoveryServer():
                 return True, match_len
         return False, 0
 
-    def match_publishers(self, dsa_rule, pubs):
+    def match_publishers(self, rule_list, pubs):
         result = []
-        rule_pub = dsa_rule['publisher']
 
         for pub in pubs:
-            # include publisher if rule not relevant
-            if rule_pub['ep_type'] != pub['ep_type']:
-                result.append(pub)
-                continue
-            match, mlen = self.match_dsa_rule_ep(rule_pub, pub)
-            if match:
-                result.append(pub)
+            for dsa_rule in rule_list:
+                ok, pfxlen = self.match_dsa_rule_ep(dsa_rule['publisher'], pub)
+                if ok:
+                    result.append(pub)
         return result
 
-    def apply_dsa_config(self, pubs, sub):
+    def apply_dsa_config(self, service_type, pubs, sub):
         if len(pubs) == 0:
             return pubs
 
@@ -631,23 +667,31 @@ class DiscoveryServer():
         # self.syslog('dsa: rules %s' % dsa_rules)
 
         lpm = -1
-        matched_sub_rule = None
+        matched_rules = None
         for rule in dsa_rules:
+            # ignore rule if publisher not relevant
+            if rule['publisher']['ep_type'] != service_type:
+                continue
+
+            # ignore rule if subscriber doesn't match
             matched, matched_len = self.match_subscriber(rule, sub)
             if not matched:
                 continue
             self.syslog('dsa: matched sub %s' % sub)
 
+            # collect matched rules
             if matched_len > lpm:
                 lpm = matched_len
-                matched_sub_rule = rule
+                matched_rules = [rule]
+            elif matched_len == lpm:
+                matched_rules.append(rule)
         # end for
 
         # return original list if there is no sub match
-        if not matched_sub_rule:
+        if not matched_rules:
             return pubs
 
-        matched_pubs = self.match_publishers(matched_sub_rule, pubs)
+        matched_pubs = self.match_publishers(matched_rules, pubs)
         self.syslog('dsa: matched pubs %s' % matched_pubs)
 
         return matched_pubs
@@ -669,6 +713,12 @@ class DiscoveryServer():
     @db_error_handler
     def api_subscribe(self):
         self._debug['msg_subs'] += 1
+
+        source = bottle.request.headers.get('X-Forwarded-For', None)
+        if source and self._sub_wl and source not in self._sub_wl:
+            self._debug['wl_rejects_sub'] += 1
+            bottle.abort(401, 'Unauthorized request')
+
         ctype = bottle.request.headers['content-type']
         if 'application/json' in ctype:
             json_req = bottle.request.json
@@ -716,9 +766,9 @@ class DiscoveryServer():
             sdata['ttl_expires'] += 1
 
         # send short ttl if no publishers
-        pubs = self._db_conn.lookup_service(service_type) or []
+        pubs = self._db_conn.lookup_service(service_type, include_count=True) or []
         pubs_active = [item for item in pubs if not self.service_expired(item)]
-        pubs_active = self.apply_dsa_config(pubs_active, cl_entry)
+        pubs_active = self.apply_dsa_config(service_type, pubs_active, cl_entry)
         pubs_active = self.service_list(service_type, pubs_active)
         plist = dict((entry['service_id'],entry) for entry in pubs_active)
         plist_all = dict((entry['service_id'],entry) for entry in pubs)
@@ -748,54 +798,39 @@ class DiscoveryServer():
         if count == 0:
             count = len(pubs_active)
 
+        expiry_dict = dict((service_id,expiry) for service_id, expiry in subs or [])
+        policy = self.get_service_config(service_type, 'policy')
+
+        # Auto load-balance is triggered if enabled and some servers are
+        # more than 5% off expected average allocation.
+        load_balance = (policy == 'dynamic-load-balance')
+        if load_balance:
+            total_subs = sum([entry['in_use'] for entry in pubs_active])
+            avg = total_subs/len(pubs_active)
+
         # if subscriber in-use-list present, forget previous assignments
-        if len(inuse_list) and subs:
-            for service_id, expired in subs:
-                self._db_conn.delete_subscription(service_type, client_id, service_id)
-            subs = None
-
-        for service_id in inuse_list:
-            entry = plist.get(service_id, None)
-            if entry is None:
-                continue
-            msg = ' in-service-list assign service=%s' % entry['service_id']
-            m = sandesh.dsSubscribe(msg=msg, sandesh=self._sandesh)
-            m.trace_msg(name='dsSubscribeTraceBuf', sandesh=self._sandesh)
-            self.syslog("%s %s" % (cid, msg))
-
-            if assign:
-                assign -= 1
-                self._db_conn.insert_client(service_type, entry['service_id'],
-                    client_id, entry['info'], ttl)
-            r.append(entry)
-            count -= 1
-            assigned_sid.add(service_id)
+        if len(inuse_list):
+            subs = [(service_id, expiry_dict.get(service_id, False)) for service_id in inuse_list]
 
         if subs and count:
-            policy = self.get_service_config(service_type, 'policy')
-
-            # Auto load-balance is triggered if enabled and some servers are
-            # more than 5% off expected average allocation.
-            load_balance = self.get_service_config(service_type, 'load-balance')
-            if load_balance:
-                total_subs = sum([entry['in_use'] for entry in pubs_active])
-                avg = total_subs/len(pubs_active)
-
             for service_id, expired in subs:
                 # expired True if service was marked for deletion by LB command
                 # previously published service is gone
                 # force renew for fixed policy since some service may have flapped
                 entry = plist.get(service_id, None)
                 if entry is None or expired or policy == 'fixed' or (load_balance and entry['in_use'] > int(1.05*avg)):
+                    self.syslog("%s del sub, lb=%s, policy=%s, expired=%s" % (cid, load_balance, policy, expired))
                     self._db_conn.delete_subscription(service_type, client_id, service_id)
-                    # delete fixed policy server if expired
-                    if policy == 'fixed' and entry is None:
-                        self._db_conn.delete_service(plist_all.get(service_id, None))
                     # load-balance one at at time to avoid churn
                     if load_balance and entry and entry['in_use'] > int(1.05*avg):
-                        self._debug['auto_lb'] += 1
+                        self._debug['lb_auto'] += 1
                         load_balance = False
                     continue
+                msg = ' subs service=%s, assign=%d, count=%d' % (service_id, assign, count)
+                m = sandesh.dsSubscribe(msg=msg, sandesh=self._sandesh)
+                m.trace_msg(name='dsSubscribeTraceBuf', sandesh=self._sandesh)
+                self.syslog("%s %s" % (cid, msg))
+
                 if assign:
                     assign -= 1
                     self._db_conn.insert_client(
@@ -845,11 +880,12 @@ class DiscoveryServer():
 
     # on-demand API to load-balance existing subscribers across all currently available
     # publishers. Needed if publisher gets added or taken down
+    @authenticate
     def api_lb_service(self, service_type):
         if service_type is None:
             bottle.abort(405, "Missing service")
 
-        pubs = self._db_conn.lookup_service(service_type)
+        pubs = self._db_conn.lookup_service(service_type, include_count=True) or []
         if pubs is None:
             bottle.abort(405, 'Unknown service')
         pubs_active = [item for item in pubs if not self.service_expired(item)]
@@ -864,8 +900,8 @@ class DiscoveryServer():
         if clients is None:
             return
 
-        self.syslog('Initial load-balance server-list: %s, avg-per-pub %d, clients %d' \
-            % (lb_list, avg_per_pub, len(clients)))
+        self.syslog('%s: Initial load-balance server-list: %s, avg-per-pub %d, clients %d' \
+            % (service_type, lb_list, avg_per_pub, len(clients)))
 
         """
         Walk through all subscribers and mark one publisher per subscriber down
@@ -879,10 +915,11 @@ class DiscoveryServer():
         for client in clients:
             (service_type, client_id, service_id, mtime, ttl) = client
             if client_id not in clients_lb_done and service_id in lb_list and lb_list[service_id] > 0:
+                self.syslog('expire client=%s, service=%s, ttl=%d' % (client_id, service_id, ttl))
                 self._db_conn.mark_delete_subscription(service_type, client_id, service_id)
                 clients_lb_done.append(client_id)
                 lb_list[service_id] -= 1
-                self._debug['count_lb'] += 1
+                self._debug['lb_count'] += 1
         return {}
     # end api_lb_service
 
@@ -948,7 +985,7 @@ class DiscoveryServer():
         rsp += '        <td>Time since last Heartbeat</td>\n'
         rsp += '    </tr>\n'
 
-        for pub in self._db_conn.service_entries(service_type):
+        for pub in self._db_conn.lookup_service(service_type, include_count=True):
             info = pub['info']
             service_type = pub['service_type']
             service_id   = pub['service_id']
@@ -985,7 +1022,7 @@ class DiscoveryServer():
     def services_json(self, service_type=None):
         rsp = []
 
-        for pub in self._db_conn.service_entries(service_type):
+        for pub in self._db_conn.lookup_service(service_type, include_count=True):
             entry = pub.copy()
             entry['status'] = "down" if self.service_expired(entry) else "up"
             # keep sanity happy - get rid of prov_state in the future
@@ -997,6 +1034,7 @@ class DiscoveryServer():
         return {'services': rsp}
     # end services_json
 
+    @authenticate
     def service_http_put(self, id):
         self.syslog('Update service %s' % (id))
         try:
@@ -1006,26 +1044,27 @@ class DiscoveryServer():
         except (ValueError, KeyError, TypeError) as e:
             bottle.abort(400, e)
 
-        entry = self._db_conn.lookup_service(service_type, service_id=id)
-        if not entry:
-            bottle.abort(405, 'Unknown service')
-
+        # admin state is kept seperately and can be set before publish
         if 'admin-state' in json_req:
             admin_state = json_req['admin-state']
             if admin_state not in ['up', 'down']:
                 bottle.abort(400, "Invalid admin state")
-            entry['admin_state'] = admin_state
-        if 'oper-state' in json_req:
-            oper_state = json_req['oper-state']
-            if oper_state not in ['up', 'down']:
-                bottle.abort(400, "Invalid operational state")
-            entry['oper_state'] = oper_state
-        if 'oper-state-reason' in json_req:
-            entry['oper_state_msg'] = json_req['oper-state-reason']
+            self._db_conn.set_admin_state(service_type, id, admin_state)
 
-        self._db_conn.update_service(service_type, id, entry)
-
-        self.syslog('update service=%s, sid=%s, info=%s'
+        # oper state is kept in main db entry for publisher
+        if 'oper-state' in json_req or 'oper-state-reason' in json_req:
+            entry = self._db_conn.lookup_service(service_type, service_id=id)
+            if not entry:
+                bottle.abort(405, 'Unknown service')
+            if 'oper-state' in json_req:
+                oper_state = json_req['oper-state']
+                if oper_state not in ['up', 'down']:
+                    bottle.abort(400, "Invalid operational state")
+                entry['oper_state'] = oper_state
+            if 'oper-state-reason' in json_req:
+                entry['oper_state_msg'] = json_req['oper-state-reason']
+            self._db_conn.update_service(service_type, id, entry)
+            self.syslog('update service=%s, sid=%s, info=%s'
                     % (service_type, id, entry))
 
         return {}
@@ -1078,7 +1117,7 @@ class DiscoveryServer():
 
     # purge expired publishers
     def cleanup_http_get(self):
-        for entry in self._db_conn.service_entries():
+        for entry in self._db_conn.lookup_service():
             if self.service_expired(entry):
                 self._db_conn.delete_service(entry)
         return self.show_all_services()
@@ -1268,17 +1307,22 @@ def parse_args(args_str):
         'logger_class': None,
         'sandesh_send_rate_limit': SandeshSystem.get_sandesh_send_rate_limit(),
         'cluster_id': None,
-    }
-
-    # per service options
-    default_service_opts = {
-        'policy': None,
-        'load-balance': False,
+        'white_list_publish': None,
+        'white_list_subscribe': None,
+        'policy': 'load-balance',
     }
 
     cassandra_opts = {
         'cassandra_user'     : None,
         'cassandra_password' : None,
+    }
+    keystone_opts = {
+        'auth_host': '127.0.0.1',
+        'auth_port': '35357',
+        'auth_protocol': 'http',
+        'admin_user': '',
+        'admin_password': '',
+        'admin_tenant_name': '',
     }
 
     service_config = {}
@@ -1297,11 +1341,13 @@ def parse_args(args_str):
             if section == "DEFAULTS":
                 defaults.update(dict(config.items("DEFAULTS")))
                 continue
-            service_config[
-                section.lower()] = default_service_opts.copy()
-            service_config[section.lower()].update(
-                dict(config.items(section)))
+            if section == "KEYSTONE":
+                keystone_opts.update(dict(config.items("KEYSTONE")))
+                continue
+            service = section.lower()
+            service_config[service] = dict(config.items(section))
 
+    defaults.update(keystone_opts)
     parser.set_defaults(**defaults)
 
     parser.add_argument(
@@ -1382,11 +1428,13 @@ def parse_args(args_str):
             help="Sandesh send rate limit in messages/sec")
     parser.add_argument("--cluster_id",
             help="Used for database keyspace separation")
+    parser.add_argument(
+        "--auth", choices=['keystone'],
+        help="Type of authentication for user-requests")
  
     args = parser.parse_args(remaining_argv)
     args.conf_file = args.conf_file
     args.service_config = service_config
-    args.default_service_opts = default_service_opts
     args.cassandra_config = cassandra_config
     args.cassandra_opts = cassandra_opts
     if type(args.cassandra_server_list) is str:

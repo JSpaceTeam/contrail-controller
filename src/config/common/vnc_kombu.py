@@ -203,6 +203,10 @@ class VncKombuClientBase(object):
         self._delete_queue()
         self._conn.close()
 
+    def reset(self):
+        self._publish_queue = Queue()
+
+
 class VncKombuClientV1(VncKombuClientBase):
     def __init__(self, rabbit_ip, rabbit_port, rabbit_user, rabbit_password,
                  rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger):
@@ -254,7 +258,7 @@ class VncKombuClientV2(VncKombuClientBase):
         self._urls = []
         for h in _hosts:
             h['vhost'] = "" if not rabbit_vhost else rabbit_vhost
-            _url = "pyamqp://%(user)s:%(password)s@%(host)s:%(port)s/%(vhost)s/" % h
+            _url = "pyamqp://%(user)s:%(password)s@%(host)s:%(port)s/%(vhost)s" % h
             self._urls.append(_url)
 
         msg = "Initializing RabbitMQ connection, urls %s" % self._urls

@@ -2,6 +2,7 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 
+#include <base/contrail_ports.h>
 #include <cmn/dns.h>
 #include <bind/bind_util.h>
 #include <mgr/dns_mgr.h>
@@ -20,6 +21,7 @@ DnsManager::DnsManager()
     bind_servers.push_back(BindResolver::DnsServer("127.0.0.1",
                                                    Dns::GetDnsPort()));
     BindResolver::Init(*Dns::GetEventManager()->io_service(), bind_servers,
+                       ContrailPorts::ContrailDnsClientUdpPort(),
                        boost::bind(&DnsManager::HandleUpdateResponse,
                                    this, _1));
 
@@ -181,13 +183,13 @@ void DnsManager::DnsPtrZone(const Subnet &subnet, const VirtualDnsConfig *vdns,
     if (!bind_status_.IsUp())
         return;
 
-    bool reverse_resolution = vdns->IsReverseResolutionEnabled();
     std::string dns_domain = vdns->GetDomainName();
-    if (dns_domain.empty() || !reverse_resolution) {
+    if (dns_domain.empty()) {
         DNS_BIND_TRACE(DnsBindTrace, "Ptr Zone <" << vdns->GetName() <<
                        "> ; ignoring event: " << DnsConfig::ToEventString(ev) <<
                        " Domain: " << dns_domain << " Reverse Resolution: " <<
-                       (reverse_resolution ? "enabled" : "disabled"));
+                       (vdns->IsReverseResolutionEnabled()? "enabled" : 
+                       "disabled"));
         return;
     }
 

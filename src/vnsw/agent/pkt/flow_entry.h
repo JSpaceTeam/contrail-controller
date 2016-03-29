@@ -54,12 +54,14 @@ public:
     VmFlowRef(const VmFlowRef &rhs);
     ~VmFlowRef();
 
+    void Init(FlowEntry *flow);
     void operator=(const VmFlowRef &rhs);
-    void Reset();
+    void Reset(bool reset_flow);
     void FreeRef();
     void FreeFd();
     void SetVm(const VmEntry *vm);
-    bool AllocateFd(Agent *agent, FlowEntry *flow, uint8_t l3_proto);
+    bool AllocateFd(Agent *agent, uint8_t l3_proto);
+    void Move(VmFlowRef *rhs);
 
     int fd() const { return fd_; }
     uint16_t port() const { return port_; }
@@ -70,6 +72,7 @@ private:
     VmEntryConstRef vm_;
     int fd_;
     uint16_t port_;
+    FlowEntry *flow_;
 };
 
 typedef boost::intrusive_ptr<FlowEntry> FlowEntryPtr;
@@ -262,6 +265,8 @@ struct FlowData {
     bool enable_rpf;
     uint8_t l2_rpf_plen;
     std::string vm_cfg_name;
+    uint32_t ecmp_rpf_nh_;
+    uint32_t acl_assigned_vrf_index_;
     // IMPORTANT: Keep this structure assignable. Assignment operator is used in
     // FlowEntry::Copy() on this structure
 };
@@ -350,7 +355,7 @@ class FlowEntry {
     void Reset();
 
     // Copy data fields from rhs
-    void Copy(const FlowEntry *rhs);
+    void Copy(FlowEntry *rhs, bool update);
 
     void InitFwdFlow(const PktFlowInfo *info, const PktInfo *pkt,
                      const PktControlInfo *ctrl,
@@ -401,12 +406,14 @@ class FlowEntry {
     int linklocal_src_port() const { return data_.in_vm_entry.port(); }
     int linklocal_src_port_fd() const { return data_.in_vm_entry.fd(); }
     const std::string& acl_assigned_vrf() const;
+    void set_acl_assigned_vrf_index();
     uint32_t acl_assigned_vrf_index() const;
     uint32_t fip() const { return fip_; }
     VmInterfaceKey fip_vmi() const { return fip_vmi_; }
     uint32_t reverse_flow_fip() const;
     VmInterfaceKey reverse_flow_vmi() const;
     void UpdateFipStatsInfo(uint32_t fip, uint32_t id, Agent *agent);
+    const boost::uuids::uuid &uuid() const { return uuid_; }
     const std::string &sg_rule_uuid() const { return sg_rule_uuid_; }
     const std::string &nw_ace_uuid() const { return nw_ace_uuid_; }
     const std::string &peer_vrouter() const { return peer_vrouter_; }
@@ -484,6 +491,7 @@ class FlowEntry {
         fsc_ = fsc;
     }
     static std::string DropReasonStr(uint16_t reason);
+    std::string KeyString() const;
 private:
     friend class FlowTable;
     friend class FlowEntryFreeList;
@@ -491,6 +499,8 @@ private:
     friend void intrusive_ptr_add_ref(FlowEntry *fe);
     friend void intrusive_ptr_release(FlowEntry *fe);
     bool SetRpfNH(FlowTable *ft, const AgentRoute *rt);
+    bool SetEcmpRpfNH(FlowTable*, uint32_t);
+    bool SetRpfNHState(FlowTable*, const NextHop*);
     bool InitFlowCmn(const PktFlowInfo *info, const PktControlInfo *ctrl,
                      const PktControlInfo *rev_ctrl, FlowEntry *rflow);
     void GetSourceRouteInfo(const AgentRoute *rt);
@@ -498,6 +508,14 @@ private:
     void UpdateRpf();
     VmInterfaceKey InterfaceIdToKey(Agent *agent, uint32_t id);
     const std::string InterfaceIdToVmCfgName(Agent *agent, uint32_t id);
+    void SetComponentIndex(const NextHopKey *nh_key,
+                           uint32_t label, bool mpls_path);
+    const VrfEntry *GetDestinationVrf();
+    void set_ecmp_rpf_nh(uint32_t id);
+    void UpdateEcmpInfo();
+    void SetRemoteFlowEcmpIndex();
+    void SetLocalFlowEcmpIndex();
+    void set_ecmp_rpf_nh() const;
 
     FlowKey key_;
     FlowTable *flow_table_;
@@ -509,6 +527,7 @@ private:
     bool deleted_;
     uint32_t flags_;
     uint16_t short_flow_reason_;
+    boost::uuids::uuid uuid_;
     std::string sg_rule_uuid_;
     std::string nw_ace_uuid_;
     //IP address of the src vrouter for egress flows and dst vrouter for

@@ -19,6 +19,7 @@ public:
     static const uint32_t kAgentStatsInterval = (30 * 1000); // time in millisecs
     static const uint32_t kFlowStatsInterval = (1000); // time in milliseconds
     static const uint32_t kVrouterStatsInterval = (30 * 1000); //time-millisecs
+    static const uint16_t kTcpFlowScanInterval = 15; // time in seconds
     typedef std::vector<Ip4Address> AddressList;
 
     // Agent mode we are running in
@@ -99,15 +100,31 @@ public:
     const Ip4Address &dns_server_2() const { return dns_server_2_; }
     const uint16_t dns_port_1() const { return dns_port_1_; }
     const uint16_t dns_port_2() const { return dns_port_2_; }
+    const uint16_t dns_client_port() const {
+        if (test_mode_)
+            return 0;
+        return dns_client_port_;
+    }
+    const uint16_t mirror_client_port() const {
+        if (test_mode_)
+            return 0;
+        return mirror_client_port_;
+    }
     const std::string &discovery_server() const { return dss_server_; }
     const Ip4Address &mgmt_ip() const { return mgmt_ip_; }
     const int xmpp_instance_count() const { return xmpp_instance_count_; }
     const std::string &tunnel_type() const { return tunnel_type_; }
     const std::string &metadata_shared_secret() const { return metadata_shared_secret_; }
+    uint16_t metadata_proxy_port() const {
+        if (test_mode_)
+            return 0;
+        return metadata_proxy_port_;
+    }
     float max_vm_flows() const { return max_vm_flows_; }
     uint32_t linklocal_system_flows() const { return linklocal_system_flows_; }
     uint32_t linklocal_vm_flows() const { return linklocal_vm_flows_; }
     uint32_t flow_cache_timeout() const {return flow_cache_timeout_;}
+    uint16_t flow_index_sm_log_count() const {return flow_index_sm_log_count_;}
     bool headless_mode() const {return headless_mode_;}
     bool dhcp_relay_mode() const {return dhcp_relay_mode_;}
     bool xmpp_auth_enabled() const {return xmpp_auth_enable_;}
@@ -151,6 +168,7 @@ public:
     int agent_stats_interval() const { return agent_stats_interval_; }
     int flow_stats_interval() const { return flow_stats_interval_; }
     int vrouter_stats_interval() const { return vrouter_stats_interval_; }
+    uint16_t tcp_flow_scan_interval() const { return tcp_flow_scan_interval_; }
     void set_agent_stats_interval(int val) { agent_stats_interval_ = val; }
     void set_flow_stats_interval(int val) { flow_stats_interval_ = val; }
     void set_vrouter_stats_interval(int val) { vrouter_stats_interval_ = val; }
@@ -296,6 +314,7 @@ private:
     void ComputeFlowLimits();
     void ParseCollector();
     void ParseVirtualHost();
+    void ParseDns();
     void ParseDiscovery();
     void ParseNetworks();
     void ParseHypervisor();
@@ -316,6 +335,8 @@ private:
     void ParseCollectorArguments
         (const boost::program_options::variables_map &v);
     void ParseVirtualHostArguments
+        (const boost::program_options::variables_map &v);
+    void ParseDnsArguments
         (const boost::program_options::variables_map &v);
     void ParseDiscoveryArguments
         (const boost::program_options::variables_map &v);
@@ -367,6 +388,8 @@ private:
     Ip4Address dns_server_2_;
     uint16_t dns_port_1_;
     uint16_t dns_port_2_;
+    uint16_t dns_client_port_;
+    uint16_t mirror_client_port_;
     std::string dss_server_;
     uint16_t dss_port_;
     Ip4Address mgmt_ip_;
@@ -374,10 +397,12 @@ private:
     PortInfo xen_ll_;
     std::string tunnel_type_;
     std::string metadata_shared_secret_;
+    uint16_t metadata_proxy_port_;
     float max_vm_flows_;
     uint16_t linklocal_system_flows_;
     uint16_t linklocal_vm_flows_;
     uint16_t flow_cache_timeout_;
+    uint16_t flow_index_sm_log_count_;
 
     // Parameters configured from command line arguments only (for now)
     std::string config_file_;
@@ -399,6 +424,7 @@ private:
     int agent_stats_interval_;
     int flow_stats_interval_;
     int vrouter_stats_interval_;
+    uint16_t tcp_flow_scan_interval_;
     std::string vmware_physical_port_;
     bool test_mode_;
     bool debug_;

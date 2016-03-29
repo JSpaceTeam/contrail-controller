@@ -20,10 +20,8 @@ class Defaults(object):
         perms = PermType('cloud-admin', PERMS_RWX,
                          'cloud-admin-group', PERMS_RWX,
                          PERMS_RWX)
-        self.perms = IdPermsType(perms, None, True, "0", "0")
+        self.perms = IdPermsType(permissions=perms, enable=True)
 
-        # set default perms2 of a new object
-        # cloud-admin owner with full access, not shared with anyone
         # set default perms2 of a new object
         # cloud-admin owner with full access, not shared with anyone
         self.perms2 = PermType2(

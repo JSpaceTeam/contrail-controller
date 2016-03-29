@@ -119,6 +119,7 @@ void FlowStatsManager::AddReqHandler(boost::shared_ptr<FlowStatsCollectorReq>
         it->second->set_flow_age_time_intvl(
                 1000000L * (uint64_t)req->flow_cache_timeout);
         it->second->set_deleted(false);
+        it->second->set_user_configured(req->user_configured);
         return;
     }
 
@@ -137,6 +138,7 @@ void FlowStatsManager::AddReqHandler(boost::shared_ptr<FlowStatsCollectorReq>
     if (req->key.port == 0) {
         protocol_list_[req->key.proto] = aging_table.get();
     }
+    aging_table->set_user_configured(req->user_configured);
 }
 
 void FlowStatsManager::DeleteReqHandler(boost::shared_ptr<FlowStatsCollectorReq>
@@ -175,12 +177,13 @@ void FlowStatsManager::FreeReqHandler(boost::shared_ptr<FlowStatsCollectorReq>
 }
 
 void FlowStatsManager::Add(const FlowAgingTableKey &key,
-                          uint64_t flow_stats_interval,
-                          uint64_t flow_cache_timeout) {
+                           uint64_t flow_stats_interval,
+                           uint64_t flow_cache_timeout, bool user_configured) {
     boost::shared_ptr<FlowStatsCollectorReq>
         req(new FlowStatsCollectorReq(
                     FlowStatsCollectorReq::ADD_FLOW_STATS_COLLECTOR,
-                    key, flow_stats_interval, flow_cache_timeout));
+                    key, flow_stats_interval, flow_cache_timeout,
+                    user_configured));
     request_queue_.Enqueue(req);
 }
 
@@ -188,10 +191,20 @@ void FlowStatsManager::Delete(const FlowAgingTableKey &key) {
     if (key.proto == kCatchAllProto) {
         return;
     }
-    boost::shared_ptr<FlowStatsCollectorReq>
-        req(new FlowStatsCollectorReq(
-                    FlowStatsCollectorReq::DELETE_FLOW_STATS_COLLECTOR,
-                    key));
+    boost::shared_ptr<FlowStatsCollectorReq> req;
+    if (key.proto == IPPROTO_TCP && key.port == 0) {
+        /* We should never delete flow-stats-collector with (IPPROTO_TCP, 0)
+         * key as it is implicitly added. If user has overwritten that and later
+         * sent delete request, we should only change the aging time back to
+         * default value. This is done by enqueuing ADD request */
+        req.reset(new FlowStatsCollectorReq(
+                    FlowStatsCollectorReq::ADD_FLOW_STATS_COLLECTOR,
+                    key, agent_->params()->flow_stats_interval(),
+                    agent_->params()->flow_cache_timeout(), false));
+    } else {
+        req.reset(new FlowStatsCollectorReq(
+                    FlowStatsCollectorReq::DELETE_FLOW_STATS_COLLECTOR, key));
+    }
     request_queue_.Enqueue(req);
 }
 
@@ -217,45 +230,42 @@ FlowStatsManager::Find(uint32_t proto, uint32_t port) const {
 }
 
 FlowStatsCollector*
-FlowStatsManager::GetFlowStatsCollector(const FlowKey &key) const {
+FlowStatsManager::GetFlowStatsCollector(const FlowEntry *flow) const {
+    /* If the reverse flow already has FlowStatsCollector assigned, return
+     * the same to ensure that forward and reverse flows go to same
+     * FlowStatsCollector */
+    const FlowEntry *rflow = flow->reverse_flow_entry();
+    if (rflow && rflow->fsc()) {
+        return rflow->fsc();
+    }
+    FlowStatsCollector* col = NULL;
+
+    const FlowKey &key = flow->key();
     FlowAgingTableKey key1(key.protocol, key.src_port);
+    FlowAgingTableMap::const_iterator key1_it =
+        flow_aging_table_map_.find(key1);
+
+    if (key1_it != flow_aging_table_map_.end()) {
+        col = key1_it->second.get();
+        if (!col->deleted())
+            return col;
+    }
+
     FlowAgingTableKey key2(key.protocol, key.dst_port);
-
-    FlowAgingTableMap::const_iterator key1_it = flow_aging_table_map_.find(key1);
-    FlowAgingTableMap::const_iterator key2_it = flow_aging_table_map_.find(key2);
-
-    if (key1_it == flow_aging_table_map_.end() &&
-        key2_it == flow_aging_table_map_.end() &&
-        protocol_list_[key.protocol] == NULL) {
-        return default_flow_stats_collector_.get();
+    FlowAgingTableMap::const_iterator key2_it =
+        flow_aging_table_map_.find(key2);
+    if (key2_it != flow_aging_table_map_.end()) {
+        col = key2_it->second.get();
+        if (!col->deleted())
+            return col;
     }
 
-    if (key1_it == flow_aging_table_map_.end() &&
-        key2_it == flow_aging_table_map_.end()) {
-        return protocol_list_[key.protocol];
+    if (protocol_list_[key.protocol] != NULL) {
+        col = protocol_list_[key.protocol];
+        if (!col->deleted())
+            return col;
     }
-
-    if (key1_it == flow_aging_table_map_.end()) {
-        return key2_it->second.get();
-    } else {
-        return key1_it->second.get();
-    }
-
-    if (key1_it->second->flow_age_time_intvl() ==
-        key2_it->second->flow_age_time_intvl()) {
-        if (key.src_port < key.dst_port) {
-            return key1_it->second.get();
-        } else {
-            return key2_it->second.get();
-        }
-    }
-
-    if (key1_it->second->flow_age_time_intvl() <
-        key2_it->second->flow_age_time_intvl()) {
-        return key1_it->second.get();
-    } else {
-        return key2_it->second.get();
-    }
+    return default_flow_stats_collector_.get();
 }
 
 void FlowStatsManager::AddEvent(FlowEntryPtr &flow) {
@@ -265,7 +275,7 @@ void FlowStatsManager::AddEvent(FlowEntryPtr &flow) {
 
     FlowStatsCollector *fsc = NULL;
     if (flow->fsc() == NULL) {
-        fsc = GetFlowStatsCollector(flow->key());
+        fsc = GetFlowStatsCollector(flow.get());
         flow->set_fsc(fsc);
     } else {
         fsc = flow->fsc();
@@ -280,7 +290,7 @@ void FlowStatsManager::DeleteEvent(const FlowEntryPtr &flow) {
     }
     FlowStatsCollector *fsc = flow->fsc();
     assert(fsc != NULL);
-    fsc->DeleteEvent(flow->key());
+    fsc->DeleteEvent(flow->uuid());
 }
 
 void FlowStatsManager::FlowIndexUpdateEvent(const FlowEntryPtr &flow) {
@@ -290,13 +300,31 @@ void FlowStatsManager::FlowIndexUpdateEvent(const FlowEntryPtr &flow) {
 
     FlowStatsCollector *fsc = NULL;
     if (flow->fsc() == NULL) {
-        fsc = GetFlowStatsCollector(flow->key());
+        fsc = GetFlowStatsCollector(flow.get());
         flow->set_fsc(fsc);
     } else {
         fsc = flow->fsc();
     }
 
-    fsc->FlowIndexUpdateEvent(flow->key(), flow->flow_handle());
+    fsc->FlowIndexUpdateEvent(flow->uuid(), flow->flow_handle());
+}
+
+void FlowStatsManager::UpdateStatsEvent(const FlowEntryPtr &flow,
+                                        uint32_t bytes, uint32_t packets,
+                                        uint32_t oflow_bytes) {
+    if (flow == NULL) {
+        return;
+    }
+
+    FlowStatsCollector *fsc = NULL;
+    if (flow->fsc() == NULL) {
+        fsc = GetFlowStatsCollector(flow.get());
+        flow->set_fsc(fsc);
+    } else {
+        fsc = flow->fsc();
+    }
+
+    fsc->UpdateStatsEvent(flow->uuid(), bytes, packets, oflow_bytes);
 }
 
 void FlowStatsManager::UpdateStatsEvent(const FlowEntryPtr &flow,
@@ -329,7 +357,7 @@ void FlowStatsManager::FlowStatsReqHandler(Agent *agent,
     } else {
         agent->flow_stats_manager()->Add(
                 FlowAgingTableKey(protocol, port), 
-                agent->params()->flow_stats_interval(), timeout);
+                agent->params()->flow_stats_interval(), timeout, true);
     }
 }
 
@@ -338,7 +366,9 @@ void FlowStatsManager::Init(uint64_t flow_stats_interval,
     agent_->set_flow_stats_req_handler(&(FlowStatsManager::FlowStatsReqHandler));
     Add(FlowAgingTableKey(kCatchAllProto, 0),
         flow_stats_interval,
-        flow_cache_timeout);
+        flow_cache_timeout, false);
+    Add(FlowAgingTableKey(IPPROTO_TCP, 0), flow_stats_interval,
+        flow_cache_timeout, false);
     timer_->Start(FlowThresoldUpdateTime,
                   boost::bind(&FlowStatsManager::UpdateFlowThreshold, this));
 }
@@ -379,7 +409,7 @@ void ShowAgingConfig::HandleRequest() const {
 void AddAgingConfig::HandleRequest() const {
     FlowStatsManager *fam = Agent::GetInstance()->flow_stats_manager();
     fam->Add(FlowAgingTableKey(get_protocol(), get_port()),
-                               get_stats_interval(), get_cache_timeout());
+                               get_stats_interval(), get_cache_timeout(), true);
     SandeshResponse *resp = new FlowStatsCfgResp();
     resp->set_context(context());
     resp->Response();

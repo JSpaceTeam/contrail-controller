@@ -159,7 +159,7 @@ function run_tests {
   then
     # subunit-2to1 is present, testr subunit stream should be in version 2
     # format. Convert to version one before colorizing.
-    bash -c "${wrapper} $TESTRTESTS | ${wrapper} subunit-2to1 | ${wrapper} ${tools_path}/tools/colorizer.py" 
+    bash -c " ${wrapper} $TESTRTESTS | ${wrapper} subunit-2to1 | ${wrapper} ${tools_path}/tools/colorizer.py" 
   else
     bash -c "${wrapper} $TESTRTESTS | ${wrapper} ${tools_path}/tools/colorizer.py"
   fi

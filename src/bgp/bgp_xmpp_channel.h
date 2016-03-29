@@ -15,7 +15,7 @@
 #include <utility>
 
 #include "base/queue_task.h"
-#include "bgp/bgp_ribout.h"
+#include "bgp/bgp_rib_policy.h"
 #include "bgp/routing-instance/routing_instance.h"
 #include "io/tcp_session.h"
 #include "net/rd.h"
@@ -33,6 +33,7 @@ class XmppServer;
 class BgpXmppChannelMock;
 class BgpXmppChannelManager;
 class BgpXmppChannelManagerMock;
+class XmppPeerInfoData;
 class XmppSession;
 
 class BgpXmppChannel {
@@ -90,9 +91,9 @@ public:
     TcpSession::Endpoint local_endpoint() const;
     std::string transport_address_string() const;
 
-    void set_peer_deleted(); // For unit testing only.
+    void set_peer_closed(bool flag);
     bool peer_deleted() const;
-    uint64_t peer_deleted_at() const;
+    uint64_t peer_closed_at() const;
 
     const XmppSession *GetSession() const;
     const Stats &rx_stats() const { return stats_[RX]; }
@@ -106,6 +107,10 @@ public:
     void IdentifierUpdateCallback(Ip4Address old_identifier);
     void FillInstanceMembershipInfo(BgpNeighborResp *resp) const;
     void FillTableMembershipInfo(BgpNeighborResp *resp) const;
+    void FillCloseInfo(BgpNeighborResp *resp) const;
+    void StaleCurrentSubscriptions();
+    void SweepCurrentSubscriptions();
+    void XMPPPeerInfoSend(const XmppPeerInfoData &peer_info) const;
 
     const XmppChannel *channel() const { return channel_; }
 
@@ -149,11 +154,17 @@ private:
 
     // Map of routing instances to which this BgpXmppChannel is subscribed.
     struct SubscriptionState {
+        enum State { NONE, STALE };
         SubscriptionState(const RoutingInstance::RouteTargetList &targets,
-            int index) : targets(targets), index(index) {
-        }
+                          int index)
+                : targets(targets), index(index), state(NONE) { }
+        const bool IsStale() const { return(state == STALE); }
+        void SetStale() { state = STALE; }
+        void ClearStale() { state = NONE; }
+
         RoutingInstance::RouteTargetList targets;
         int index;
+        State state;
     };
     typedef std::map<RoutingInstance *, SubscriptionState>
         SubscribedRoutingInstanceList;
@@ -217,6 +228,8 @@ private:
     void FlushDeferQ(std::string vrf_name, std::string table_name);
     void ProcessDeferredSubscribeRequest(RoutingInstance *rt_instance,
                                          int instance_id);
+    void ClearStaledSubscription(SubscriptionState &sub_state);
+
     xmps::PeerId peer_id_;
     BgpServer *bgp_server_;
     boost::scoped_ptr<XmppPeer> peer_;
@@ -230,7 +243,7 @@ private:
     RoutingTableMembershipRequestMap routingtable_membership_request_map_;
     VrfMembershipRequestMap vrf_membership_request_map_;
     BgpXmppChannelManager *manager_;
-    bool close_in_progress_;
+    bool delete_in_progress_;
     bool deleted_;
     bool defer_peer_close_;
     WorkQueue<std::string> membership_response_worker_;
@@ -295,9 +308,9 @@ public:
         return channel_map_.size();
     }
 
-    uint32_t closing_count() const { return closing_count_; }
-    void increment_closing_count() { closing_count_++; }
-    void decrement_closing_count() { closing_count_--; }
+    uint32_t deleting_count() const { return deleting_count_; }
+    void increment_deleting_count() { deleting_count_++; }
+    void decrement_deleting_count() { deleting_count_--; }
 
     BgpServer *bgp_server() { return bgp_server_; }
     XmppServer *xmpp_server() { return xmpp_server_; }
@@ -318,7 +331,7 @@ private:
     int admin_down_listener_id_;
     int asn_listener_id_;
     int identifier_listener_id_;
-    uint32_t closing_count_;
+    uint32_t deleting_count_;
 
     DISALLOW_COPY_AND_ASSIGN(BgpXmppChannelManager);
 };

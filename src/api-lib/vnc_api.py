@@ -27,7 +27,7 @@ from cfgm_common.exceptions import *
 from cfgm_common import ssl_adapter
 
 from pprint import pformat
-from gen.vnc_api_server_gen import SERVICE_PATH
+from gen.vnc_api_client_gen import SERVICE_PATH
 
 ASC = 'asc'
 DESC = 'desc'
@@ -462,6 +462,7 @@ class VncApi(object):
         for prop_name in obj._pending_field_map_updates:
             operations.extend(obj._pending_field_map_updates[prop_name])
 
+
         for oper, elem_val, elem_pos in operations:
             if isinstance(elem_val, GeneratedsSuper):
                 serialized_elem_value = elem_val.exportDict('')
@@ -471,6 +472,7 @@ class VncApi(object):
             prop_coll_body['updates'].append(
                 {'field': prop_name, 'operation': oper,
                  'value': serialized_elem_value, 'position': elem_pos})
+
 
         if prop_coll_body['updates']:
             prop_coll_json = json.dumps(prop_coll_body)
@@ -843,7 +845,7 @@ class VncApi(object):
         return json.loads(content)[obj_field]
     # end _prop_collection_get
 
-    def _prop_map_get_elem_key(self, obj_uuid, obj_field, elem):
+    def _prop_map_get_elem_key(self, obj_uuid, obj_field, value):
         _, obj_type = self.id_to_fq_name_type(obj_uuid)
         obj_class = utils.obj_type_to_vnc_class(obj_type, __name__)
 

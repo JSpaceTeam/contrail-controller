@@ -175,6 +175,8 @@ public:
 
     TaskGroup *GetTaskGroup(int task_id);
     TaskGroup *QueryTaskGroup(int task_id);
+    bool IsTaskGroupEmpty(int task_id) const;
+
     TaskEntry *GetTaskEntry(int task_id, int instance_id);
     TaskEntry *QueryTaskEntry(int task_id, int instance_id);
     void OnTaskExit(Task *task);
@@ -197,7 +199,7 @@ public:
     uint64_t cancel_count() const { return cancel_count_; }
     // Force number of threads
     void SetMaxThreadCount(int n);
-    void GetSandeshData(SandeshTaskScheduler *resp);
+    void GetSandeshData(SandeshTaskScheduler *resp, bool summary);
     void Log(const char *file_name, uint32_t line_no, const Task *task,
              const char *description, uint32_t delay);
     void RegisterLog(LogFn fn);
@@ -233,7 +235,7 @@ private:
     TaskEntry               *stop_entry_;
 
     tbb::task_scheduler_init task_scheduler_;
-    tbb::mutex              mutex_;
+    mutable tbb::mutex      mutex_;
     bool                    running_;
     uint64_t                seqno_;
     TaskGroupDb             task_group_db_;

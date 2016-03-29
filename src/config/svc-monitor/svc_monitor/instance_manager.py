@@ -155,6 +155,8 @@ class InstanceManager(object):
         fip = FloatingIpSM.get(fip_id)
         vmi = VirtualMachineInterfaceSM.get(vmi_id)
         if not fip or not vmi:
+            self.logger.error("Failed associating fip %s to vmi %s" %
+                              (fip_id, vmi_id))
             return
         if fip_id in vmi.floating_ips:
             return
@@ -523,7 +525,10 @@ class InstanceManager(object):
                 if_properties = VirtualMachineInterfacePropertiesType(
                     **vmi.params)
                 vmi_network = vmi.virtual_network
-                vmi_irt = vmi.interface_route_table
+                if len(vmi.interface_route_tables):
+                    vmi_irt = list(vmi.interface_route_tables)[0]
+                else:
+                    vmi_irt = None
                 vmi_sg = vmi.security_groups
                 vmi_vm = vmi.virtual_machine
                 break
@@ -781,9 +786,16 @@ class NetworkNamespaceManager(VRouterHostedManager):
         if not vip_vmi:
             return
 
+        if not vip_vmi.instance_ips:
+            self.logger.error("VMI %s missing instance_ip backrefs" %
+                               vip_vmi.uuid)
+            return
+
         for iip_id in vip_vmi.instance_ips:
             iip = InstanceIpSM.get(iip_id)
             if not iip:
+                self.logger.error("Instance IP object missing for iip_id %s" \
+                                   % iip_id)
                 continue
             for vmi_id in iip.virtual_machine_interfaces:
                 if vmi_id == vip_vmi.uuid:

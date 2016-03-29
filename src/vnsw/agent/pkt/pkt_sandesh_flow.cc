@@ -10,6 +10,8 @@
 
 #include <uve/agent_uve.h>
 #include <vrouter/flow_stats/flow_stats_collector.h>
+#include <vrouter/ksync/ksync_init.h>
+#include <vrouter/ksync/ksync_flow_index_manager.h>
 
 using boost::system::error_code;
 
@@ -25,7 +27,7 @@ using boost::system::error_code;
     std::vector<ActionStr> action_str_l;                                    \
     SetActionStr(fe->match_p().action_info, action_str_l);                  \
     if ((fe->match_p().action_info.action & TrafficAction::DROP_FLAGS) != 0) {\
-        data.set_drop_reason(GetFlowDropReason(fe));                        \
+        data.set_drop_reason(fe->DropReasonStr(fe->data().drop_reason));                        \
     }                                                                       \
     data.set_action_str(action_str_l);                                      \
     std::vector<MirrorActionSpec>::const_iterator mait;                     \
@@ -66,7 +68,7 @@ using boost::system::error_code;
     data.set_implicit_deny(fe->ImplicitDenyFlow() ? "yes" : "no");          \
     data.set_short_flow(                                                    \
             fe->is_flags_set(FlowEntry::ShortFlow) ?                        \
-            string("yes (") + GetShortFlowReason(fe->short_flow_reason()) + \
+            string("yes (") + fe->DropReasonStr(fe->short_flow_reason()) + \
             ")": "no");                                                     \
     data.set_local_flow(fe->is_flags_set(FlowEntry::LocalFlow) ? "yes" : "no");     \
     data.set_src_vn_list(fe->data().SourceVnList());                        \
@@ -94,62 +96,18 @@ using boost::system::error_code;
        data.set_aging_protocol(fe->fsc()->flow_aging_key().proto);\
        data.set_aging_port(fe->fsc()->flow_aging_key().port);\
     }\
+    data.set_l3_flow(fe->l3_flow());\
+    uint16_t id = fe->flow_table()? fe->flow_table()->table_index() : 0xFFFF;\
+    data.set_table_id(id);\
+    data.set_deleted(fe->deleted());\
+    SandeshFlowIndexInfo flow_index_info;\
+    KSyncFlowIndexManager *mgr = agent->ksync()->ksync_flow_index_manager();\
+    fe->ksync_index_entry()->SetSandeshData(mgr, &flow_index_info);\
+    data.set_flow_index_info(flow_index_info);
 
-const std::string PktSandeshFlow::start_key = "0-0-0-0-0.0.0.0-0.0.0.0";
+const std::string PktSandeshFlow::start_key = "0-0-0-0-0-0.0.0.0-0.0.0.0";
 
 ////////////////////////////////////////////////////////////////////////////////
-
-static const char * GetShortFlowReason(uint16_t reason) {
-    switch (reason) {
-    case FlowEntry::SHORT_UNAVIALABLE_INTERFACE:
-        return "Interface unavialable";
-    case FlowEntry::SHORT_IPV4_FWD_DIS:
-        return "Ipv4 forwarding disabled";
-    case FlowEntry::SHORT_UNAVIALABLE_VRF:
-        return "VRF unavailable";
-    case FlowEntry::SHORT_NO_SRC_ROUTE:
-        return "No Source route";
-    case FlowEntry::SHORT_NO_DST_ROUTE:
-        return "No Destination route";
-    case FlowEntry::SHORT_AUDIT_ENTRY:
-        return "Audit Entry";
-    case FlowEntry::SHORT_VRF_CHANGE:
-        return "VRF Change";
-    case FlowEntry::SHORT_NO_REVERSE_FLOW:
-        return "No Reverse flow";
-    case FlowEntry::SHORT_REVERSE_FLOW_CHANGE:
-        return "Reverse flow change";
-    case FlowEntry::SHORT_NAT_CHANGE:
-        return "NAT Changed";
-    case FlowEntry::SHORT_FLOW_LIMIT:
-        return "Flow Limit Reached";
-    case FlowEntry::SHORT_LINKLOCAL_SRC_NAT:
-        return "Linklocal source NAT failed";
-    default:
-        break;
-    }
-    return "Unknown";
-}
-
-static const char * GetFlowDropReason(FlowEntry *fe) {
-    switch (fe->data().drop_reason) {
-    case FlowEntry::DROP_POLICY:
-        return "Policy";
-    case FlowEntry::DROP_OUT_POLICY:
-        return "Out Policy";
-    case FlowEntry::DROP_SG:
-        return "SG";
-    case FlowEntry::DROP_OUT_SG:
-        return "Out SG";
-    case FlowEntry::DROP_REVERSE_SG:
-        return "Reverse SG";
-    case FlowEntry::DROP_REVERSE_OUT_SG:
-        return "Reverse Out SG";
-    default:
-        break;
-    }
-    return GetShortFlowReason(fe->data().drop_reason);;
-}
 
 static void SetOneAclInfo(FlowAclInfo *policy, uint32_t action,
                           const MatchAclParamsList &acl_list)  {
@@ -223,10 +181,11 @@ static void SetAclInfo(SandeshFlowData &data, FlowEntry *fe) {
 ////////////////////////////////////////////////////////////////////////////////
 
 PktSandeshFlow::PktSandeshFlow(Agent *agent, FlowRecordsResp *obj,
-                               std::string resp_ctx, std::string key) :
+                               std::string resp_ctx, std::string key):
     Task((TaskScheduler::GetInstance()->GetTaskId("Agent::PktFlowResponder")),
-          0), resp_obj_(obj), resp_data_(resp_ctx), 
-    flow_iteration_key_(), key_valid_(false), delete_op_(false), agent_(agent) {
+          0), resp_obj_(obj), resp_data_(resp_ctx),
+    flow_iteration_key_(), key_valid_(false), delete_op_(false), agent_(agent),
+    partition_id_(0) {
     if (key != agent_->NullString()) {
         if (SetFlowKey(key)) {
             key_valid_ = true;
@@ -250,8 +209,9 @@ void PktSandeshFlow::SendResponse(SandeshResponse *resp) {
     resp->Response();
 }
 
-string PktSandeshFlow::GetFlowKey(const FlowKey &key) {
+string PktSandeshFlow::GetFlowKey(const FlowKey &key, uint16_t partition_id) {
     stringstream ss;
+    ss << partition_id << kDelimiter;
     ss << key.nh << kDelimiter;
     ss << key.src_port << kDelimiter;
     ss << key.dst_port << kDelimiter;
@@ -264,12 +224,16 @@ string PktSandeshFlow::GetFlowKey(const FlowKey &key) {
 bool PktSandeshFlow::SetFlowKey(string key) {
     const char ch = kDelimiter;
     size_t n = std::count(key.begin(), key.end(), ch);
-    if (n != 5) {
+    if (n != 6) {
         return false;
     }
     stringstream ss(key);
     string item, sip, dip;
     uint32_t proto;
+
+    if (getline(ss, item, ch)) {
+        istringstream(item) >> partition_id_;
+    }
     if (getline(ss, item, ch)) {
         istringstream(item) >> flow_iteration_key_.nh;
     }
@@ -288,7 +252,6 @@ bool PktSandeshFlow::SetFlowKey(string key) {
     if (getline(ss, item, ch)) {
         dip = item;
     }
-
     error_code ec;
     flow_iteration_key_.src_addr = IpAddress::from_string(sip.c_str(), ec);
     flow_iteration_key_.dst_addr = IpAddress::from_string(dip.c_str(), ec);
@@ -301,47 +264,78 @@ bool PktSandeshFlow::SetFlowKey(string key) {
     return true;
 }
 
-// FIXME : Should handle multiple flow tables
 bool PktSandeshFlow::Run() {
     FlowTable::FlowEntryMap::iterator it;
     std::vector<SandeshFlowData>& list =
         const_cast<std::vector<SandeshFlowData>&>(resp_obj_->get_flow_list());
     int count = 0;
     bool flow_key_set = false;
-    FlowTable *flow_obj = agent_->pkt()->flow_table(0);
 
-    if (delete_op_) {
-        flow_obj->DeleteAll();
-        SendResponse(resp_obj_);
-        return true;
-    }
-
-    if (key_valid_) {
-        it = flow_obj->flow_entry_map_.upper_bound(flow_iteration_key_);
-    } else {
+    if (partition_id_ >= agent_->flow_thread_count()) {
         FlowErrorResp *resp = new FlowErrorResp();
         SendResponse(resp);
         return true;
     }
-    FlowStatsCollector *fec =
-        agent_->flow_stats_manager()->default_flow_stats_collector();
+
+    FlowTable *flow_obj = agent_->pkt()->flow_table(partition_id_);
+
+    if (delete_op_) {
+        for (int i =0; i < agent_->flow_thread_count(); i++){
+            flow_obj = agent_->pkt()->flow_table(i);
+            flow_obj->DeleteAll();
+        }
+        SendResponse(resp_obj_);
+        return true;
+    }
+
+    if (key_valid_)  {
+        it = flow_obj->flow_entry_map_.upper_bound(flow_iteration_key_);
+    } else {
+         FlowErrorResp *resp = new FlowErrorResp();
+         SendResponse(resp);
+         return true;
+    }
+
     while (it != flow_obj->flow_entry_map_.end()) {
         FlowEntry *fe = it->second;
-        const FlowExportInfo *info = fec->FindFlowExportInfo(fe->key());
+        FlowStatsCollector *fec = fe->fsc();
+        const FlowExportInfo *info = NULL;
+        if (fec) {
+            info = fec->FindFlowExportInfo(fe->uuid());
+        }
         SetSandeshFlowData(list, fe, info);
         ++it;
         count++;
         if (count == kMaxFlowResponse) {
             if (it != flow_obj->flow_entry_map_.end()) {
-                resp_obj_->set_flow_key(GetFlowKey(fe->key()));
+                resp_obj_->set_flow_key(GetFlowKey(fe->key(), partition_id_));
+                flow_key_set = true;
+
+            } else {
+                FlowKey key;
+                resp_obj_->set_flow_key(GetFlowKey(key, ++partition_id_));
                 flow_key_set = true;
             }
             break;
         }
+
+        while (it == flow_obj->flow_entry_map_.end()) {
+            if (++partition_id_ < agent_->flow_thread_count()) {
+                flow_obj = agent_->pkt()->flow_table(partition_id_);
+                it = flow_obj->flow_entry_map_.begin();
+                if (it != flow_obj->flow_entry_map_.end()) {
+                    break;
+                }
+            } else {
+              break;
+           }
+        }
     }
+
     if (!flow_key_set) {
         resp_obj_->set_flow_key(PktSandeshFlow::start_key);
     }
+
     SendResponse(resp_obj_);
     return true;
 }
@@ -380,6 +374,8 @@ void DeleteAllFlowRecords::HandleRequest() const {
 void FetchFlowRecord::HandleRequest() const {
     FlowKey key;
     Agent *agent = Agent::GetInstance();
+    FlowTable *flow_obj;
+
     key.nh = get_nh();
     error_code ec;
     key.src_addr = IpAddress::from_string(get_sip(), ec);
@@ -394,22 +390,30 @@ void FetchFlowRecord::HandleRequest() const {
     key.protocol = get_protocol();
 
     FlowTable::FlowEntryMap::iterator it;
-    FlowTable *flow_obj = agent->pkt()->flow_table(0);
-    FlowStatsCollector *fec =
-        agent->flow_stats_manager()->default_flow_stats_collector();
-    it = flow_obj->flow_entry_map_.find(key);
+    for (int i = 0; i < agent->flow_thread_count(); i++) {
+        flow_obj = agent->pkt()->flow_table(i);
+        it = flow_obj->flow_entry_map_.find(key);
+        if (it != flow_obj->flow_entry_map_.end())
+            break;
+    }
+
     SandeshResponse *resp;
     if (it != flow_obj->flow_entry_map_.end()) {
-        FlowRecordResp *flow_resp = new FlowRecordResp();
-        FlowEntry *fe = it->second;
-        FlowExportInfo *info = fec->FindFlowExportInfo(fe->key());
-        SandeshFlowData data;
-        SET_SANDESH_FLOW_DATA(agent, data, fe, info);
-        flow_resp->set_record(data);
-        resp = flow_resp;
+       FlowRecordResp *flow_resp = new FlowRecordResp();
+       FlowEntry *fe = it->second;
+       FlowStatsCollector *fec = fe->fsc();
+       const FlowExportInfo *info = NULL;
+       if (fec) {
+           info = fec->FindFlowExportInfo(fe->uuid());
+       }
+       SandeshFlowData data;
+       SET_SANDESH_FLOW_DATA(agent, data, fe, info);
+       flow_resp->set_record(data);
+       resp = flow_resp;
     } else {
         resp = new FlowErrorResp();
     }
+
     resp->set_context(context());
     resp->set_more(false);
     resp->Response();
@@ -423,20 +427,31 @@ void FlowAgeTimeReq::HandleRequest() const {
 
     FlowStatsCollector *collector =
         agent->flow_stats_manager()->default_flow_stats_collector();
+    FlowStatsCollector *tcp_col =
+        agent->flow_stats_manager()->tcp_flow_stats_collector();
 
     FlowAgeTimeResp *resp = new FlowAgeTimeResp();
-    if (collector == NULL) {
-        goto done;
-    }
-    resp->set_old_age_time(collector->flow_age_time_intvl_in_secs());
+    if (collector) {
+        resp->set_old_age_time(collector->flow_age_time_intvl_in_secs());
 
-    if (age_time && age_time != resp->get_old_age_time()) {
-        collector->UpdateFlowAgeTimeInSecs(age_time);
-        resp->set_new_age_time(age_time);
-    } else {
-        resp->set_new_age_time(resp->get_old_age_time());
+        if (age_time && age_time != resp->get_old_age_time()) {
+            collector->UpdateFlowAgeTimeInSecs(age_time);
+            resp->set_new_age_time(age_time);
+        } else {
+            resp->set_new_age_time(resp->get_old_age_time());
+        }
     }
-done:
+    if (tcp_col) {
+        resp->set_old_tcp_age_time(tcp_col->flow_age_time_intvl_in_secs());
+
+        if (age_time && age_time != resp->get_old_age_time() &&
+            !tcp_col->user_configured()) {
+            tcp_col->UpdateFlowAgeTimeInSecs(age_time);
+            resp->set_new_tcp_age_time(age_time);
+        } else {
+            resp->set_new_tcp_age_time(resp->get_old_tcp_age_time());
+        }
+    }
     resp->set_context(context());
     resp->set_more(false);
     resp->Response();
@@ -476,7 +491,13 @@ bool PktSandeshFlowStats::Run() {
     int count = 0;
     bool flow_key_set = false;
 
-    FlowTable *flow_obj = agent_->pkt()->flow_table(0);
+    if (partition_id_ > agent_->flow_thread_count()) {
+        FlowErrorResp *resp = new FlowErrorResp();
+        SendResponse(resp);
+        return true;
+    }
+
+    FlowTable *flow_obj = agent_->pkt()->flow_table(partition_id_);
     FlowStatsManager *fm = agent_->flow_stats_manager();
     const FlowStatsCollector *fsc = fm->Find(proto_, port_);
     if (!fsc) {
@@ -486,17 +507,17 @@ bool PktSandeshFlowStats::Run() {
     }
 
     FlowTable::FlowEntryMap::iterator it;
-    if (key_valid_) {
+    if (key_valid_)  {
         it = flow_obj->flow_entry_map_.upper_bound(flow_iteration_key_);
     } else {
-        FlowErrorResp *resp = new FlowErrorResp();
-        SendResponse(resp);
-        return true;
+         FlowErrorResp *resp = new FlowErrorResp();
+         SendResponse(resp);
+         return true;
     }
- 
+
     while (it != flow_obj->flow_entry_map_.end()) {
         FlowEntry *fe = it->second;
-        const FlowExportInfo *info = fsc->FindFlowExportInfo(fe->key());
+        const FlowExportInfo *info = fsc->FindFlowExportInfo(fe->uuid());
         SetSandeshFlowData(list, fe, info);
         ++it;
         count++;
@@ -504,18 +525,38 @@ bool PktSandeshFlowStats::Run() {
             if (it != flow_obj->flow_entry_map_.end()) {
                 ostringstream ostr;
                 ostr << proto_ << ":" << port_ << ":"
-                    << GetFlowKey(fe->key());
+                    << GetFlowKey(fe->key(), partition_id_);
+                resp_->set_flow_key(ostr.str());
+                flow_key_set = true;
+            } else {
+                ostringstream ostr;
+                FlowKey key;
+                ostr << proto_ << ":" << port_ << ":"
+                    << GetFlowKey(key, ++partition_id_);
                 resp_->set_flow_key(ostr.str());
                 flow_key_set = true;
             }
             break;
         }
+
+        while (it == flow_obj->flow_entry_map_.end()) {
+            if (++partition_id_ < agent_->flow_thread_count()) {
+                flow_obj = agent_->pkt()->flow_table(partition_id_);
+                it = flow_obj->flow_entry_map_.begin();
+                if (it != flow_obj->flow_entry_map_.end()) {
+                    break;
+                }
+            } else {
+              break;
+           }
+         }
+
     }
 
     if (!flow_key_set) {
-        ostringstream ostr;
-        ostr << proto_ << ":" << port_ << ":" << "0x0";
-        resp_->set_flow_key(ostr.str());
+       ostringstream ostr;
+       ostr << proto_ << ":" << port_ << ":" <<PktSandeshFlow::start_key;
+       resp_->set_flow_key(ostr.str());
     }
     SendResponse(resp_);
     return true;
@@ -523,7 +564,7 @@ bool PktSandeshFlowStats::Run() {
 
 bool PktSandeshFlowStats::SetProto(string &key) {
     size_t n = std::count(key.begin(), key.end(), ':');
-    if (n != 3) {
+    if (n != 2) {
         return false;
     }
     stringstream ss(key);
@@ -534,19 +575,15 @@ bool PktSandeshFlowStats::SetProto(string &key) {
     if (getline(ss, item, ':')) {
         istringstream(item) >> port_;
     }
-
-    long flow_ptr;
     if (getline(ss, item)) {
-        istringstream(item) >> flow_ptr;
+        SetFlowKey(item);
     }
-
-    flow_ptr_ = (FlowEntry *)(flow_ptr);
     return true;
 }
 
 PktSandeshFlowStats::PktSandeshFlowStats(Agent *agent, FlowStatsCollectorRecordsResp *obj,
                                          std::string resp_ctx, std::string key):
-    PktSandeshFlow(agent, NULL, resp_ctx, key), resp_(obj), flow_ptr_(NULL) {
+    PktSandeshFlow(agent, NULL, resp_ctx, key), resp_(obj) {
     if (key != agent_->NullString()) {
         if (SetProto(key)) {
             key_valid_ = true;
