@@ -3,11 +3,14 @@
 # @author: Sanju Abraham, Juniper Networks, OpenContrail
 from requests.adapters import HTTPAdapter
 try:
-    from urllib3.poolmanager import PoolManager
-except ImportError:
-    # This is required for redhat7 as it does not have
-    # separate urllib3 package installed
+    # This is required for RDO, which installs both python-requests
+    # and python-urllib3, but symlinks python-request's internally packaged
+    # urllib3 to the site installed one.
     from requests.packages.urllib3.poolmanager import PoolManager
+except ImportError:
+    # Fallback to standard installation methods
+    from urllib3.poolmanager import PoolManager
+    
 import ssl
 
 class SSLAdapter(HTTPAdapter):
