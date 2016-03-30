@@ -121,6 +121,8 @@ def parse_args(args_str):
                 'DEFAULT', 'multi_tenancy')
         if 'multi_tenancy_with_rbac' in config.defaults():
             defaults['multi_tenancy_with_rbac'] = config.getboolean('DEFAULT', 'multi_tenancy_with_rbac')
+        if 'disable_ifmap' in config.defaults():
+            defaults['disable_ifmap'] = config.getboolean('DEFAULT', 'disable_ifmap')
         if 'default_encoding' in config.defaults():
             default_encoding = config.get('DEFAULT', 'default_encoding')
             gen.resource_xsd.ExternalEncoding = default_encoding
@@ -128,8 +130,11 @@ def parse_args(args_str):
                         'use_certs' in config.options('SECURITY'):
             if config.getboolean('SECURITY', 'use_certs'):
                 secopts.update(dict(config.items("SECURITY")))
+                secopts.update(defaults)
         if 'KEYSTONE' in config.sections():
             ksopts.update(dict(config.items("KEYSTONE")))
+            ksopts.update(defaults)
+
         if 'QUOTA' in config.sections():
             for (k, v) in config.items("QUOTA"):
                 try:
@@ -139,7 +144,7 @@ def parse_args(args_str):
                     pass
         if 'CASSANDRA' in config.sections():
             cassandraopts.update(dict(config.items('CASSANDRA')))
-
+            cassandraopts.update(defaults)
     # Override with CLI options
     # Don't surpress add_help here so it will handle -h
     parser = argparse.ArgumentParser(
