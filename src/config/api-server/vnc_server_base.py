@@ -338,20 +338,25 @@ class VncApiServerBase(VncApiServer):
 
         prop_dict = obj_dict.get('input')
         prop_type = self.get_rpc_input_type(resource_type)
-        if prop_type:
-            buf = cStringIO.StringIO()
-            prop_cls = cfgm_common.utils.str_to_class(prop_type, __name__)
-            try:
-                tmp_prop = prop_cls(**prop_dict)
-                tmp_prop.export(buf)
-                node = etree.fromstring(buf.getvalue())
-                tmp_prop = prop_cls()
-                tmp_prop.build(node)
-            except Exception as e:
-                err_msg = 'Error validating property %s value %s ' \
-                          % (prop_type, prop_dict)
-                err_msg += str(e)
-                return False, err_msg
+        # if prop_type:
+        #     buf = cStringIO.StringIO()
+        #     prop_cls = cfgm_common.utils.str_to_class(prop_type, __name__)
+        #     try:
+        #         tmp_prop = prop_cls(**prop_dict)
+        #         tmp_prop.export(buf)
+        #         node = etree.fromstring(buf.getvalue())
+        #         tmp_prop = prop_cls()
+        #         tmp_prop.build(node)
+        #     except Exception as e:
+        #         err_msg = 'Error validating property %s value %s ' \
+        #                   % (prop_type, prop_dict)
+        #         err_msg += str(e)
+        #         return False, err_msg
+        # r_class = cfgm_common.utils.str_to_class(prop_type, __name__)
+        # ok, result = self._validate_complex_type(r_class, prop_dict)
+        # if not ok:
+        #    result = 'Bad property in create: ' + result
+        #    raise cfgm_common.exceptions.HttpError(400, result)
         env = request.headers.environ
         tenant_name = env.get(hdr_server_tenant(), 'default-project')
 
