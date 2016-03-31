@@ -263,7 +263,7 @@ class VncApiServer(object):
     def _validate_simple_type(cls, type_name, xsd_type, value, restrictions=None):
         if value is None:
             return
-        elif xsd_type in ('unsignedLong', 'integer', 'unsignedInt'):
+        elif xsd_type in ('unsignedLong', 'integer', 'unsignedInt', 'long', 'short'):
             if not isinstance(value, (int, long)):
                 raise ValueError('%s: integer value expected instead of %s' %(
                     type_name, value))
