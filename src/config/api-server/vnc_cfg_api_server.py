@@ -5,6 +5,7 @@
 This is the main module in vnc_cfg_api_server package. It manages interaction
 between http/rest, address management, authentication and database interfaces.
 """
+from decimal import Decimal, InvalidOperation
 
 from gevent import monkey
 monkey.patch_all()
@@ -264,7 +265,7 @@ class VncApiServer(object):
         if value is None:
             return
         elif xsd_type in ('unsignedLong', 'integer', 'unsignedInt', 'long', 'short',
-                'unsignedShort'):
+                          'unsignedShort', 'unsignedByte'):
             if not isinstance(value, (int, long)):
                 raise ValueError('%s: integer value expected instead of %s' %(
                     type_name, value))
@@ -276,10 +277,14 @@ class VncApiServer(object):
             if not isinstance(value, bool):
                 raise ValueError('%s: true/false expected instead of %s' %(
                     type_name, value))
-        elif xsd_type in ('unsignedByte'):
+        elif xsd_type in ('byte'):
             pass
         elif xsd_type == 'decimal':
-            pass
+            try:
+                Decimal(value)
+            except (TypeError, InvalidOperation):
+                raise ValueError('%s: decimal value expected instead of %s' %(
+                    type_name, value))
         else:
             if not isinstance(value, basestring):
                 raise ValueError('%s: string value expected instead of %s' %(
