@@ -244,3 +244,7 @@ class GeneratedsSuper(object):
     @staticmethod
     def populate_short(name):
         return 1
+
+    @staticmethod
+    def populate_byte(name):
+        return {'test': 1}
