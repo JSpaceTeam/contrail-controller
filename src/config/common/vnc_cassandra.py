@@ -420,6 +420,8 @@ class VncCassandraClient(object):
         if 'parent_type' in obj_dict:
             # non config-root child
             parent_type = obj_dict['parent_type']
+            if parent_type not in obj_class.parent_types:
+                return False, (400, 'Invalid parent type: %s' % parent_type)
             parent_method_type = parent_type.replace('-', '_')
             parent_fq_name = obj_dict['fq_name'][:-1]
             obj_cols['parent_type'] = json.dumps(parent_type)
@@ -552,7 +554,8 @@ class VncCassandraClient(object):
                         has_wrapper = \
                             obj_class.prop_map_field_has_wrappers[prop_name]
                     if has_wrapper:
-                        _, wrapper_type = obj_class.prop_field_types[prop_name]
+                        prop_field_types = obj_class.prop_field_types[prop_name]
+                        wrapper_type = prop_field_types['xsd_type']
                         wrapper_cls = self._get_xsd_class(wrapper_type)
                         wrapper_field = wrapper_cls.attr_fields[0]
                         if prop_name not in result:

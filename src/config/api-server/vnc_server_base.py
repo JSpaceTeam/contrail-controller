@@ -333,7 +333,7 @@ class VncApiServerBase(VncApiServer):
         try:
             obj_dict = request.json[_key]
         except KeyError:
-            bottle.abort(400, 'invalid request, key "%s" not found' % _key)
+            raise HttpError(400, 'invalid request, key "%s" not found' % _key)
         obj_dict = {_key: obj_dict}
 
         prop_dict = obj_dict.get('input')
@@ -359,7 +359,7 @@ class VncApiServerBase(VncApiServer):
                     fail_cleanup_callable(*cleanup_args)
                 (code, msg) = result
                 self.config_object_error(None, resource_type, '%s_execute' % (resource_type), 'http_post', msg)
-                bottle.abort(code, msg)
+                raise HttpError(code, msg)
         callable = getattr(r_class, 'http_post_collection_fail', None)
         if callable:
             cleanup_on_failure.append((callable, [tenant_name, obj_dict]))

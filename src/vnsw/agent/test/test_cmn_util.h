@@ -141,6 +141,7 @@ void VnAddReq(int id, const char *name);
 void VnAddReq(int id, const char *name, int acl_id);
 void VnAddReq(int id, const char *name, int acl_id, const char *vrf_name);
 void VnAddReq(int id, const char *name, const char *vrf_name);
+void VnVxlanAddReq(int id, const char *name, uint32_t vxlan_id);
 void VnDelReq(int id);
 void VrfAddReq(const char *name);
 void VrfDelReq(const char *name);
@@ -172,8 +173,11 @@ Inet4MulticastRouteEntry *MCRouteGet(const string &vrf_name, const string &grp_a
 BridgeRouteEntry *L2RouteGet(const string &vrf_name, const MacAddress &mac);
 BridgeRouteEntry *L2RouteGet(const string &vrf_name, const MacAddress &mac,
                              const IpAddress &ip_addr);
+const NextHop* L2RouteToNextHop(const string &vrf, const MacAddress &mac);
 EvpnRouteEntry *EvpnRouteGet(const string &vrf_name, const MacAddress &mac,
                              const IpAddress &ip_addr, uint32_t ethernet_tag);
+const NextHop* RouteToNextHop(const string &vrf_name, const Ip4Address &addr,
+                              int plen);
 bool TunnelNHFind(const Ip4Address &server_ip);
 bool TunnelNHFind(const Ip4Address &server_ip, bool policy, TunnelType::Type type);
 bool EcmpTunnelRouteAdd(const Peer *peer, const string &vrf_name, const Ip4Address &vm_ip,
@@ -377,6 +381,7 @@ void DelEncapList(Agent *agent);
 void VxLanNetworkIdentifierMode(bool config);
 void GlobalForwardingMode(std::string mode);
 int MplsToVrfId(int label);
+const NextHop* MplsToNextHop(uint32_t label);
 void AddInterfaceRouteTable(const char *name, int id, TestIp4Prefix *addr,
                            int count);
 void AddInterfaceRouteTable(const char *name, int id, TestIp4Prefix *addr,

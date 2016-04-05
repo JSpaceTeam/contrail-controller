@@ -173,11 +173,8 @@ class VncIfmapClient(object):
             # construct object of xsd-type and get its xml repr
             # e.g. virtual_network_properties
             prop_field_types = obj_class.prop_field_types[prop_field]
-            if isinstance(prop_field_types, dict):
-                is_simple = not prop_field_types['is_complex']
-                prop_type = prop_field_types['xsd_type']
-            else:
-                is_simple, prop_type = prop_field_types
+            is_simple = not prop_field_types['is_complex']
+            prop_type = prop_field_types['xsd_type']
             # e.g. virtual-network-properties
             prop_meta = obj_class.prop_field_metas[prop_field]
             if is_simple:
@@ -1674,10 +1671,25 @@ class VncDbClient(object):
                     updated = True
 
         if updated and do_update:
-            self._cassandra_db._cassandra_virtual_network_update(vn_uuid,
-                                                                 vn_dict)
+            self._cassandra_db.object_update('virtual_network', vn_uuid,
+                                             vn_dict)
 
     # end update_subnet_uuid
+
+    def update_bgp_router_type(self, obj_dict):
+        """ Sets router_type property based on the vendor property only
+        if router_type is not set.
+        """
+        router_params = obj_dict['bgp_router_parameters']
+        if not router_params['router_type']:
+            router_type = 'router'
+            if router_params['vendor'] == 'contrail':
+                router_type = 'control-node'
+            router_params.update({'router_type': router_type})
+            obj_dict.update({'bgp_router_parameters': router_params})
+            obj_uuid = obj_dict.get('uuid')
+            self._cassandra_db.object_update('bgp_router', obj_uuid, obj_dict)
+    # end update_bgp_router_type
 
     def _dbe_resync(self, obj_type, obj_uuids):
         obj_class = cfgm_common.utils.obj_type_to_vnc_class(obj_type, __name__)
@@ -1704,8 +1716,12 @@ class VncDbClient(object):
                     self._cassandra_db.update_perms2(obj_uuid)
 
                 if (obj_type == 'virtual_network' and
-                            'network_ipam_refs' in obj_dict):
+                        'network_ipam_refs' in obj_dict):
+
                     self.update_subnet_uuid(obj_dict, do_update=True)
+                if (obj_type == 'bgp_router' and
+                        'bgp_router_parameters' in obj_dict):
+                    self.update_bgp_router_type(obj_dict)
             except Exception as e:
                 self.config_object_error(
                     obj_dict.get('uuid'), None, obj_type,

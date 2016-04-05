@@ -265,10 +265,10 @@ class VncApiServer(object):
         if value is None:
             return
         elif xsd_type in ('unsignedLong', 'integer', 'unsignedInt', 'long', 'short',
-                          'unsignedShort', 'unsignedByte'):
+                          'unsignedShort', 'unsignedByte', 'int'):
             if not isinstance(value, (int, long)):
-                raise ValueError('%s: integer value expected instead of %s' %(
-                    type_name, value))
+                raise ValueError('%s: %s value expected instead of %s' %(
+                    type_name, xsd_type, value))
             if restrictions:
                 if not (int(restrictions[0]) <= value <= int(restrictions[1])):
                     raise ValueError('%s: value must be between %s and %s' %(
@@ -297,19 +297,23 @@ class VncApiServer(object):
     def _validate_props_in_request(self, resource_class, obj_dict):
         for prop_name in resource_class.prop_fields:
             prop_field_types = resource_class.prop_field_types[prop_name]
-            if isinstance(prop_field_types, dict):
-                is_simple = not prop_field_types['is_complex']
-                prop_type = prop_field_types['xsd_type']
-                restrictions = prop_field_types['restrictions']
-            else:
-                is_simple, prop_type = prop_field_types
-                restrictions = None
+            is_simple = not prop_field_types['is_complex']
+            prop_type = prop_field_types['xsd_type']
+            restrictions = prop_field_types['restrictions']
             is_list_prop = prop_name in resource_class.prop_list_fields
             is_map_prop = prop_name in resource_class.prop_map_fields
 
             # TODO validate primitive types
             if is_simple and (not is_list_prop) and (not is_map_prop):
                 continue
+                 #try:
+                 #    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name),
+                 #                           restrictions)
+                 #    continue
+                 #except Exception as e:
+                 #    err_msg = 'Error validating property' + str(e)
+                 #    return False, err_msg
+
             prop_value = obj_dict.get(prop_name)
             if not prop_value:
                 continue

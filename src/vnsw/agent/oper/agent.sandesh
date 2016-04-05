@@ -484,6 +484,16 @@ objectlog sandesh SgObjectLog {
 }
 
 /**
+ * @description: Trace log for security group object in vrouter-agent oper DB
+ * @type: Trace
+ * @severity: DEBUG
+ * @object: SgEntry
+ */
+traceobject sandesh SgObjectTrace {
+    1: SgObjectLogInfo sg;
+}
+
+/**
  * Request message for security group request
  */
 request sandesh SgListReq {
@@ -1611,12 +1621,12 @@ traceobject sandesh OperNextHop {
 }
 
 /**
- * @description: System log for agent route
+ * @description: Log for agent route
  * @type: systemlog
  * @severity: DEBUG
  * @cause: Normal operation
  */
-systemlog sandesh AgentRouteLog {
+trace sandesh AgentRouteLog {
     1: string message;
     2: string ip;
     3: "in VRF";
