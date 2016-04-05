@@ -553,8 +553,9 @@ class VncCassandraClient(object):
                         has_wrapper = \
                             obj_class.prop_map_field_has_wrappers[prop_name]
                     if has_wrapper:
-                        _, wrapper_type = obj_class.prop_field_types[prop_name]
-                        wrapper_cls = self._get_xsd_class(wrapper_type)
+                        prop_field_types = obj_class.prop_field_types[prop_name]
+			wrapper_type = prop_field_types['xsd_type']
+			wrapper_cls = self._get_xsd_class(wrapper_type)
                         wrapper_field = wrapper_cls.attr_fields[0]
                         if prop_name not in result:
                             result[prop_name] = {wrapper_field: []}

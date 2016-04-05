@@ -43,7 +43,7 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
 
         httpretty.enable()
         httpretty.register_uri(httpretty.GET, "http://127.0.0.1:8082/",
-            body=json.dumps({'href': "http://127.0.0.1:8082", 'links':[]}))
+            body=json.dumps({'uri': "/", 'links':[]}))
 
         self._logger = logging.getLogger(__name__)
         logging.basicConfig()

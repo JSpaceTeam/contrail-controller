@@ -541,12 +541,10 @@ class VncApiServer(object):
         rsp_body['name'] = name
         rsp_body['fq_name'] = fq_name
         rsp_body['uuid'] = obj_ids['uuid']
-        rsp_body['href'] = self.generate_url(resource_type, obj_ids['uuid'])
         rsp_body['uri'] = self.generate_uri(resource_type, obj_ids['uuid'])
         if 'parent_type' in obj_dict:
             # non config-root child, send back parent uuid/href
             rsp_body['parent_uuid'] = parent_uuid
-            rsp_body['parent_href'] = self.generate_url(parent_type, parent_uuid)
             rsp_body['parent_uri'] = self.generate_uri(parent_type, parent_uuid)
 
         try:
@@ -649,7 +647,6 @@ class VncApiServer(object):
 
         rsp_body = {}
         rsp_body['uuid'] = id
-        rsp_body['href'] = self.generate_url(resource_type, id)
         rsp_body['uri'] = self.generate_uri(resource_type, id)
         rsp_body['name'] = result['fq_name'][-1]
         rsp_body.update(result)
@@ -781,7 +778,6 @@ class VncApiServer(object):
 
         rsp_body = {}
         rsp_body['uuid'] = id
-        rsp_body['href'] = self.generate_url(resource_type, id)
         rsp_body['uri'] = self.generate_uri(resource_type, id)
 
         try:
@@ -893,7 +889,7 @@ class VncApiServer(object):
             for child in read_result.get(child_field, []):
                 if child['to'][-1] == default_child_name:
                     continue
-                exist_hrefs.append(child['href'])
+                exist_hrefs.append(child['uri'])
             if exist_hrefs:
                 err_msg = 'Delete when children still present: %s' %(
                     exist_hrefs)
@@ -906,7 +902,7 @@ class VncApiServer(object):
             _, _, is_derived = r_class.backref_field_types[backref_field]
             if is_derived:
                 continue
-            exist_hrefs = [backref['href']
+            exist_hrefs = [backref['uri']
                            for backref in read_result.get(backref_field, [])
                                if backref['uuid'] not in relaxed_refs]
             if exist_hrefs:
@@ -1200,7 +1196,7 @@ class VncApiServer(object):
             child_infos = parent_dict.get(child_field, [])
             for child_info in child_infos:
                 if child_info['to'][-1] == default_child_name:
-                    default_child_id = child_info['href'].split('/')[-1]
+                    default_child_id = child_info['uri'].split('/')[-1]
                     del_method = getattr(self, '%s_http_delete' %(child_type))
                     del_method(default_child_id)
                     break
@@ -2824,8 +2820,6 @@ class VncApiServer(object):
                     if obj_result['id_perms'].get('user_visible', True):
                         obj_dict = {}
                         obj_dict['uuid'] = obj_result['uuid']
-                        obj_dict['href'] = self.generate_url(resource_type,
-                                                         obj_result['uuid'])
                         obj_dict['uri'] = self.generate_uri(resource_type,
                                                          obj_result['uuid'])
                         obj_dict['fq_name'] = obj_result['fq_name']
@@ -2848,8 +2842,6 @@ class VncApiServer(object):
                 for fq_name, obj_uuid in fq_names_uuids:
                     obj_dict = {}
                     obj_dict['uuid'] = obj_uuid
-                    obj_dict['href'] = self.generate_url(resource_type,
-                                                         obj_uuid)
                     obj_dict['uri'] = self.generate_uri(resource_type,
                                                          obj_uuid)
                     obj_dict['fq_name'] = fq_name
@@ -2877,8 +2869,6 @@ class VncApiServer(object):
             for obj_result in result:
                 obj_dict = {}
                 obj_dict['name'] = obj_result['fq_name'][-1]
-                obj_dict['href'] = self.generate_url(
-                                        resource_type, obj_result['uuid'])
                 obj_dict['uri'] = self.generate_uri(
                                         resource_type, obj_result['uuid'])
                 obj_dict.update(obj_result)

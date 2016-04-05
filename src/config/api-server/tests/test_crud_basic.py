@@ -1264,7 +1264,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             # locate created object, should only be one, expect exact fields
             obj_dict = [d for d in read_vn_dicts if d['uuid'] == obj.uuid]
             self.assertThat(len(obj_dict), Equals(1))
-            self.assertThat(set(['fq_name', 'uuid', 'href']),
+            self.assertThat(set(['fq_name', 'uuid', 'uri']),
                             Equals(set(obj_dict[0].keys())))
 
         # unanchored summary list with field filters, with extra fields
@@ -1274,7 +1274,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         vn_dicts = resp['virtual-network']
         self.assertThat(len(vn_dicts), Equals(1))
         self.assertThat(vn_dicts[0]['uuid'], Equals(vn_objs[2].uuid))
-        self.assertThat(set(['fq_name', 'uuid', 'href', 'is_shared']),
+        self.assertThat(set(['fq_name', 'uuid', 'uri', 'is_shared']),
                         Equals(set(vn_dicts[0].keys())))
 
         # unanchored detailed list without filters
@@ -1305,7 +1305,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             # locate created object, should only be one, expect exact fields
             obj_dict = [d for d in read_vn_dicts if d['uuid'] == obj.uuid]
             self.assertThat(len(obj_dict), Equals(1))
-            self.assertThat(set(['fq_name', 'uuid', 'href', 'router_external']),
+            self.assertThat(set(['fq_name', 'uuid', 'uri', 'router_external']),
                             Equals(set(obj_dict[0].keys())))
             self.assertThat(obj_dict[0]['fq_name'][:-1],
                 Equals(proj_obj.fq_name))
@@ -1321,7 +1321,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             # locate created object, should only be one, expect exact fields
             obj_dict = [d for d in read_vn_dicts if d['uuid'] == obj.uuid]
             self.assertThat(len(obj_dict), Equals(1))
-            self.assertThat(set(['fq_name', 'uuid', 'href']),
+            self.assertThat(set(['fq_name', 'uuid', 'uri']),
                             Equals(set(obj_dict[0].keys())))
             self.assertThat(obj_dict[0]['fq_name'][:-1],
                 Equals(proj_obj.fq_name))
@@ -1357,7 +1357,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             obj_dict = [d for d in read_vn_dicts if d['uuid'] == obj.uuid]
             self.assertThat(len(obj_dict), Equals(1))
             self.assertEqual(obj_dict[0]['fq_name'], obj.get_fq_name())
-            self.assertThat(set(['fq_name', 'uuid', 'href']),
+            self.assertThat(set(['fq_name', 'uuid', 'uri']),
                             Equals(set(obj_dict[0].keys())))
 
         # backref anchored summary list with filters, with extra fields
