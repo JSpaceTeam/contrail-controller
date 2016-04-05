@@ -265,10 +265,10 @@ class VncApiServer(object):
         if value is None:
             return
         elif xsd_type in ('unsignedLong', 'integer', 'unsignedInt', 'long', 'short',
-                          'unsignedShort', 'unsignedByte'):
+                          'unsignedShort', 'unsignedByte', 'int'):
             if not isinstance(value, (int, long)):
-                raise ValueError('%s: integer value expected instead of %s' %(
-                    type_name, value))
+                raise ValueError('%s: %s value expected instead of %s' %(
+                    type_name, xsd_type, value))
             if restrictions:
                 if not (int(restrictions[0]) <= value <= int(restrictions[1])):
                     raise ValueError('%s: value must be between %s and %s' %(
@@ -306,6 +306,14 @@ class VncApiServer(object):
             # TODO validate primitive types
             if is_simple and (not is_list_prop) and (not is_map_prop):
                 continue
+                 #try:
+                 #    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name),
+                 #                           restrictions)
+                 #    continue
+                 #except Exception as e:
+                 #    err_msg = 'Error validating property' + str(e)
+                 #    return False, err_msg
+
             prop_value = obj_dict.get(prop_name)
             if not prop_value:
                 continue
