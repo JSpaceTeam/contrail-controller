@@ -56,7 +56,10 @@ using process::ConnectionType;
 using process::ConnectionStatus;
 
 uint32_t DbHandler::field_cache_t2_ = 0;
-std::set<std::string> DbHandler::field_cache_set_;
+std::set<std::string> DbHandler::field_cache_set_[2];
+uint32_t DbHandler::field_cache_old_t2_ = 0;
+uint8_t DbHandler::old_t2_index_ = 0;
+uint8_t DbHandler::new_t2_index_ = 1;
 tbb::mutex DbHandler::fmutex_;
 
 DbHandler::DbHandler(EventManager *evm,
@@ -658,29 +661,30 @@ void DbHandler::MessageTableInsert(const VizMsg *vmsgp) {
             message_type, vmsgp->unm, "");
 
     const SandeshType::type &stype(header.get_Type());
-    std::string s;
 
-    if (stype == SandeshType::SYSTEM) {
+    LineParser::WordListType words;
+    if (stype == SandeshType::SYSTEM || stype == SandeshType::UVE ||
+            stype == SandeshType::OBJECT) {
         const SandeshXMLMessage *sxmsg =
             static_cast<const SandeshXMLMessage *>(vmsgp->msg);
-        const pugi::xml_node &parent(sxmsg->GetMessageNode());
-        s = LineParser::GetXmlString(parent);
+        if (!LineParser::ParseXML(sxmsg->GetMessageNode(), &words, false))
+            DB_LOG(ERROR, "Failed to parse xml");
     } else if (!vmsgp->keyword_doc_.empty()) {
+        std::string s;
         s = std::string(vmsgp->keyword_doc_);
-    }
-    if (!s.empty()) {
-        LineParser::WordListType words = LineParser::ParseDoc(s.begin(),
-                s.end());
-        LineParser::RemoveStopWords(&words);
-        for (LineParser::WordListType::iterator i = words.begin();
-                i != words.end(); i++) {
-            // tableinsert@{(t2,*i), (t1,header.get_Source())} -> vmsgp->unm
-            bool r = MessageIndexTableInsert(
-                    g_viz_constants.MESSAGE_TABLE_KEYWORD, header,
-                    message_type, vmsgp->unm, *i);
-            if (!r)
-                DB_LOG(ERROR, "Failed to parse:" << s);
+        if (!s.empty()) {
+            if (!LineParser::Parse(s, &words))
+                DB_LOG(ERROR, "Failed to parse text");
         }
+    }
+    for (LineParser::WordListType::iterator i = words.begin();
+            i != words.end(); i++) {
+        // tableinsert@{(t2,*i), (t1,header.get_Source())} -> vmsgp->unm
+        bool r = MessageIndexTableInsert(
+                g_viz_constants.MESSAGE_TABLE_KEYWORD, header,
+                message_type, vmsgp->unm, *i);
+        if (!r)
+            DB_LOG(ERROR, "Failed to insert keyword: " << *i);
     }
 
     /*
@@ -720,7 +724,8 @@ void DbHandler::FieldNamesTableInsert(uint64_t timestamp,
     std::string table_name(table_prefix);
     table_name.append(field_name);
 
-    /* Check if fieldname and value were already seen in this T2
+    /* Check if fieldname and value were already seen in this T2;
+       2 caches are mainted one for  last T2 and T2-1.
        We only need to record them if they have NOT been seen yet */
     bool record = false;
     std::string fc_entry(table_name);
@@ -728,19 +733,7 @@ void DbHandler::FieldNamesTableInsert(uint64_t timestamp,
     fc_entry.append(field_val);
     {
         tbb::mutex::scoped_lock lock(fmutex_);
-        if (temp_u32 > field_cache_t2_) {
-            field_cache_set_.clear();
-            field_cache_t2_ = temp_u32;
-        }
-        if (temp_u32 == field_cache_t2_) {
-            if (field_cache_set_.find(fc_entry) == field_cache_set_.end()) {
-                field_cache_set_.insert(fc_entry);
-                record = true;
-            }
-        } else {
-            /* This is an old time-stamp */
-            record = true;
-        }
+        record = CanRecordDataForT2(temp_u32, fc_entry);
     }
 
     if (!record) return;
@@ -767,6 +760,41 @@ void DbHandler::FieldNamesTableInsert(uint64_t timestamp,
 
 }
 
+/*
+ * This function checks if the data can be recorded or not
+ * for the given t2. If t2 corresponding to the data is
+ * older than field_cache_old_t2_ and field_cache_t2_
+ * it is ignored
+ */
+bool DbHandler::CanRecordDataForT2(uint32_t temp_u32, std::string fc_entry) {
+    bool record = false;
+    if (temp_u32 > field_cache_t2_) {
+            // swap old and new index; clear the old cache
+            old_t2_index_ = new_t2_index_;
+            new_t2_index_ = (new_t2_index_ == 1)?0:1;
+            field_cache_old_t2_ = field_cache_t2_;
+            field_cache_set_[new_t2_index_].clear();
+            field_cache_t2_ = temp_u32;
+        } else if (temp_u32 > field_cache_old_t2_ && temp_u32 != field_cache_t2_){
+            field_cache_set_[old_t2_index_].clear();
+            field_cache_old_t2_ = temp_u32;
+        }
+        // Record only if not found in last or last but one T2 cache.
+        if (temp_u32 == field_cache_t2_) {
+            if (field_cache_set_[new_t2_index_].find(fc_entry) ==
+                field_cache_set_[new_t2_index_].end()) {
+                field_cache_set_[new_t2_index_].insert(fc_entry);
+                record = true;
+            }
+        } else if (temp_u32 == field_cache_old_t2_) {
+            if (field_cache_set_[old_t2_index_].find(fc_entry) ==
+                    field_cache_set_[old_t2_index_].end()) {
+                field_cache_set_[old_t2_index_].insert(fc_entry);
+                record = true;
+            }
+        }
+        return record;
+}
 void DbHandler::GetRuleMap(RuleMap& rulemap) {
 }
 
