@@ -682,9 +682,8 @@ class VncApi(object):
 
     def _parse_homepage(self, json_body):
         py_obj = json.loads(json_body)
-        srv_root_uri = py_obj['uri']
+        srv_root_uri = py_obj.get('uri',"/")
         self._srv_root_uri = srv_root_uri
-
         for link in py_obj['links']:
             # strip base from *_url to get *_uri
             uri = link['link']['uri']
