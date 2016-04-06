@@ -305,14 +305,13 @@ class VncApiServer(object):
 
             # TODO validate primitive types
             if is_simple and (not is_list_prop) and (not is_map_prop):
-                continue
-                 #try:
-                 #    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name),
-                 #                           restrictions)
-                 #    continue
-                 #except Exception as e:
-                 #    err_msg = 'Error validating property' + str(e)
-                 #    return False, err_msg
+                #continue
+                try:
+                    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name), restrictions)
+                    continue
+                except Exception as e:
+                    err_msg = 'Error validating property' + str(e)
+                    return False, err_msg
 
             prop_value = obj_dict.get(prop_name)
             if not prop_value:
@@ -420,7 +419,7 @@ class VncApiServer(object):
         if not ok:
             result = 'Bad reference in create: ' + result
             raise cfgm_common.exceptions.HttpError(400, result)
-        
+
         # parent check
         if r_class.parent_types and 'parent_type' not in obj_dict:
             raise cfgm_common.exceptions.HttpError(400, 'No parent_type attribute')
@@ -543,10 +542,12 @@ class VncApiServer(object):
         rsp_body['fq_name'] = fq_name
         rsp_body['uuid'] = obj_ids['uuid']
         rsp_body['href'] = self.generate_url(resource_type, obj_ids['uuid'])
+        rsp_body['uri'] = self.generate_uri(resource_type, obj_ids['uuid'])
         if 'parent_type' in obj_dict:
             # non config-root child, send back parent uuid/href
             rsp_body['parent_uuid'] = parent_uuid
             rsp_body['parent_href'] = self.generate_url(parent_type, parent_uuid)
+            rsp_body['parent_uri'] = self.generate_uri(parent_type, parent_uuid)
 
         try:
             self._extension_mgrs['resourceApi'].map_method(
@@ -649,6 +650,7 @@ class VncApiServer(object):
         rsp_body = {}
         rsp_body['uuid'] = id
         rsp_body['href'] = self.generate_url(resource_type, id)
+        rsp_body['uri'] = self.generate_uri(resource_type, id)
         rsp_body['name'] = result['fq_name'][-1]
         rsp_body.update(result)
         id_perms = result['id_perms']
@@ -780,6 +782,7 @@ class VncApiServer(object):
         rsp_body = {}
         rsp_body['uuid'] = id
         rsp_body['href'] = self.generate_url(resource_type, id)
+        rsp_body['uri'] = self.generate_uri(resource_type, id)
 
         try:
             self._extension_mgrs['resourceApi'].map_method(
@@ -1776,9 +1779,8 @@ class VncApiServer(object):
             json_links.append(
                 {'link': link.to_dict(with_url=url)}
             )
-
-        json_body = {"href": url, "links": json_links}
-
+        json_body = {"uri": SERVICE_PATH, "links": json_links}
+        #json_body = {"url": SERVICE_PATH, "links": json_links}
         return json_body
     # end homepage_http_get
 
@@ -2824,6 +2826,8 @@ class VncApiServer(object):
                         obj_dict['uuid'] = obj_result['uuid']
                         obj_dict['href'] = self.generate_url(resource_type,
                                                          obj_result['uuid'])
+                        obj_dict['uri'] = self.generate_uri(resource_type,
+                                                         obj_result['uuid'])
                         obj_dict['fq_name'] = obj_result['fq_name']
                         for field in req_fields:
                             try:
@@ -2845,6 +2849,8 @@ class VncApiServer(object):
                     obj_dict = {}
                     obj_dict['uuid'] = obj_uuid
                     obj_dict['href'] = self.generate_url(resource_type,
+                                                         obj_uuid)
+                    obj_dict['uri'] = self.generate_uri(resource_type,
                                                          obj_uuid)
                     obj_dict['fq_name'] = fq_name
                     for field in req_fields or []:
@@ -2873,6 +2879,8 @@ class VncApiServer(object):
                 obj_dict['name'] = obj_result['fq_name'][-1]
                 obj_dict['href'] = self.generate_url(
                                         resource_type, obj_result['uuid'])
+                obj_dict['uri'] = self.generate_uri(
+                                        resource_type, obj_result['uuid'])
                 obj_dict.update(obj_result)
                 if 'id_perms' not in obj_dict:
                     # It is possible that the object was deleted, but received
@@ -2889,6 +2897,11 @@ class VncApiServer(object):
     def get_db_connection(self):
         return self._db_conn
     # end get_db_connection
+
+    def generate_uri(self,obj_type, obj_uuid):
+        obj_uri_type = '/' + obj_type.replace('_', '-')
+        return '%s%s/%s' % (SERVICE_PATH, obj_uri_type, obj_uuid)
+
 
     def generate_url(self, obj_type, obj_uuid):
         obj_uri_type = '/' + obj_type.replace('_', '-')
