@@ -777,7 +777,7 @@ class VncServerCassandraClient(VncCassandraClient):
             (self._USERAGENT_KV_CF_NAME, None)]
         super(VncServerCassandraClient, self).__init__(
             cass_srv_list, db_prefix, keyspaces, None, self.config_log,
-            generate_url=db_client_mgr.generate_url,
+            generate_url=db_client_mgr.generate_uri,
             reset_config=reset_config, credential=cassandra_credential)
         self._useragent_kv_cf = self._cf_dict[self._USERAGENT_KV_CF_NAME]
 
@@ -2293,8 +2293,8 @@ class VncDbClient(object):
         return self._api_svr_mgr._get_default_perms2(obj_type)
 
     # Helper routines for REST
-    def generate_url(self, obj_type, obj_uuid):
-        return self._api_svr_mgr.generate_url(obj_type, obj_uuid)
+    def generate_uri(self, obj_type, obj_uuid):
+        return self._api_svr_mgr.generate_uri(obj_type, obj_uuid)
 
     # end generate_url
 

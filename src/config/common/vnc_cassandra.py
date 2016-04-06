@@ -420,8 +420,6 @@ class VncCassandraClient(object):
         if 'parent_type' in obj_dict:
             # non config-root child
             parent_type = obj_dict['parent_type']
-            if parent_type not in obj_class.parent_types:
-                return False, (400, 'Invalid parent type: %s' % parent_type)
             parent_method_type = parent_type.replace('-', '_')
             parent_fq_name = obj_dict['fq_name'][:-1]
             obj_cols['parent_type'] = json.dumps(parent_type)
@@ -534,7 +532,8 @@ class VncCassandraClient(object):
                     result['parent_type'] = parent_type
                     try:
                         result['parent_uuid'] = parent_uuid
-                        result['parent_href'] = self._generate_url(parent_type,
+
+                        result['parent_uri'] = self._generate_url(parent_type,
                                                                    parent_uuid)
                     except NoIdError:
                         err_msg = 'Unknown uuid for parent ' + result['fq_name'][-2]
@@ -554,8 +553,7 @@ class VncCassandraClient(object):
                         has_wrapper = \
                             obj_class.prop_map_field_has_wrappers[prop_name]
                     if has_wrapper:
-                        prop_field_types = obj_class.prop_field_types[prop_name]
-                        wrapper_type = prop_field_types['xsd_type']
+                        _, wrapper_type = obj_class.prop_field_types[prop_name]
                         wrapper_cls = self._get_xsd_class(wrapper_type)
                         wrapper_field = wrapper_cls.attr_fields[0]
                         if prop_name not in result:
@@ -1172,7 +1170,7 @@ class VncCassandraClient(object):
 
         child_info = {}
         child_info['to'] = self.uuid_to_fq_name(child_uuid)
-        child_info['href'] = self._generate_url(child_type, child_uuid)
+        child_info['uri'] = self._generate_url(child_type, child_uuid)
         child_info['uuid'] = child_uuid
         child_info['tstamp'] = child_tstamp
 
@@ -1197,7 +1195,7 @@ class VncCassandraClient(object):
                 # TODO remove backward compat old format had attr directly
                 ref_info['attr'] = ref_data
 
-        ref_info['href'] = self._generate_url(ref_type, ref_uuid)
+        ref_info['uri'] = self._generate_url(ref_type, ref_uuid)
         ref_info['uuid'] = ref_uuid
 
         result['%s_refs' % (ref_type)].append(ref_info)
@@ -1218,7 +1216,7 @@ class VncCassandraClient(object):
                 # TODO remove backward compat old format had attr directly
                 back_ref_info['attr'] = back_ref_data
 
-        back_ref_info['href'] = self._generate_url(back_ref_type, back_ref_uuid)
+        back_ref_info['uri'] = self._generate_url(back_ref_type, back_ref_uuid)
         back_ref_info['uuid'] = back_ref_uuid
 
         result['%s_back_refs' % (back_ref_type)].append(back_ref_info)
