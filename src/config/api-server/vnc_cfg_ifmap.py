@@ -1537,7 +1537,7 @@ class VncDbClient(object):
             self._ifmap_db._publish_to_ifmap_enqueue('publish_discovery', 1)
             self.config_log("Cassandra DB walk completed.",
                             level=SandeshLevel.SYS_INFO)
-        self._update_default_quota()
+            self._update_default_quota()
 
         self._db_resync_done.set()
 
