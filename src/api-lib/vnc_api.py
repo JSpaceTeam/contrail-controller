@@ -35,7 +35,7 @@ DESC = 'desc'
 def check_homepage(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
-        if not self._srv_root_url:
+        if not self._srv_root_uri:
             homepage = self._request(rest.OP_GET, self._base_url,
                                     retry_on_error=False)
             self._parse_homepage(homepage)
@@ -296,7 +296,7 @@ class VncApi(object):
             self._base_url = api_server_url
 
         # Where server says its root is when _base_url is fetched
-        self._srv_root_url = None
+        self._srv_root_uri = None
 
         # Type-independent actions offered by server
         self._action_uri = ActionUriDict(self)
@@ -682,13 +682,12 @@ class VncApi(object):
 
     def _parse_homepage(self, json_body):
         py_obj = json.loads(json_body)
-
-        srv_root_url = py_obj['href']
-        self._srv_root_url = srv_root_url
+        srv_root_uri = py_obj['uri']
+        self._srv_root_uri = srv_root_uri
 
         for link in py_obj['links']:
             # strip base from *_url to get *_uri
-            uri = link['link']['href'].replace(srv_root_url, '')
+            uri = link['link']['uri']
             if link['link']['rel'] == 'collection':
                 cls = utils.obj_type_to_vnc_class(link['link']['name'], __name__)
                 if not cls:
@@ -744,7 +743,7 @@ class VncApi(object):
 
     def _request_server(self, op, url, data=None, retry_on_error=True,
                         retry_after_authn=False, retry_count=30):
-        if not self._srv_root_url:
+        if not self._srv_root_uri:
             raise ConnectionError("Unable to retrive the api server root url.")
 
         return self._request(op, url, data=data, retry_on_error=retry_on_error,
