@@ -2,6 +2,7 @@ from gevent import monkey
 
 monkey.patch_all()
 import abc
+
 """
 Overriding the base api_stats logger to do nothing
 """
@@ -27,6 +28,7 @@ from cfgm_common.vnc_extensions import ExtensionManager, ApiHookManager
 from pysandesh.sandesh_base_logger import SandeshBaseLogger
 from csp_services_common import cfg
 from gen.vnc_api_client_gen import *
+
 # Parse config for olso configs. Try to move all config parsing to oslo cfg
 elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
 cfg.CONF.register_cli_opt(cfg.BoolOpt(name='search_enabled', default=False),
@@ -47,7 +49,6 @@ cfg.CONF.register_cli_opt(
     cfg.StrOpt(name='search_client', default=None, help="VncDBSearch client implementation"),
     group=elastic_search_group)
 
-
 RBAC_RULE = 'rbac_rule'
 MULTI_TENANCY = 'multi_tenancy'
 
@@ -65,6 +66,15 @@ class Policy(object):
     def get_multi_tenancy_rule(self):
         return self.policy_json.get(MULTI_TENANCY)
 
+system_resource_types = set([
+    'config-root',
+    'domain',
+    'global-system-config',
+    'namespace',
+    'api-access-list',
+    'project',
+    'access-control-list',
+    ])
 
 class VncApiServerBase(VncApiServer):
     __metaclass__ = abc.ABCMeta
@@ -93,6 +103,8 @@ class VncApiServerBase(VncApiServer):
             r_class = type(r_class_name,
                            (vnc_cfg_base_type.Resource, common_class, object), {})
             self.set_resource_class(resource_type, r_class)
+            if resource_type not in system_resource_types:
+                r_class.generate_default_instance = self.generate_default_instance_internal(resource_type)
 
         for rpc_input in all_rpc_input_types:
             camel_name = cfgm_common.utils.CamelCase(rpc_input)
@@ -151,7 +163,6 @@ class VncApiServerBase(VncApiServer):
 
         self.get_resource_class('api-access-list').generate_default_instance = False
 
-
         for act_res in _ACTION_RESOURCES:
             uri = act_res['uri']
             if SERVICE_PATH:
@@ -189,7 +200,6 @@ class VncApiServerBase(VncApiServer):
         self.__load_middleware()
         self._auth_svc = auth_svc
 
-
         # DB interface initialization
         if self._args.wipe_config:
             self._db_connect(True)
@@ -213,9 +223,9 @@ class VncApiServerBase(VncApiServer):
                 self._update_multi_tenancy_rule(policy.get_multi_tenancy_rule())
 
         @bottle.hook('before_request')
-        def strip_path(): # pylint: disable=W0612
-            bottle.request.environ['PATH_INFO'] = bottle.request.\
-                    environ['PATH_INFO'].rstrip('/')
+        def strip_path():  # pylint: disable=W0612
+            bottle.request.environ['PATH_INFO'] = bottle.request. \
+                environ['PATH_INFO'].rstrip('/')
 
         # Start logger port
         try:
@@ -224,7 +234,18 @@ class VncApiServerBase(VncApiServer):
         except Exception:
             logging.error("Failed starting up logger config socket")
 
+    # end __init__
 
+    def generate_default_instance_internal(self, resource_type):
+        """
+        Validate if a resource type needs to have default instance
+        Args:
+            resource_type:
+
+        Returns:
+
+        """
+        return False
 
     @classmethod
     def _generate_rpc_uri(cls, obj):
@@ -276,7 +297,7 @@ class VncApiServerBase(VncApiServer):
 
     # end _update_multi_tenancy_rule
 
-    #Override trace since we are using logger middleware
+    # Override trace since we are using logger middleware
     def _generate_rest_api_request_trace(self):
         return None
 
@@ -303,22 +324,22 @@ class VncApiServerBase(VncApiServer):
     def _generate_search_uri(cls, obj):
         for resource_type in all_resource_types:
             obj_type = resource_type.replace('-', '_')
-            obj.route('%s/%s/_filter'%(SERVICE_PATH, resource_type),
+            obj.route('%s/%s/_filter' % (SERVICE_PATH, resource_type),
                       'POST',
                       getattr(obj, '%s_http_post_filter' % obj_type))
-            obj.route('%s/%s/_search'%(SERVICE_PATH, resource_type),
+            obj.route('%s/%s/_search' % (SERVICE_PATH, resource_type),
                       'POST',
                       getattr(obj, '%s_http_post_search' % obj_type))
             obj.route('%s/%s/_index' % (SERVICE_PATH, resource_type),
                       'POST',
                       getattr(obj, '%s_http_post_index' % obj_type))
-        #Module level routes for search
-        obj.route('%s/_search'%(SERVICE_PATH),
-                      'POST',
-                      obj.search_execute)
-        obj.route('%s/_suggest'%(SERVICE_PATH),
-                      'POST',
-                      obj.suggest_execute)
+        # Module level routes for search
+        obj.route('%s/_search' % (SERVICE_PATH),
+                  'POST',
+                  obj.search_execute)
+        obj.route('%s/_suggest' % (SERVICE_PATH),
+                  'POST',
+                  obj.suggest_execute)
 
     @abc.abstractmethod
     def get_pipeline(self):
@@ -342,8 +363,8 @@ class VncApiServerBase(VncApiServer):
         try:
             self._validate_complex_type(r_class, prop_dict)
         except Exception as e:
-           err_msg = str(e.message)
-           raise cfgm_common.exceptions.HttpError(400, err_msg)
+            err_msg = str(e.message)
+            raise cfgm_common.exceptions.HttpError(400, err_msg)
 
         env = request.headers.environ
         tenant_name = env.get(hdr_server_tenant(), 'default-project')
@@ -367,7 +388,7 @@ class VncApiServerBase(VncApiServer):
         # call RPC implementation
         ok = True
         try:
-            method_name = resource_type.replace('-','_')
+            method_name = resource_type.replace('-', '_')
             rsp_body = self._extension_mgrs['rpcApi'].map_method('%s_execute' % method_name, obj_dict)
         except KeyError as e:
             ok = False
@@ -387,6 +408,7 @@ class VncApiServerBase(VncApiServer):
             raise result
 
         return rsp_body
+
     # end http_rpc_post
 
     def _http_post_search(self, resource_type):
@@ -397,17 +419,19 @@ class VncApiServerBase(VncApiServer):
             raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
         result = db_conn.search(resource_type, body)
         return result
-    #end _http_post_search
+
+    # end _http_post_search
 
     def suggest_execute(self):
         db_conn = self._db_conn
         if request.json is not None:
             body = request.json
         else:
-           raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
+            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
         result = db_conn.suggest(body)
         return result
-    #end suggest_execute
+
+    # end suggest_execute
 
     def search_execute(self):
         db_conn = self._db_conn
@@ -417,7 +441,8 @@ class VncApiServerBase(VncApiServer):
             raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
         result = db_conn.search(None, body)
         return result
-    #end search_execute
+
+    # end search_execute
 
     def http_resource_index(self, resource_type):
         obj_type = resource_type.replace('-', '_')
@@ -428,7 +453,7 @@ class VncApiServerBase(VncApiServer):
         back_ref_uuids = None
         obj_uuids = None
         if (('parent_fq_name_str' in get_request().query) and
-            ('parent_type' in get_request().query)):
+                ('parent_type' in get_request().query)):
             parent_fq_name = get_request().query.parent_fq_name_str.split(':')
             parent_type = get_request().query.parent_type
             parent_uuids = [self._db_conn.fq_name_to_uuid(parent_type, parent_fq_name)]
@@ -446,35 +471,32 @@ class VncApiServerBase(VncApiServer):
         else:
             req_fields = []
         (ok, result, total) = self._db_conn.dbe_only_list(obj_type,
-                             parent_uuids, back_ref_uuids, obj_uuids,count=False,
-                             filters=None)
+                                                          parent_uuids, back_ref_uuids, obj_uuids, count=False,
+                                                          filters=None)
         if not ok:
-            self.config_object_error(None, None, '%ss' %(obj_type),
+            self.config_object_error(None, None, '%ss' % (obj_type),
                                      'dbe_list', result)
             raise cfgm_common.exceptions.HttpError(404, result)
         obj_ids_list = [{'uuid': obj_uuid}
-                            for _, obj_uuid in result]
+                        for _, obj_uuid in result]
 
         obj_class = self.get_resource_class(obj_type)
         obj_fields = list(obj_class.prop_fields)
         if req_fields:
             obj_fields.extend(req_fields)
         (ok, result) = self._db_conn.dbe_read_multi(
-                                obj_type, obj_ids_list, obj_fields)
+            obj_type, obj_ids_list, obj_fields)
 
         if not ok:
-                raise cfgm_common.exceptions.HttpError(404, result)
+            raise cfgm_common.exceptions.HttpError(404, result)
         for obj_result in result:
-                obj_dict = {}
-                obj_dict['name'] = obj_result['fq_name'][-1]
-                obj_dict.update(obj_result)
-                obj_ids = {'uuid': obj_dict['uuid']}
-                self._db_conn.dbe_search_update(obj_type, obj_ids, obj_dict)
-                gevent.sleep(0)
+            obj_dict = {}
+            obj_dict['name'] = obj_result['fq_name'][-1]
+            obj_dict.update(obj_result)
+            obj_ids = {'uuid': obj_dict['uuid']}
+            self._db_conn.dbe_search_update(obj_type, obj_ids, obj_dict)
+            gevent.sleep(0)
         return bottle.HTTPResponse(status=200)
-
-
-
 
     def config_log(self, err_str, level=SandeshLevel.SYS_INFO):
         logging.log(SandeshBaseLogger.get_py_logger_level(level), err_str)
@@ -499,10 +521,6 @@ class VncApiServerBase(VncApiServer):
             for k, v in middlewares.iteritems():
                 self.__add_middleware(k, v)
 
-
-
-
-
     def _load_extensions(self):
         try:
             conf_sections = self._args.config_sections
@@ -522,8 +540,8 @@ class VncApiServerBase(VncApiServer):
                 conf_sections=conf_sections, sandesh=self._sandesh, propagate_map_exceptions=True)
         except Exception as e:
             err_msg = cfgm_common.utils.detailed_traceback()
-            self.config_log("Exception in extension load: %s" %(err_msg),
-                level=SandeshLevel.SYS_ERR)
+            self.config_log("Exception in extension load: %s" % (err_msg),
+                            level=SandeshLevel.SYS_ERR)
 
     # end _load_extensions
 
