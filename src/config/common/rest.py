@@ -30,12 +30,8 @@ class LinkObject(object):
     # end __init__
 
     def to_dict(self, with_url=None):
-        if not with_url:
-            url = self.base_url
-        else:
-            url = with_url
         return {'rel': self.rel,
-                'href': url + self.uri,
+                'uri': self.uri,
                 'name': self.name,
                 'method': self.http_method}
     # end to_dict

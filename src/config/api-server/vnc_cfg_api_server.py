@@ -305,14 +305,13 @@ class VncApiServer(object):
 
             # TODO validate primitive types
             if is_simple and (not is_list_prop) and (not is_map_prop):
-                continue
-                 #try:
-                 #    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name),
-                 #                           restrictions)
-                 #    continue
-                 #except Exception as e:
-                 #    err_msg = 'Error validating property' + str(e)
-                 #    return False, err_msg
+                #continue
+                try:
+                    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name), restrictions)
+                    continue
+                except Exception as e:
+                    err_msg = 'Error validating property' + str(e)
+                    return False, err_msg
 
             prop_value = obj_dict.get(prop_name)
             if not prop_value:
@@ -420,7 +419,7 @@ class VncApiServer(object):
         if not ok:
             result = 'Bad reference in create: ' + result
             raise cfgm_common.exceptions.HttpError(400, result)
-        
+
         # parent check
         if r_class.parent_types and 'parent_type' not in obj_dict:
             raise cfgm_common.exceptions.HttpError(400, 'No parent_type attribute')
@@ -542,11 +541,11 @@ class VncApiServer(object):
         rsp_body['name'] = name
         rsp_body['fq_name'] = fq_name
         rsp_body['uuid'] = obj_ids['uuid']
-        rsp_body['href'] = self.generate_url(resource_type, obj_ids['uuid'])
+        rsp_body['uri'] = self.generate_uri(resource_type, obj_ids['uuid'])
         if 'parent_type' in obj_dict:
             # non config-root child, send back parent uuid/href
             rsp_body['parent_uuid'] = parent_uuid
-            rsp_body['parent_href'] = self.generate_url(parent_type, parent_uuid)
+            rsp_body['parent_uri'] = self.generate_uri(parent_type, parent_uuid)
 
         try:
             self._extension_mgrs['resourceApi'].map_method(
@@ -648,7 +647,7 @@ class VncApiServer(object):
 
         rsp_body = {}
         rsp_body['uuid'] = id
-        rsp_body['href'] = self.generate_url(resource_type, id)
+        rsp_body['uri'] = self.generate_uri(resource_type, id)
         rsp_body['name'] = result['fq_name'][-1]
         rsp_body.update(result)
         id_perms = result['id_perms']
@@ -779,7 +778,7 @@ class VncApiServer(object):
 
         rsp_body = {}
         rsp_body['uuid'] = id
-        rsp_body['href'] = self.generate_url(resource_type, id)
+        rsp_body['uri'] = self.generate_uri(resource_type, id)
 
         try:
             self._extension_mgrs['resourceApi'].map_method(
@@ -890,7 +889,7 @@ class VncApiServer(object):
             for child in read_result.get(child_field, []):
                 if child['to'][-1] == default_child_name:
                     continue
-                exist_hrefs.append(child['href'])
+                exist_hrefs.append(child['uri'])
             if exist_hrefs:
                 err_msg = 'Delete when children still present: %s' %(
                     exist_hrefs)
@@ -903,7 +902,7 @@ class VncApiServer(object):
             _, _, is_derived = r_class.backref_field_types[backref_field]
             if is_derived:
                 continue
-            exist_hrefs = [backref['href']
+            exist_hrefs = [backref['uri']
                            for backref in read_result.get(backref_field, [])
                                if backref['uuid'] not in relaxed_refs]
             if exist_hrefs:
@@ -1197,7 +1196,7 @@ class VncApiServer(object):
             child_infos = parent_dict.get(child_field, [])
             for child_info in child_infos:
                 if child_info['to'][-1] == default_child_name:
-                    default_child_id = child_info['href'].split('/')[-1]
+                    default_child_id = child_info['uri'].split('/')[-1]
                     del_method = getattr(self, '%s_http_delete' %(child_type))
                     del_method(default_child_id)
                     break
@@ -1776,9 +1775,8 @@ class VncApiServer(object):
             json_links.append(
                 {'link': link.to_dict(with_url=url)}
             )
-
-        json_body = {"href": url, "links": json_links}
-
+        json_body = {"uri": SERVICE_PATH, "links": json_links}
+        #json_body = {"url": SERVICE_PATH, "links": json_links}
         return json_body
     # end homepage_http_get
 
@@ -2822,7 +2820,7 @@ class VncApiServer(object):
                     if obj_result['id_perms'].get('user_visible', True):
                         obj_dict = {}
                         obj_dict['uuid'] = obj_result['uuid']
-                        obj_dict['href'] = self.generate_url(resource_type,
+                        obj_dict['uri'] = self.generate_uri(resource_type,
                                                          obj_result['uuid'])
                         obj_dict['fq_name'] = obj_result['fq_name']
                         for field in req_fields:
@@ -2844,7 +2842,7 @@ class VncApiServer(object):
                 for fq_name, obj_uuid in fq_names_uuids:
                     obj_dict = {}
                     obj_dict['uuid'] = obj_uuid
-                    obj_dict['href'] = self.generate_url(resource_type,
+                    obj_dict['uri'] = self.generate_uri(resource_type,
                                                          obj_uuid)
                     obj_dict['fq_name'] = fq_name
                     for field in req_fields or []:
@@ -2871,7 +2869,7 @@ class VncApiServer(object):
             for obj_result in result:
                 obj_dict = {}
                 obj_dict['name'] = obj_result['fq_name'][-1]
-                obj_dict['href'] = self.generate_url(
+                obj_dict['uri'] = self.generate_uri(
                                         resource_type, obj_result['uuid'])
                 obj_dict.update(obj_result)
                 if 'id_perms' not in obj_dict:
@@ -2889,6 +2887,11 @@ class VncApiServer(object):
     def get_db_connection(self):
         return self._db_conn
     # end get_db_connection
+
+    def generate_uri(self,obj_type, obj_uuid):
+        obj_uri_type = '/' + obj_type.replace('_', '-')
+        return '%s%s/%s' % (SERVICE_PATH, obj_uri_type, obj_uuid)
+
 
     def generate_url(self, obj_type, obj_uuid):
         obj_uri_type = '/' + obj_type.replace('_', '-')

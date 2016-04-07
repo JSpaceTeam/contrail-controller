@@ -75,21 +75,21 @@ class TestVncApi(test_common.TestCase):
         links = [
             {
             "link": {
-                "href": "http://localhost:8082/foos",
+                "uri": "/foos",
                 "name": "foo",
                 "rel": "collection"
             }
             },
             {
             "link": {
-                "href": "http://localhost:8082/foo",
+                "uri": "/foo",
                 "name": "foo",
                 "rel": "resource-base"
             }
             },
         ]
         httpretty.register_uri(httpretty.GET, "http://127.0.0.1:8082/",
-            body=json.dumps({'href': "http://127.0.0.1:8082", 'links':links}))
+            body=json.dumps({'uri': "/", 'links':links}))
 
         lib = vnc_api.VncApi()
     # end test_server_has_more_types_than_client
