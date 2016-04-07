@@ -305,13 +305,13 @@ class VncApiServer(object):
 
             # TODO validate primitive types
             if is_simple and (not is_list_prop) and (not is_map_prop):
-                #continue
-                try:
-                    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name), restrictions)
-                    continue
-                except Exception as e:
-                    err_msg = 'Error validating property' + str(e)
-                    return False, err_msg
+                continue
+                #try:
+                #    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name), restrictions)
+                #    continue
+                #except Exception as e:
+                #    err_msg = 'Error validating property' + str(e)
+                #    return False, err_msg
 
             prop_value = obj_dict.get(prop_name)
             if not prop_value:
