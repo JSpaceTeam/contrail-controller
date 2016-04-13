@@ -306,10 +306,10 @@ class VncApiServer(object):
             # TODO validate primitive types
             if is_simple and (not is_list_prop) and (not is_map_prop):
                 continue
-                #try:
+                # try:
                 #    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name), restrictions)
                 #    continue
-                #except Exception as e:
+                # except Exception as e:
                 #    err_msg = 'Error validating property' + str(e)
                 #    return False, err_msg
 
@@ -393,7 +393,7 @@ class VncApiServer(object):
         obj_dict = get_request().json[resource_type]
         self._post_validate(obj_type, obj_dict=obj_dict)
         fq_name = obj_dict['fq_name']
-
+       
         try:
             self._extension_mgrs['resourceApi'].map_method(
                  'pre_%s_create' %(obj_type), obj_dict)
@@ -424,6 +424,10 @@ class VncApiServer(object):
         if r_class.parent_types and 'parent_type' not in obj_dict:
             raise cfgm_common.exceptions.HttpError(400, 'No parent_type attribute')
 
+        if r_class.parent_types and obj_dict.get('parent_type') not in r_class.parent_types:
+            err_msg = "parent_type is invalid.Valid parent type(s): %s" % ",".join(r_class.parent_types)
+            raise cfgm_common.exceptions.HttpError(400, err_msg)
+
 
         # common handling for all resource create
         (ok, result) = self._post_common(
@@ -450,6 +454,7 @@ class VncApiServer(object):
             parent_fq_name = obj_dict['fq_name'][:-1]
             try:
                 parent_uuid = self._db_conn.fq_name_to_uuid(parent_type, parent_fq_name)
+
                 (ok, status) = self._permissions.check_perms_write(
                     get_request(), parent_uuid)
                 if not ok:
@@ -3066,6 +3071,10 @@ class VncApiServer(object):
             if not fval:
                 raise cfgm_common.exceptions.HttpError(
                     400, "Bad Request, no %s in POST body" %(fname))
+            name = fval[-1]
+            if not name:
+                raise cfgm_common.exceptions.HttpError(
+                    400, "Bad Request, fq_name cannot be empty")
             return fval
         fq_name = _check_field_present('fq_name')
 
