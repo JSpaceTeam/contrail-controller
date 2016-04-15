@@ -28,6 +28,7 @@ from cfgm_common import ssl_adapter
 
 from pprint import pformat
 from gen.vnc_api_client_gen import SERVICE_PATH
+from threading import current_thread
 
 ASC = 'asc'
 DESC = 'desc'
@@ -306,7 +307,6 @@ class VncApi(object):
 
         self._auth_token_input = False
         self._auth_token = None
-
         if auth_token:
             self._auth_token = auth_token
             self._auth_token_input = True
@@ -751,9 +751,16 @@ class VncApi(object):
                       retry_after_authn=retry_after_authn,
                       retry_count=retry_count)
 
+
+    def _update_request_id(self, headers):
+        if not headers.get('X-Request-Id') and current_thread().__dict__.get('request_id'):
+            headers['X-Request-Id'] = current_thread().__dict__['request_id']
+
+
     def _request(self, op, url, data=None, retry_on_error=True,
                  retry_after_authn=False, retry_count=30):
         retried = 0
+        self._update_request_id(self._headers)
         while True:
             try:
                 if (op == rest.OP_GET):
