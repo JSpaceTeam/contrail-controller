@@ -526,23 +526,30 @@ class VncApi(object):
     # end _object_delete
 
     @check_homepage
-    def _rpc_execute(self, res_type, obj):
+    def _rpc_execute(self, res_type, obj=None):
         obj_type = '%s-input' % (res_type.replace('-', '_'))
         obj_cls = get_object_class(obj_type)
         out_type = '%s-output' % (res_type.replace('-', '_'))
         out_cls = get_object_class(out_type)
-
-        obj._pending_field_updates |= obj._pending_ref_updates
-        obj._pending_ref_updates = set([])
-        # Ignore fields with None value in json representation
-        json_param = json.dumps(obj, default = self._obj_serializer)
-        json_body = json_param
+        if obj: # Ensure that empty output types are handled
+            obj._pending_field_updates |= obj._pending_ref_updates
+            obj._pending_ref_updates = set([])
+            # Ignore fields with None value in json representation
+            json_param = json.dumps(obj, default = self._obj_serializer)
+            json_body = json_param
+        else:
+            json_body = None
         content = self._request_server(rest.OP_POST,
                        obj_cls.resource_uri_base[res_type],
                        data = json_body)
-        resp_dict = json.loads(content)
-        out = out_cls.from_dict(**resp_dict)
-        out.set_server_conn(self)
+        if len(content) > 1:
+            resp_dict = json.loads(content)
+            out = out_cls.from_dict(**resp_dict)
+            out.set_server_conn(self)
+        else:
+            out = out_cls()
+            out.set_server_conn(self)
+
         return out
     # end _rpc_excecute
 

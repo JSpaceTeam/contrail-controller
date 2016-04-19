@@ -350,16 +350,24 @@ class VncApiServerBase(VncApiServer):
         pass
 
     def http_rpc_post(self, resource_type):
+        prop_type = self.get_rpc_input_type(resource_type)
+        r_class = cfgm_common.utils.str_to_class(prop_type, __name__)
         _key = 'input'
+
         try:
             obj_dict = request.json[_key]
-        except KeyError:
-            raise HttpError(400, 'invalid request, key "%s" not found' % _key)
+        except (KeyError, TypeError):
+            #Verify if input is needed
+            if r_class.attr_fields:
+                raise HttpError(400, 'invalid request, key "%s" not found' % _key)
+            else:
+                obj_dict = {}
+
         obj_dict = {_key: obj_dict}
 
         prop_dict = obj_dict.get('input')
-        prop_type = self.get_rpc_input_type(resource_type)
-        r_class = cfgm_common.utils.str_to_class(prop_type, __name__)
+
+
         try:
             self._validate_complex_type(r_class, prop_dict)
         except Exception as e:
