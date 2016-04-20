@@ -84,7 +84,6 @@ class ApiContext(object):
 # end class ApiContext
 
 
-
 def get_request():
     return gevent.getcurrent().api_context.request
 
@@ -92,6 +91,16 @@ def get_request():
 def get_context():
     return gevent.getcurrent().api_context
 
+
+def get_url():
+    return get_request().url
+
+
+def get_query_param(keyv):
+    from urlparse import urlparse,parse_qs
+    qp = urlparse(get_url())
+    qparam = parse_qs(qp.query,keep_blank_values=True)
+    return None if keyv not in qparam else qparam[keyv]
 
 def set_context(api_ctx):
     gevent.getcurrent().api_context = api_ctx
