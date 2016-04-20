@@ -5,6 +5,7 @@
 This is the main module in vnc_cfg_api_server package. It manages interaction
 between http/rest, address management, authentication and database interfaces.
 """
+import re
 from decimal import Decimal, InvalidOperation
 
 from gevent import monkey
@@ -244,6 +245,7 @@ class VncApiServer(object):
             attr_type = attr_type_vals['attr_type']
             restrictions = attr_type_vals['restrictions']
             is_array = attr_type_vals.get('is_array', False)
+            optional = attr_type_vals['optional']
             if is_array:
                 if not isinstance(value, list):
                     raise ValueError('Field %s must be a list. Received value: %s'
@@ -253,32 +255,98 @@ class VncApiServer(object):
                 values = [value]
             if attr_type_vals['is_complex']:
                 attr_cls = cfgm_common.utils.str_to_class(attr_type, __name__)
+                key_set = set()
                 for item in values:
+                    if is_array:
+                        if attr_cls.key_field not in item:
+                            raise ValueError("key '%s' is expected"%(attr_cls.key_field))
+                        else:
+                            value = item[attr_cls.key_field]
+                            if value in key_set:
+                                raise ValueError("key '%s' not unique"%(value))
+                            else:
+                                key_set.add(value)
                     cls._validate_complex_type(attr_cls, item)
             else:
                 for item in values:
-                    cls._validate_simple_type(key, attr_type, item, restrictions)
+                    cls._validate_simple_type(key, attr_type, item, optional, restrictions)
     # end _validate_complex_type
 
     @classmethod
-    def _validate_simple_type(cls, type_name, xsd_type, value, restrictions=None):
+    def _validate_simple_type(cls, type_name, xsd_type, value, optional, restrictions=None):
+        error_msg="Value '%s' is not facet-valid with respect to %s '%s' for type '%s'"
         if value is None:
-            return
-        elif xsd_type in ('unsignedLong', 'integer', 'unsignedInt', 'long', 'short',
-                          'unsignedShort', 'unsignedByte', 'int'):
+            if optional:
+                return
+            else:
+                raise ValueError('%s is expected' %(type_name))
+        elif xsd_type in ('byte', 'short', 'int', 'long', 'unsignedByte', 'unsignedShort', 'unsignedInt',
+                          'unsignedLong'):
             if not isinstance(value, (int, long)):
                 raise ValueError('%s: %s value expected instead of %s' %(
                     type_name, xsd_type, value))
+            if xsd_type == 'byte':
+                if not (-128 <= value <= 127):
+                    raise ValueError('%s is derived from int8, value must between -128 and 127' %(
+                                type_name))
+            elif xsd_type == 'short':
+                if not (-32768 <= value <= 32767):
+                    raise ValueError('%s is derived from int16, value must between -32768 and 32767' %(
+                                type_name))
+            elif xsd_type == 'int':
+                if not (-2147483648 <= value <= 2147483647):
+                    raise ValueError('%s is derived from int32, value must between -2147483648 and 2147483647' %(
+                                type_name))
+            elif xsd_type == 'long':
+                if not (-9223372036854775808 <= value <= 9223372036854775807):
+                    raise ValueError('%s is derived from int64, value must between -9223372036854775808 and 9223372036854775807' %(
+                                type_name))
+            elif xsd_type == 'unsignedByte':
+                if not (0 <= value <= 255):
+                    raise ValueError('%s is derived from uint8, value must between 0 and 255' %(
+                                type_name))
+            elif xsd_type == 'unsignedShort':
+                if not (0 <= value <= 65535):
+                    raise ValueError('%s is derived from uint16, value must between 0 and 65535' %(
+                                type_name))
+            elif xsd_type == 'unsignedInt':
+                if not (0 <= value <= 4294967295):
+                    raise ValueError('%s is derived from uint32, value must between 0 and 4294967295' %(
+                                type_name))
+            elif xsd_type == 'unsignedLong':
+                if not (0 <= value <= 18446744073709551615):
+                    raise ValueError('%s is derived from uint64, value must between 0 and 18446744073709551615' %(
+                                type_name))
             if restrictions:
-                if not (int(restrictions[0]) <= value <= int(restrictions[1])):
-                    raise ValueError('%s: value must be between %s and %s' %(
-                                type_name, restrictions[0], restrictions[1]))
+                for restriction in restrictions:
+                    for (k,v) in restriction.items():
+                        if 'max-inclusive' == k:
+                            if not (long(v) >= value):
+                                raise ValueError(error_msg%(value, k, v, type_name))
+                        if 'min-inclusive' == k:
+                            if not (long(v) <= value):
+                                raise ValueError(error_msg%(value, k, v, type_name))
+                        if 'max-exclusive' == k:
+                            if not (long(v) > value):
+                                raise ValueError(error_msg%(value, k, v, type_name))
+                        if 'min-exclusive' == k:
+                            if not (long(v) < value):
+                                raise ValueError(error_msg%(value, k, v, type_name))
+                        if 'union' == k:
+                            match = False
+                            for restr in v:
+                                if not match:
+                                    try:
+                                        cls._validate_simple_type(type_name, xsd_type, value, optional, restr)
+                                        match = True
+                                    except Exception as e:
+                                        err_msg = 'Error ' + str(e)
+                            if not match:
+                                raise ValueError('%s: value must be one of %s'%(type_name,str(v)))
         elif xsd_type == 'boolean':
             if not isinstance(value, bool):
                 raise ValueError('%s: true/false expected instead of %s' %(
                     type_name, value))
-        elif xsd_type in ('byte'):
-            pass
         elif xsd_type == 'decimal':
             try:
                 Decimal(value)
@@ -289,9 +357,35 @@ class VncApiServer(object):
             if not isinstance(value, basestring):
                 raise ValueError('%s: string value expected instead of %s' %(
                     type_name, value))
-            if restrictions and value not in restrictions:
-                raise ValueError('%s: value must be one of %s' % (
-                    type_name, str(restrictions)))
+            if restrictions:
+                for restriction in restrictions:
+                    for (k,v) in restriction.items():
+                        if 'enumeration' == k:
+                            if len(v)>0 and value not in v:
+                                raise ValueError('%s: value must be one of %s' % (
+                                    type_name, str(restrictions)))
+                        if 'min-length' == k:
+                            if not (long(v) <= len(value)):
+                                raise ValueError(error_msg%(value, k, v, type_name))
+                        if 'max-length' == k:
+                            if not (long(v) >= len(value)):
+                                raise ValueError(error_msg%(value, k, v, type_name))
+                        if 'pattern' == k:
+                            pattern = re.compile(v)
+                            match = pattern.match(value)
+                            if not match:
+                                raise ValueError(error_msg%(value, k, v, type_name))
+                        if 'union' == k:
+                            match = False
+                            for restr in v:
+                                if not match:
+                                    try:
+                                        cls._validate_simple_type(type_name, xsd_type, value, optional, restr)
+                                        match = True
+                                    except Exception as e:
+                                        err_msg = 'Error ' + str(e)
+                            if not match:
+                                raise ValueError("%s: value must be one of %s"%(type_name,str(v)))
     # end _validate_simple_type
 
     def _validate_props_in_request(self, resource_class, obj_dict):
@@ -300,18 +394,17 @@ class VncApiServer(object):
             is_simple = not prop_field_types['is_complex']
             prop_type = prop_field_types['xsd_type']
             restrictions = prop_field_types['restrictions']
+            optional = prop_field_types['optional']
             is_list_prop = prop_name in resource_class.prop_list_fields
             is_map_prop = prop_name in resource_class.prop_map_fields
 
-            # TODO validate primitive types
             if is_simple and (not is_list_prop) and (not is_map_prop):
-                continue
-                # try:
-                #    self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name), restrictions)
-                #    continue
-                # except Exception as e:
-                #    err_msg = 'Error validating property' + str(e)
-                #    return False, err_msg
+                try:
+                   self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name), optional, restrictions)
+                   continue
+                except Exception as e:
+                   err_msg = 'Error validating property. '+str(e)
+                   return False, err_msg
 
             prop_value = obj_dict.get(prop_name)
             if not prop_value:
@@ -322,20 +415,26 @@ class VncApiServer(object):
                 try:
                     self._validate_complex_type(prop_cls, prop_value)
                 except Exception as e:
-                    err_msg = 'Error validating property %s value %s ' %(
+                    err_msg = 'Error validating property %s value %s. ' %(
                         prop_name, prop_value)
                     err_msg += str(e)
                     return False, err_msg
             elif isinstance(prop_value, list):
+                key_set = set()
                 for elem in prop_value:
                     try:
                         if is_simple:
                             self._validate_simple_type(prop_name, prop_type,
                                                        elem, restrictions)
                         else:
+                            value = elem[prop_cls.key_field]
+                            if value in key_set:
+                                raise ValueError("Key '%s' is not unique"%(value))
+                            else:
+                                key_set.add(value)
                             self._validate_complex_type(prop_cls, elem)
                     except Exception as e:
-                        err_msg = 'Error validating property %s elem %s ' %(
+                        err_msg = 'Error validating property %s elem %s. ' %(
                             prop_name, elem)
                         err_msg += str(e)
                         return False, err_msg
