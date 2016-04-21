@@ -281,7 +281,7 @@ class VncApiServer(object):
             else:
                 raise ValueError('%s is expected' %(type_name))
         elif xsd_type in ('byte', 'short', 'int', 'long', 'unsignedByte', 'unsignedShort', 'unsignedInt',
-                          'unsignedLong'):
+                          'unsignedLong', 'integer'):
             if not isinstance(value, (int, long)):
                 raise ValueError('%s: %s value expected instead of %s' %(
                     type_name, xsd_type, value))
