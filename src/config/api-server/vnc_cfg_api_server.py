@@ -353,6 +353,8 @@ class VncApiServer(object):
             except (TypeError, InvalidOperation):
                 raise ValueError('%s: decimal value expected instead of %s' %(
                     type_name, value))
+        elif xsd_type == "any": #anyxml
+            pass
         else:
             if not isinstance(value, basestring):
                 raise ValueError('%s: string value expected instead of %s' %(
@@ -428,7 +430,7 @@ class VncApiServer(object):
                                                        elem, restrictions)
                         else:
                             if prop_cls.key_field is not None and prop_cls.key_field not in elem:
-                                raise ValueError("key '%s' is expected"%(attr_cls.key_field))
+                                raise ValueError("key '%s' is expected"%(prop_cls.key_field))
                             else:
                                 value = elem[prop_cls.key_field]
                                 if value in key_set:

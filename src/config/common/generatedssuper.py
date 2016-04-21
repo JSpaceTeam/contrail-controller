@@ -247,7 +247,11 @@ class GeneratedsSuper(object):
 
     @staticmethod
     def populate_byte(name):
-        return {'test': 1}
+        return 1
+
+    @staticmethod
+    def populate_any(name):
+        return {'test':1}
 
     @staticmethod
     def populate_decimal(name):
