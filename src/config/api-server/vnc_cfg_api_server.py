@@ -243,7 +243,7 @@ class VncApiServer(object):
                                   str(dict_cls), key))
             attr_type_vals = dict_cls.attr_field_type_vals[key]
             attr_type = attr_type_vals['attr_type']
-            restrictions = attr_type_vals['restrictions']
+            restrictions = attr_type_vals['yang_restrictions']
             is_array = attr_type_vals.get('is_array', False)
             optional = attr_type_vals['optional']
             if is_array:
@@ -257,7 +257,7 @@ class VncApiServer(object):
                 attr_cls = cfgm_common.utils.str_to_class(attr_type, __name__)
                 key_set = set()
                 for item in values:
-                    if is_array:
+                    if is_array and attr_cls.key_field is not 'None':
                         if attr_cls.key_field not in item:
                             raise ValueError("key '%s' is expected"%(attr_cls.key_field))
                         else:
@@ -393,7 +393,7 @@ class VncApiServer(object):
             prop_field_types = resource_class.prop_field_types[prop_name]
             is_simple = not prop_field_types['is_complex']
             prop_type = prop_field_types['xsd_type']
-            restrictions = prop_field_types['restrictions']
+            restrictions = prop_field_types['yang_restrictions']
             optional = prop_field_types['optional']
             is_list_prop = prop_name in resource_class.prop_list_fields
             is_map_prop = prop_name in resource_class.prop_map_fields
@@ -427,11 +427,14 @@ class VncApiServer(object):
                             self._validate_simple_type(prop_name, prop_type,
                                                        elem, restrictions)
                         else:
-                            value = elem[prop_cls.key_field]
-                            if value in key_set:
-                                raise ValueError("Key '%s' is not unique"%(value))
+                            if prop_cls.key_field is not None and prop_cls.key_field not in elem:
+                                raise ValueError("key '%s' is expected"%(attr_cls.key_field))
                             else:
-                                key_set.add(value)
+                                value = elem[prop_cls.key_field]
+                                if value in key_set:
+                                    raise ValueError("Key '%s' is not unique"%(value))
+                                else:
+                                    key_set.add(value)
                             self._validate_complex_type(prop_cls, elem)
                     except Exception as e:
                         err_msg = 'Error validating property %s elem %s. ' %(
