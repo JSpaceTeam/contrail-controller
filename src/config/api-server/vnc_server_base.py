@@ -41,6 +41,12 @@ cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing', default=False,
                                       help="Enable connection sniffing for elastic search driver")
                           , group=elastic_search_group)
 
+cfg.CONF.register_cli_opt(cfg.ListOpt('log_server_list',
+                          item_type=cfg.types.String(),
+                          default='127.0.0.1:9200',
+                          help="Multiple servers option for es log servers"),
+                          group=elastic_search_group)
+
 cfg.CONF.register_cli_opt(
     cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
     group=elastic_search_group)
