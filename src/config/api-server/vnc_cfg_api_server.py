@@ -243,7 +243,7 @@ class VncApiServer(object):
                                   str(dict_cls), key))
             attr_type_vals = dict_cls.attr_field_type_vals[key]
             attr_type = attr_type_vals['attr_type']
-            restrictions = attr_type_vals['yang_restrictions']
+            restrictions = attr_type_vals['restrictions']
             is_array = attr_type_vals.get('is_array', False)
             optional = attr_type_vals['optional']
             if is_array:
@@ -395,7 +395,7 @@ class VncApiServer(object):
             prop_field_types = resource_class.prop_field_types[prop_name]
             is_simple = not prop_field_types['is_complex']
             prop_type = prop_field_types['xsd_type']
-            restrictions = prop_field_types['yang_restrictions']
+            restrictions = prop_field_types['restrictions']
             optional = prop_field_types['optional']
             is_list_prop = prop_name in resource_class.prop_list_fields
             is_map_prop = prop_name in resource_class.prop_map_fields
