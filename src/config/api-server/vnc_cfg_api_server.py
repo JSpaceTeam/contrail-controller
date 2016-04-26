@@ -2894,7 +2894,7 @@ class VncApiServer(object):
     # end get_db_connection
 
     def generate_uri(self,obj_type, obj_uuid):
-        if obj_type in gen.vnc_api_server_gen.all_resource_types:
+        if obj_type in gen.vnc_api_client_gen.all_resource_types:
             obj_uri_type = '/' + obj_type
         else:
             obj_uri_type = '/' + obj_type.replace('_', '-')
@@ -2903,7 +2903,7 @@ class VncApiServer(object):
 
 
     def generate_url(self, obj_type, obj_uuid):
-        if obj_type in gen.vnc_api_server_gen.all_resource_types:
+        if obj_type in gen.vnc_api_client_gen.all_resource_types:
             obj_uri_type = '/' + obj_type
         else:
             obj_uri_type = '/' + obj_type.replace('_', '-')
