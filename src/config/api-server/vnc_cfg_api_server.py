@@ -2894,12 +2894,19 @@ class VncApiServer(object):
     # end get_db_connection
 
     def generate_uri(self,obj_type, obj_uuid):
+        if obj_type in gen.vnc_api_server_gen.all_resource_types:
+            obj_uri_type = '/' + obj_type
+        else:
+            obj_uri_type = '/' + obj_type.replace('_', '-')
         obj_uri_type = '/' + obj_type.replace('_', '-')
         return '%s%s/%s' % (SERVICE_PATH, obj_uri_type, obj_uuid)
 
 
     def generate_url(self, obj_type, obj_uuid):
-        obj_uri_type = '/' + obj_type.replace('_', '-')
+        if obj_type in gen.vnc_api_server_gen.all_resource_types:
+            obj_uri_type = '/' + obj_type
+        else:
+            obj_uri_type = '/' + obj_type.replace('_', '-')
         try:
             url_parts = bottle.request.urlparts
             return '%s://%s%s%s/%s' \
