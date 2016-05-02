@@ -1016,6 +1016,7 @@ class VncServerKombuClient(VncKombuClient):
         self._ifmap_db = ifmap_db
         self._ifmap_disable = ifmap_disable
         listen_port = db_client_mgr.get_server_port()
+        self._service_module = db_client_mgr.get_service_module()
         q_name = 'vnc_config.%s-%s' % (socket.gethostname(), listen_port)
         super(VncServerKombuClient, self).__init__(
             rabbit_ip, rabbit_port, rabbit_user, rabbit_password, rabbit_vhost,
@@ -1106,20 +1107,20 @@ class VncServerKombuClient(VncKombuClient):
     def _dbe_subscribe_callback(self, oper_info):
         self._db_client_mgr.wait_for_resync_done()
         try:
-            msg = "Notification Message: %s" % (pformat(oper_info))
-            self.config_log(msg, level=SandeshLevel.SYS_DEBUG)
-            trace = self._generate_msgbus_notify_trace(oper_info)
-            r_class = self._db_client_mgr.get_resource_class(oper_info['type'])
-            if not r_class:
-                return
-            if oper_info['oper'] == 'CREATE':
-                self._dbe_create_notification(oper_info)
-            if oper_info['oper'] == 'UPDATE':
-                self._dbe_update_notification(oper_info)
-            elif oper_info['oper'] == 'DELETE':
-                self._dbe_delete_notification(oper_info)
-
-            trace_msg(trace, 'MessageBusNotifyTraceBuf', self._sandesh)
+            if (not self._service_module) or (oper_info.get('namespace','') == self._service_module):
+                msg = "Notification Message: %s" % (pformat(oper_info))
+                self.config_log(msg, level=SandeshLevel.SYS_DEBUG)
+                trace = self._generate_msgbus_notify_trace(oper_info)
+                r_class = self._db_client_mgr.get_resource_class(oper_info['type'])
+                if not r_class:
+                    return
+                if oper_info['oper'] == 'CREATE':
+                    self._dbe_create_notification(oper_info)
+                if oper_info['oper'] == 'UPDATE':
+                    self._dbe_update_notification(oper_info)
+                elif oper_info['oper'] == 'DELETE':
+                    self._dbe_delete_notification(oper_info)
+                trace_msg(trace, 'MessageBusNotifyTraceBuf', self._sandesh)
         except Exception as e:
             string_buf = cStringIO.StringIO()
             cgitb_hook(file=string_buf, format="text")
@@ -1136,6 +1137,7 @@ class VncServerKombuClient(VncKombuClient):
         oper_info = {'request-id': req_id,
                      'oper': 'CREATE',
                      'type': obj_type,
+                     'namespace': self._service_module,
                      'obj_dict': obj_dict}
         oper_info.update(obj_ids)
         self.publish(oper_info)
@@ -1167,7 +1169,7 @@ class VncServerKombuClient(VncKombuClient):
     # end _dbe_create_notification
 
     def dbe_update_publish(self, obj_type, obj_ids):
-        oper_info = {'oper': 'UPDATE', 'type': obj_type}
+        oper_info = {'oper': 'UPDATE', 'type': obj_type, 'namespace': self._service_module}
         oper_info.update(obj_ids)
         self.publish(oper_info)
 
@@ -1204,7 +1206,8 @@ class VncServerKombuClient(VncKombuClient):
     # end _dbe_update_notification
 
     def dbe_delete_publish(self, obj_type, obj_ids, obj_dict):
-        oper_info = {'oper': 'DELETE', 'type': obj_type, 'obj_dict': obj_dict}
+        oper_info = {'oper': 'DELETE', 'type': obj_type, 'namespace':self._service_module,
+                     'obj_dict': obj_dict}
         oper_info.update(obj_ids)
         self.publish(oper_info)
 
@@ -2346,6 +2349,9 @@ class VncDbClient(object):
         self._ifmap_db.reset(drain_inflight=True)
         self._msgbus.reset()
     # end reset
+
+    def get_service_module(self):
+        return self._api_svr_mgr.get_service_module()
 # end class VncDbClient
 
 class VncSearchItf(object):

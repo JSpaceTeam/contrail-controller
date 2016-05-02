@@ -3504,8 +3504,12 @@ class VncApiServer(object):
         if self._disc:
             self._disc.un_publish(IFMAP_SERVER_DISCOVERY_SERVICE_NAME, data)
     # end un_publish_ifmap_to_discovery
+    def get_service_module(self):
+        if SERVICE_PATH:
+            return SERVICE_PATH.split('/')[1]
+        else:
+            return None
 
-# end class VncApiServer
 
 server = None
 def main(args_str=None):
