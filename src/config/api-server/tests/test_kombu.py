@@ -38,7 +38,7 @@ class TestIfmapKombuClient(unittest.TestCase):
         self.vhost = "vhost0"
         self.db_client_mgr = flexmock(operational=True, _sandesh=None,
                        config_log=lambda *args, **kwargs: None,
-                       get_server_port=lambda: 8082)
+                       get_server_port=lambda: 8082, get_service_module=lambda: '')
         self._url_template = "pyamqp://%s:%s@%s:%d/%s"
         self.mock_producer = flexmock(operational = True)
         self.mock_consumer = flexmock(operational = True)
