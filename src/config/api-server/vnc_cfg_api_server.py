@@ -2898,7 +2898,6 @@ class VncApiServer(object):
             obj_uri_type = '/' + obj_type
         else:
             obj_uri_type = '/' + obj_type.replace('_', '-')
-        obj_uri_type = '/' + obj_type.replace('_', '-')
         return '%s%s/%s' % (SERVICE_PATH, obj_uri_type, obj_uuid)
 
 
