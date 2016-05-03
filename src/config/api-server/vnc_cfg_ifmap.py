@@ -2265,6 +2265,9 @@ class VncDbClient(object):
                                       ref_data, operation)
         self._msgbus.dbe_update_publish(obj_type.replace('_', '-'),
                                         {'uuid': obj_uuid})
+        if obj_type == ref_type:
+            self._msgbus.dbe_update_publish(ref_type.replace('_', '-'),
+                                        {'uuid': ref_uuid})
 
     # ref_update
 
