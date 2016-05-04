@@ -1249,8 +1249,9 @@ class VncZkClient(object):
     _MAX_SUBNET_ADDR_ALLOC = 65535
 
     def __init__(self, instance_id, zk_server_ip, reset_config, db_prefix,
-                 sandesh_hdl):
+                 sandesh_hdl, module=''):
         self._db_prefix = db_prefix
+        self._module_path = '/%s' % module if module else ''
         if db_prefix:
             client_pfx = db_prefix + '-'
             zk_path_pfx = db_prefix + '/'
@@ -1260,7 +1261,7 @@ class VncZkClient(object):
 
         client_name = client_pfx + 'api-' + instance_id
         self._subnet_path = zk_path_pfx + self._SUBNET_PATH
-        self._fq_name_to_uuid_path = zk_path_pfx + self._FQ_NAME_TO_UUID_PATH
+        self._fq_name_to_uuid_path = zk_path_pfx + self._FQ_NAME_TO_UUID_PATH + self._module_path
         self._zk_path_pfx = zk_path_pfx
 
         self._sandesh = sandesh_hdl
@@ -1467,7 +1468,7 @@ class VncDbClient(object):
         msg = "Connecting to zookeeper on %s" % (zk_server_ip)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
         self._zk_db = VncZkClient(api_svr_mgr._args.worker_id, zk_server_ip,
-                                  reset_config, db_prefix, self.config_log)
+                                  reset_config, db_prefix, self.config_log, self.get_service_module())
 
         def cassandra_client_init():
             msg = "Connecting to cassandra on %s" % (cass_srv_list)
