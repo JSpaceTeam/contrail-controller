@@ -2593,7 +2593,7 @@ class VncSearchDbClient(VncSearchItf):
         obj_type = obj_type.replace('-', '_')
         if params is None:
             params = {}
-        if 'size' not in params:
+        if 'size' not in params and 'size' not in body:
             params['size'] = 1000
         matches = self._es_client.search(index=self.get_index(obj_type), doc_type=obj_type, body=body, params=params)
         total = matches['hits']['total']
