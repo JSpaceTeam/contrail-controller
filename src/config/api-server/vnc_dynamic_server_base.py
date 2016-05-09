@@ -4,15 +4,14 @@ __author__ = 'hprakash'
 #
 
 import logging
+
 from app_cfg_server.server_core.vnc_server_base import VncApiServerBase
 
 logger = logging.getLogger(__name__)
 import os
 import xmltodict
 import commands
-import bottle
 import functools
-from bottle import request
 import traceback
 from cfgm_common.vnc_extensions import ExtensionManager
 import cfgm_common
@@ -21,12 +20,15 @@ from app_cfg_server.server_core.context import get_request
 import json
 import copy
 from lxml import etree
+from lxml.etree import XMLSyntaxError
 from io import BytesIO
 from cfgm_common import utils
 from app_cfg_server.server_core.vnc_cfg_base_type import Resource
 from app_cfg_server.gen.resource_common import YangSchema
 from app_cfg_server.gen.vnc_api_client_gen import SERVICE_PATH
 from oslo_config import cfg
+
+logger = logging.getLogger(__name__)
 
 TEMP_DIR = "/tmp/yangs"
 TEMP_ES_DIR = "/tmp/yangs/es"
@@ -83,8 +85,8 @@ class VncApiDynamicServerBase(VncApiServerBase):
                     es_schema = result['es_schema']
                     self.init_es_schema(route_name, es_schema)
         except Exception as e:
-            print(traceback.format_exc())
             err_msg = cfgm_common.utils.detailed_traceback()
+            logger.error(err_msg)
             self.config_log("Exception in adding dynamic routes : %s" % (err_msg),
                             level=SandeshLevel.SYS_ERR)
 
@@ -105,16 +107,17 @@ class VncApiDynamicServerBase(VncApiServerBase):
             req = self.get_req_json_obj()
             yang_content = req['yang-content']
             module_name = req['module-name']
-            # print yang_content
+            create_routes = 'true'
+            if "create-routes" in req:
+                create_routes = req['create-routes']
             if not os.path.exists(TEMP_DIR):
                 os.makedirs(TEMP_DIR)
             file_name = TEMP_DIR + "/" + module_name
             file_obj = open(file_name, 'w')
             file_obj.write(yang_content)
             file_obj.close()
-            # TODO Set the path before compiling
-            # prefix = "pyang -p " + yang_dir + " -f yin "
-            pyang_cmd_prefix = "pyang -f yin "
+            # Run the pyang command to generate the yin(xml) format
+            pyang_cmd_prefix = "pyang -p " + TEMP_DIR + " -f yin "
             pyang_cmd = pyang_cmd_prefix + file_name
             yin_schema = commands.getoutput(pyang_cmd)
             xml_tree = etree.parse(BytesIO(yin_schema), etree.XMLParser())
@@ -128,10 +131,9 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
             # Creating Elastic Search Schema
             es_schema = ''
-            try:
+
+            if self.is_es_enabled() and create_routes == 'true':
                 es_schema = self.update_es_schema(module_name, file_name)
-            except Exception as e:
-                pass
 
             yang_schema = YangSchema(name=module_name, module_name=module_name, version=module_revision,
                                      namespace=module_name_space,
@@ -145,20 +147,31 @@ class VncApiDynamicServerBase(VncApiServerBase):
             schema_dict["yin_schema"] = yang_schema.get_yin_schema()
             schema_dict["es_schema"] = yang_schema.get_es_schema()
 
+            uuid = self._get_id_from_fq_name(yang_schema.get_type(), yang_schema.get_fq_name())
             req[yang_schema.get_type()] = schema_dict
-            response = self.http_resource_create(yang_schema.get_type())
-            self._generate_dynamic_resource_crud_methods(module_name)
-            self._generate_dynamic_resource_crud_uri(module_name)
-            response[yang_schema.get_type()]["dynamic-uri"] = SERVICE_PATH + "/" + module_name
-            print ("New dynamic uri created ****************:" + SERVICE_PATH + "/" + module_name)
+            if uuid is not None:
+                response = self.http_resource_update(yang_schema.get_type(), uuid)
+                logger.info("Yang module got updated successfully with name :" + module_name)
+            else:
+                response = self.http_resource_create(yang_schema.get_type())
+                if create_routes == 'true':
+                    self._generate_dynamic_resource_crud_methods(module_name)
+                    self._generate_dynamic_resource_crud_uri(module_name)
+                    response[yang_schema.get_type()]["dynamic-uri"] = SERVICE_PATH + "/" + module_name
+                    logger.info("New dynamic uri created for yang module :" + SERVICE_PATH + "/" + module_name)
+                else:
+                    logger.info("New yang module got installed successfully with name :" + module_name)
             return response
-
-        except KeyError:
-            bottle.abort(400, 'invalid request, key "%s" not found')
+        except XMLSyntaxError as ex:
+            err_msg = "Error occurred while parsing the Yang Module :" + module_name
+            if "<?" in yin_schema:
+                yin_schema = yin_schema.split("<?", 1)[0]
+            err_msg = err_msg + " " + yin_schema
+            raise cfgm_common.exceptions.HttpError(500, err_msg)
         except cfgm_common.exceptions.HttpError as he:
             raise he
         except Exception as e:
-            print(traceback.format_exc())
+            logger.error(traceback.format_exc())
             err_msg = cfgm_common.utils.detailed_traceback()
             self.config_log("Exception in adding dynamic routes : %s" % (err_msg),
                             level=SandeshLevel.SYS_ERR)
@@ -167,31 +180,28 @@ class VncApiDynamicServerBase(VncApiServerBase):
     # end install_yang
 
     def update_es_schema(self, module_name, file_name):
-        try:
-            print ('Create Elastic Search Schema -- input  ', module_name)
+        logger.debug('Create Elastic Search Schema -- input  ' + module_name)
 
-            if not os.path.exists(TEMP_ES_DIR):
-                os.makedirs(TEMP_ES_DIR)
+        if not os.path.exists(TEMP_ES_DIR):
+            os.makedirs(TEMP_ES_DIR)
 
-            # Copy ES Yang Plugin
-            src = os.getcwd() + '/server_core/gesm.py'
-            copy_cmd = 'cp %s %s' % (src, TEMP_ES_DIR)
-            commands.getoutput(copy_cmd)
+        # Copy ES Yang Plugin
+        src = os.getcwd() + '/server_core/gesm.py'
+        copy_cmd = 'cp %s %s' % (src, TEMP_ES_DIR)
+        commands.getoutput(copy_cmd)
 
-            pyang_cmd = "pyang --plugindir %s %s -f gesm --gesm-output %s"
-            cmd = pyang_cmd % (TEMP_ES_DIR, file_name, TEMP_ES_DIR)
+        pyang_cmd = "pyang  -p " + TEMP_DIR + " --plugindir %s %s -f gesm --gesm-output %s"
+        cmd = pyang_cmd % (TEMP_ES_DIR, file_name, TEMP_ES_DIR)
 
-            print ('Command executed ', cmd)
-            commands.getoutput(cmd)
+        logger.debug('Command executed ' + cmd)
+        commands.getoutput(cmd)
 
-            with open(TEMP_ES_DIR + '/%s.mapping.json' % (module_name)) as file:
-                file_content = file.read()
+        with open(TEMP_ES_DIR + '/%s.mapping.json' % (module_name)) as file:
+            file_content = file.read()
 
-            print ('Elastic Search Schema File Content - ', file_content)
+        logger.debug('Elastic Search Schema File Content - ' + file_content)
 
-            self.init_es_schema(module_name, file_content)
-        except Exception as e:
-            print e
+        self.init_es_schema(module_name, file_content)
 
         return file_content
 
@@ -201,37 +211,36 @@ class VncApiDynamicServerBase(VncApiServerBase):
         return cfg.CONF.elastic_search.search_enabled
 
     def init_es_schema(self, module_name, es_schema_mapping):
-        try:
-            if self.is_es_enabled():
-                es_schema = json.loads(es_schema_mapping)
-                print ('es_schema string - ', str(es_schema))
 
-                if module_name in es_schema:
-                    mapping = es_schema[module_name]
+        if self.is_es_enabled():
+            es_schema = json.loads(es_schema_mapping)
+            logger.debug('es_schema string - ' + str(es_schema))
 
-                _index_client = self._db_conn._search_db._index_client
-                _index = self._db_conn._search_db._index
+            if module_name in es_schema:
+                mapping = es_schema[module_name]
 
-                def _print_mappings(index, doc_type):
-                    return _index_client.get_mapping(index=_index, doc_type=_doc_type)
+            _index_client = self._db_conn._search_db._index_client
+            _index = self._db_conn._search_db._index
 
-                # Exising Mapping for the doc type
-                for _doc_type, _mapping in mapping['mappings'].iteritems():
-                    _doc_type = str(_doc_type)
+            def _print_mappings(index, doc_type):
+                return _index_client.get_mapping(index=_index, doc_type=_doc_type)
 
-                    print ('Doc Type %s Existing Mapping %s' % (_doc_type, _print_mappings(_index, _doc_type)))
+            # Exising Mapping for the doc type
+            for _doc_type, _mapping in mapping['mappings'].iteritems():
+                _doc_type = str(_doc_type)
 
-                    # Update Mapping
-                    _index_client.put_mapping(index=_index, doc_type=_doc_type, body=_mapping)
+                logger.debug('Doc Type %s Existing Mapping %s' % (_doc_type, _print_mappings(_index, _doc_type)))
 
-                    print ('Doc Type %s Updated Mapping %s' % (_doc_type, _print_mappings(_index, _doc_type)))
+                # Update Mapping
+                _index_client.put_mapping(index=_index, doc_type=_doc_type, body=_mapping)
 
-                    # Update in the HAPI Server Index Map
-                    self._db_conn._search_db._mapped_doc_types.append(_doc_type)
-            else:
-                print 'Elastic Search is disabled'
-        except Exception as e:
-            print e
+                logger.debug('Doc Type %s Updated Mapping %s' % (_doc_type, _print_mappings(_index, _doc_type)))
+
+                # Update in the HAPI Server Index Map
+                self._db_conn._search_db._mapped_doc_types.append(_doc_type)
+        else:
+            logger.info('Elastic Search is disabled')
+
             # end init_es_schema
 
     def get_req_json_obj(self):
@@ -248,7 +257,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         return False
 
     def http_dynamic_resource_create(self, resource_type):
-        print ('New Route - http_dynamic_resource_create method ', resource_type)
+        logger.debug('New Route - http_dynamic_resource_create method ' + resource_type)
         # obj_type = resource_type.replace('-', '_')
         # obj_dict = get_request().json[resource_type]
         obj_type = resource_type
@@ -271,7 +280,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         except Exception:
             err_msg = 'Error in http_dynamic_resource_create for %s' % (obj_dict)
             err_msg += cfgm_common.utils.detailed_traceback()
-            # print(err_msg)
+            logger.error(err_msg)
             self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
             raise cfgm_common.exceptions.HttpError(500, err_msg)
 
@@ -279,7 +288,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         return {resource_type: res_obj_dict}
 
     def http_dynamic_resource_read(self, resource_type, id):
-        print ('New Route - http_dynamic_resource_read method ', resource_type)
+        logger.debug('New Route - http_dynamic_resource_read method ' + resource_type)
         # obj_type = resource_type.replace('-', '_')
         obj_type = resource_type
         self._invoke_dynamic_extension("pre_dynamic_resource_read", obj_type, id)
@@ -296,7 +305,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         return res_obj_dict
 
     def http_dynamic_resource_update(self, resource_type, id):
-        print ('New Route - http_dynamic_resource_update method ', resource_type)
+        logger.debug('New Route - http_dynamic_resource_update method ' + resource_type)
         # obj_type = resource_type.replace('-', '_')
         obj_type = resource_type
         obj_dict = self.get_req_json_obj()
@@ -316,14 +325,14 @@ class VncApiDynamicServerBase(VncApiServerBase):
         except Exception:
             err_msg = 'Error in http_dynamic_resource_update for %s' % (obj_dict)
             err_msg += cfgm_common.utils.detailed_traceback()
-            # print(err_msg)
+            logger.error(err_msg)
             self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
             raise cfgm_common.exceptions.HttpError(500, err_msg)
         self._invoke_dynamic_extension("post_dynamic_resource_update", obj_type, obj_dict)
         return res_obj_dict
 
     def http_dynamic_resource_patch(self, resource_type, id):
-        print ('New Route - http_dynamic_resource_patch method ', resource_type)
+        logger.debug('New Route - http_dynamic_resource_patch method ' + resource_type)
         # obj_type = resource_type.replace('-', '_')
         obj_type = resource_type
         obj_dict = self.get_req_json_obj()
@@ -336,7 +345,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         self._invoke_dynamic_extension("post_dynamic_resource_patch", obj_type, obj_dict)
 
     def http_dynamic_resource_delete(self, resource_type, id):
-        print ('New Route - http_dynamic_resource_delete method ', resource_type)
+        logger.debug('New Route - http_dynamic_resource_delete method ' + resource_type)
         # obj_type = resource_type.replace('-', '_')
         obj_type = resource_type
         self._invoke_dynamic_extension("pre_dynamic_resource_delete", obj_type, id)
@@ -353,7 +362,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         self._invoke_dynamic_extension("post_dynamic_resource_delete", obj_type, id)
 
     def http_dynamic_resource_list(self, resource_type):
-        print ('New Route - http_dynamic_resource_list method ', resource_type)
+        logger.debug('New Route - http_dynamic_resource_list method ' + resource_type)
         # obj_type = resource_type.replace('-', '_')
         obj_type = resource_type
         if self.get_resource_class(obj_type) is None:
@@ -536,8 +545,12 @@ class VncApiDynamicServerBase(VncApiServerBase):
     def _get_id_from_fq_name(self, resource_type, fq_name):
         self.get_req_json_obj()['type'] = resource_type
         self.get_req_json_obj()['fq_name'] = fq_name
-        uuid = self.fq_name_to_id_http_post()
-        return uuid['uuid']
+        try:
+            uuid = self.fq_name_to_id_http_post()
+            return uuid['uuid']
+        except cfgm_common.exceptions.HttpError as he:
+            logger.error("No uuid was found for given fq_name :" + ':'.join(fq_name))
+            return None
 
     def _read_child_resources(self, res_dict, obj_type):
         r_class = self.get_resource_class(obj_type)
