@@ -9,6 +9,8 @@ class VncError(Exception):
 # end class VncError
 
 class ServiceUnavailableError(VncError):
+    error_code = "50001"
+
     def __init__(self, code):
         self._reason_code = code
     # end __init__
@@ -19,6 +21,8 @@ class ServiceUnavailableError(VncError):
 # end class ServiceUnavailableError
 
 class DatabaseUnavailableError(ServiceUnavailableError):
+    error_code = "50002"
+
     def __init__(self, db_type, code=None):
         self._db_type = db_type
         super(DatabaseUnavailableError, self).__init__(code)
@@ -31,6 +35,8 @@ class DatabaseUnavailableError(ServiceUnavailableError):
 # end class DatabaseUnavailableError
 
 class TimeOutError(VncError):
+    error_code = "50003"
+
     def __init__(self, code):
         self._reason_code = code
     # end __init__
@@ -42,6 +48,8 @@ class TimeOutError(VncError):
 
 
 class BadRequest(Exception):
+    error_code = "40001"
+
     def __init__(self, status_code, content):
         self.status_code = status_code
         self.content = content
@@ -54,6 +62,7 @@ class BadRequest(Exception):
 
 
 class NoIdError(VncError):
+    error_code = "40002"
 
     def __init__(self, unknown_id):
         self._unknown_id = unknown_id
@@ -66,6 +75,7 @@ class NoIdError(VncError):
 
 
 class MaxRabbitPendingError(VncError):
+    error_code = "50004"
 
     def __init__(self, npending):
         self._npending = npending
@@ -77,6 +87,8 @@ class MaxRabbitPendingError(VncError):
 # end class MaxRabbitPendingError
 
 class ResourceExistsError(VncError):
+    error_code = "40003"
+
     def __init__(self, eexists_fq_name, eexists_id, location=None):
         self._eexists_fq_name = eexists_fq_name
         self._eexists_id = eexists_id
@@ -95,6 +107,8 @@ class ResourceExistsError(VncError):
 # end class ResourceExistsError
 
 class ResourceTypeUnknownError(VncError):
+    error_code = "40004"
+
     def __init__(self, obj_type):
         self._unknown_type = obj_type
     # end __init__
@@ -105,35 +119,41 @@ class ResourceTypeUnknownError(VncError):
 # end class ResourceTypeUnknownError
 
 class PermissionDenied(VncError):
+    error_code = "40005"
     pass
 # end class PermissionDenied
 
 
 class RefsExistError(VncError):
+    error_code = "40006"
     pass
 # end class RefsExistError
 
 
 class ResourceExhaustionError(VncError):
+    error_code = "40007"
     pass
 # end class ResourceExhaustionError
 
 
 class NoUserAgentKey(VncError):
+    error_code = "40008"
     pass
 # end class NoUserAgentKey
 
 
 class UnknownAuthMethod(VncError):
+    error_code = "40009"
     pass
 # end class UnknownAuthMethod
 
 
 class HttpError(VncError):
 
-    def __init__(self, status_code, content):
+    def __init__(self, status_code, content, error_code=None):
         self.status_code = status_code
         self.content = content
+        self.error_code = error_code
     # end __init__
 
     def __str__(self):
@@ -143,14 +163,17 @@ class HttpError(VncError):
 
 
 class AmbiguousParentError(VncError):
+    error_code = "40010"
     pass
 
 
 class InvalidSessionID(VncError):
+    error_code = "40011"
     pass
 # end InvalidSessionID
 
 class SearchServiceError(VncError):
+    error_code = "50005"
     def __init__(self, message):
         self._message = message
     # end __init__

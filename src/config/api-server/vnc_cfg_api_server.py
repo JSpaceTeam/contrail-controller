@@ -379,7 +379,7 @@ class VncApiServer(object):
                     get_request(), ref_uuid)
                 if not ok:
                     (code, err_msg) = status
-                    raise cfgm_common.exceptions.HttpError(code, err_msg)
+                    raise cfgm_common.exceptions.HttpError(code, err_msg, "10003")
     # end _validate_perms_in_request
 
     # http_resource_<oper> - handlers invoked from
@@ -393,7 +393,7 @@ class VncApiServer(object):
         obj_dict = get_request().json[resource_type]
         self._post_validate(obj_type, obj_dict=obj_dict)
         fq_name = obj_dict['fq_name']
-       
+
         try:
             self._extension_mgrs['resourceApi'].map_method(
                  'pre_%s_create' %(obj_type), obj_dict)
@@ -412,21 +412,21 @@ class VncApiServer(object):
         ok, result = self._validate_props_in_request(r_class, obj_dict)
         if not ok:
             result = 'Bad property in create: ' + result
-            raise cfgm_common.exceptions.HttpError(400, result)
+            raise cfgm_common.exceptions.HttpError(400, result, "40001")
 
         # references validator
         ok, result = self._validate_refs_in_request(r_class, obj_dict)
         if not ok:
             result = 'Bad reference in create: ' + result
-            raise cfgm_common.exceptions.HttpError(400, result)
+            raise cfgm_common.exceptions.HttpError(400, result, "40001")
 
         # parent check
         if r_class.parent_types and 'parent_type' not in obj_dict:
-            raise cfgm_common.exceptions.HttpError(400, 'No parent_type attribute')
+            raise cfgm_common.exceptions.HttpError(400, 'No parent_type attribute', "40001")
 
         if r_class.parent_types and obj_dict.get('parent_type') not in r_class.parent_types:
             err_msg = "parent_type is invalid.Valid parent type(s): %s" % ",".join(r_class.parent_types)
-            raise cfgm_common.exceptions.HttpError(400, err_msg)
+            raise cfgm_common.exceptions.HttpError(400, err_msg, "40001")
 
 
         # common handling for all resource create
@@ -436,7 +436,7 @@ class VncApiServer(object):
             (code, msg) = result
             fq_name_str = ':'.join(obj_dict.get('fq_name', []))
             self.config_object_error(None, fq_name_str, obj_type, 'http_post', msg)
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40001")
 
         uuid_in_req = result
         name = obj_dict['fq_name'][-1]
@@ -459,20 +459,20 @@ class VncApiServer(object):
                     get_request(), parent_uuid)
                 if not ok:
                     (code, err_msg) = status
-                    raise cfgm_common.exceptions.HttpError(code, err_msg)
+                    raise cfgm_common.exceptions.HttpError(code, err_msg, "40005")
                 self._permissions.set_user_role(get_request(), obj_dict)
             except NoIdError:
                 err_msg = 'Parent ' + pformat(parent_fq_name) + ' type ' + parent_type + ' does not exist'
                 fq_name_str = ':'.join(parent_fq_name)
                 self.config_object_error(None, fq_name_str, obj_type, 'http_post', err_msg)
-                raise cfgm_common.exceptions.HttpError(400, err_msg)
+                raise cfgm_common.exceptions.HttpError(400, err_msg, "40001")
 
         # Validate perms on references
         try:
             self._validate_perms_in_request(r_class, obj_type, obj_dict)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                400, 'Unknown reference in resource create %s.' %(obj_dict))
+                400, 'Unknown reference in resource create %s.' %(obj_dict), "40014")
 
         # State modification starts from here. Ensure that cleanup is done for all state changes
         cleanup_on_failure = []
@@ -540,7 +540,7 @@ class VncApiServer(object):
         if not ok:
             undo_create(result)
             code, msg = result
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "50006")
 
         rsp_body = {}
         rsp_body['name'] = name
@@ -591,10 +591,10 @@ class VncApiServer(object):
             req_obj_type = db_conn.uuid_to_obj_type(id)
             if req_obj_type != obj_type:
                 raise cfgm_common.exceptions.HttpError(
-                    404, 'No %s object found for id %s' %(resource_type, id))
+                    404, 'No %s object found for id %s' %(resource_type, id), "40002")
             fq_name = db_conn.uuid_to_fq_name(id)
         except NoIdError as e:
-            raise cfgm_common.exceptions.HttpError(404, str(e))
+            raise cfgm_common.exceptions.HttpError(404, str(e), "40002")
 
         # common handling for all resource get
         (ok, result) = self._get_common(get_request(), id)
@@ -602,7 +602,7 @@ class VncApiServer(object):
             (code, msg) = result
             self.config_object_error(
                 id, None, obj_type, 'http_get', msg)
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40015")
 
         db_conn = self._db_conn
         if etag:
@@ -612,7 +612,7 @@ class VncApiServer(object):
                 # Not present in DB
                 self.config_object_error(
                     id, None, obj_type, 'http_get', result)
-                raise cfgm_common.exceptions.HttpError(404, result)
+                raise cfgm_common.exceptions.HttpError(404, result, "40015")
 
             is_latest = result
             if is_latest:
@@ -639,16 +639,16 @@ class VncApiServer(object):
                 self.config_object_error(id, None, obj_type, 'http_get', result)
         except NoIdError as e:
             # Not present in DB
-            raise cfgm_common.exceptions.HttpError(404, str(e))
+            raise cfgm_common.exceptions.HttpError(404, str(e), "40002")
         if not ok:
-            raise cfgm_common.exceptions.HttpError(500, result)
+            raise cfgm_common.exceptions.HttpError(500, result, "40015")
 
         # check visibility
         if (not result['id_perms'].get('user_visible', True) and
             not self.is_admin_request()):
             result = 'This object is not visible by users: %s' % id
             self.config_object_error(id, None, obj_type, 'http_get', result)
-            raise cfgm_common.exceptions.HttpError(404, result)
+            raise cfgm_common.exceptions.HttpError(404, result, "40005")
 
         rsp_body = {}
         rsp_body['uuid'] = id
@@ -699,7 +699,7 @@ class VncApiServer(object):
             req_obj_type = db_conn.uuid_to_obj_type(id)
             if req_obj_type != obj_type:
                 raise cfgm_common.exceptions.HttpError(
-                    404, 'No %s object found for id %s' %(resource_type, id))
+                    404, 'No %s object found for id %s' %(resource_type, id), "40002")
             obj_ids = {'uuid': id}
             (read_ok, read_result) = db_conn.dbe_read(resource_type, obj_ids)
             if not read_ok:
@@ -707,19 +707,19 @@ class VncApiServer(object):
                     404, 'No %s object found for id %s' %(resource_type, id))
             fq_name = read_result['fq_name']
         except NoIdError as e:
-            raise cfgm_common.exceptions.HttpError(404, str(e))
+            raise cfgm_common.exceptions.HttpError(404, str(e), "40002")
 
         # properties validator
         ok, result = self._validate_props_in_request(r_class, obj_dict)
         if not ok:
             result = 'Bad property in update: ' + result
-            raise cfgm_common.exceptions.HttpError(400, result)
+            raise cfgm_common.exceptions.HttpError(400, result, "40001")
 
         # references validator
         ok, result = self._validate_refs_in_request(r_class, obj_dict)
         if not ok:
             result = 'Bad reference in update: ' + result
-            raise cfgm_common.exceptions.HttpError(400, result)
+            raise cfgm_common.exceptions.HttpError(400, result, "40014")
 
         # common handling for all resource put
         (ok, result) = self._put_common(
@@ -727,7 +727,7 @@ class VncApiServer(object):
         if not ok:
             (code, msg) = result
             self.config_object_error(id, None, obj_type, 'http_put', msg)
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40016")
 
         # Validate perms on references
         try:
@@ -735,7 +735,7 @@ class VncApiServer(object):
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(400,
                 'Unknown reference in resource update %s %s.'
-                %(obj_type, obj_dict))
+                %(obj_type, obj_dict), "40014")
 
         # State modification starts from here. Ensure that cleanup is done for all state changes
         cleanup_on_failure = []
@@ -779,7 +779,7 @@ class VncApiServer(object):
         if not ok:
             undo_update(result)
             code, msg = result
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40016")
 
         rsp_body = {}
         rsp_body['uuid'] = id
@@ -818,11 +818,11 @@ class VncApiServer(object):
             req_obj_type = db_conn.uuid_to_obj_type(id)
             if req_obj_type != obj_type:
                 raise cfgm_common.exceptions.HttpError(
-                    404, 'No %s object found for id %s' %(resource_type, id))
+                    404, 'No %s object found for id %s' %(resource_type, id), "40002")
             _ = db_conn.uuid_to_fq_name(id)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'ID %s does not exist' %(id))
+                404, 'ID %s does not exist' %(id), "40002")
 
 
         try:
@@ -847,7 +847,7 @@ class VncApiServer(object):
             (read_ok, read_result) = db_conn.dbe_read(
                 resource_type, obj_ids, obj_fields)
         except NoIdError as e:
-            raise cfgm_common.exceptions.HttpError(404, str(e))
+            raise cfgm_common.exceptions.HttpError(404, str(e), "40002")
         if not read_ok:
             self.config_object_error(
                 id, None, obj_type, 'http_delete', read_result)
@@ -869,7 +869,7 @@ class VncApiServer(object):
         if not ok:
             (code, msg) = del_result
             self.config_object_error(id, None, obj_type, 'http_delete', msg)
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40017")
 
         fq_name = read_result['fq_name']
         ifmap_id = imid.get_ifmap_id_from_fq_name(resource_type, fq_name)
@@ -900,7 +900,7 @@ class VncApiServer(object):
                     exist_hrefs)
                 self.config_object_error(
                     id, None, obj_type, 'http_delete', err_msg)
-                raise cfgm_common.exceptions.HttpError(409, err_msg)
+                raise cfgm_common.exceptions.HttpError(409, err_msg, "40006")
 
         relaxed_refs = set(db_conn.dbe_get_relaxed_refs(id))
         for backref_field in r_class.backref_fields:
@@ -915,7 +915,7 @@ class VncApiServer(object):
                     exist_hrefs)
                 self.config_object_error(
                     id, None, obj_type, 'http_delete', err_msg)
-                raise cfgm_common.exceptions.HttpError(409, err_msg)
+                raise cfgm_common.exceptions.HttpError(409, err_msg, "40006")
 
         # State modification starts from here. Ensure that cleanup is done for all state changes
         cleanup_on_failure = []
@@ -974,7 +974,7 @@ class VncApiServer(object):
             ok, result = stateful_delete()
         except NoIdError as e:
             raise cfgm_common.exceptions.HttpError(
-                404, 'No %s object found for id %s' %(resource_type, id))
+                404, 'No %s object found for id %s' %(resource_type, id), "40002")
         except Exception as e:
             ok = False
             err_msg = cfgm_common.utils.detailed_traceback()
@@ -982,7 +982,7 @@ class VncApiServer(object):
         if not ok:
             undo_delete(result)
             code, msg = result
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40017")
 
         try:
             self._extension_mgrs['resourceApi'].map_method(
@@ -1034,7 +1034,7 @@ class VncApiServer(object):
             (code, msg) = result
             self.config_object_error(
                 None, None, '%ss' %(resource_type), 'http_get_collection', msg)
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40018")
 
         if 'count' in get_request().query:
             is_count = 'true' in get_request().query.count.lower()
@@ -1060,7 +1060,7 @@ class VncApiServer(object):
                 filters = {'field_names': ff_names, 'field_values': ff_values}
             except Exception as e:
                 raise cfgm_common.exceptions.HttpError(
-                    400, 'Invalid filter ' + filter_params)
+                    400, 'Invalid filter ' + filter_params, "40001")
         else:
             filters = None
 
@@ -1675,7 +1675,7 @@ class VncApiServer(object):
                 (ok, status) = self._rbac.validate_request(get_request())
                 if not ok:
                     (code, err_msg) = status
-                    raise cfgm_common.exceptions.HttpError(code, err_msg)
+                    raise cfgm_common.exceptions.HttpError(code, err_msg, "40005")
                 response = handler(*args, **kwargs)
                 self._generate_rest_api_response_trace(trace, response)
 
@@ -1686,6 +1686,16 @@ class VncApiServer(object):
                 if trace:
                     trace.trace_msg(name='RestApiTraceBuf',
                         sandesh=self._sandesh)
+                #Add extra error definition attributes to the exception object
+                #This will add any available extra attributes to all exception objects, however,
+                #only the HttpError type exceptions will show those extra attributes in the response
+                #because of the if-else block below.
+                #For all non HttpError types, the response is 500, Internal Server Error from bottle.py
+                #A possibility to report the error with some details is to check for any content in the exception
+                #object and in case it has some content, then abort with 500 and the content as message.
+
+                self.handle_error_code(e)
+
                 # don't log details of cfgm_common.exceptions.HttpError i.e handled error cases
                 if isinstance(e, cfgm_common.exceptions.HttpError):
                     bottle.abort(e.status_code, e.content)
@@ -1694,6 +1704,13 @@ class VncApiServer(object):
                     cgitb_hook(file=string_buf, format="text")
                     err_msg = string_buf.getvalue()
                     self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
+
+                    #if exception has some non empty content
+                    if hasattr(e, 'content'):
+                        msg = getattr(e, 'content')
+                        if msg and msg.strip:
+                            bottle.abort(500, msg)
+
                     raise
 
         bottle.route(uri, method, handler_trap_exception)
@@ -1756,16 +1773,16 @@ class VncApiServer(object):
             obj_type = db_conn.uuid_to_obj_type(id)
             if obj_type != 'virtual_network':
                 raise cfgm_common.exceptions.HttpError(
-                    404, 'No virtual-network object found for id %s' %(id))
+                    404, 'No virtual-network object found for id %s' %(id), "40002")
             vn_name = db_conn.uuid_to_fq_name(id)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'ID %s does not exist' %(id))
+                404, 'ID %s does not exist' %(id), "40002")
         if (vn_name == cfgm_common.IP_FABRIC_VN_FQ_NAME or
             vn_name == cfgm_common.LINK_LOCAL_VN_FQ_NAME):
             raise cfgm_common.exceptions.HttpError(
                 409,
-                'Can not delete system created default virtual-network '+id)
+                'Can not delete system created default virtual-network '+id, "40019")
         super(VncApiServer, self).virtual_network_http_delete(id)
    # end
 
@@ -1800,10 +1817,10 @@ class VncApiServer(object):
     def obj_perms_http_get(self):
         if 'token' not in get_request().query:
             raise cfgm_common.exceptions.HttpError(
-                400, 'User token needed for validation')
+                400, 'User token needed for validation', "40020")
         if 'uuid' not in get_request().query:
             raise cfgm_common.exceptions.HttpError(
-                400, 'Object uuid needed for validation')
+                400, 'Object uuid needed for validation', "40021")
         obj_uuid = get_request().query.uuid
         user_token = get_request().query.token
 
@@ -1833,12 +1850,12 @@ class VncApiServer(object):
     def prop_collection_http_get(self):
         if 'uuid' not in get_request().query:
             raise cfgm_common.exceptions.HttpError(
-                400, 'Object uuid needed for property collection get')
+                400, 'Object uuid needed for property collection get', "40021")
         obj_uuid = get_request().query.uuid
 
         if 'fields' not in get_request().query:
             raise cfgm_common.exceptions.HttpError(
-                400, 'Object fields needed for property collection get')
+                400, 'Object fields needed for property collection get', "40022")
         obj_fields = get_request().query.fields.split(',')
 
         if 'position' in get_request().query:
@@ -1850,7 +1867,7 @@ class VncApiServer(object):
             obj_type = self._db_conn.uuid_to_obj_type(obj_uuid)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'Object Not Found: ' + obj_uuid)
+                404, 'Object Not Found: ' + obj_uuid, "40002")
         resource_class = self.get_resource_class(obj_type)
 
         for obj_field in obj_fields:
@@ -1858,7 +1875,7 @@ class VncApiServer(object):
                 (obj_field not in resource_class.prop_map_fields)):
                 err_msg = '%s neither "ListProperty" nor "MapProperty"' %(
                     obj_field)
-                raise cfgm_common.exceptions.HttpError(400, err_msg)
+                raise cfgm_common.exceptions.HttpError(400, err_msg, "40023")
         # request validations over
 
         # common handling for all resource get
@@ -1867,7 +1884,7 @@ class VncApiServer(object):
             (code, msg) = result
             self.config_object_error(
                 obj_uuid, None, None, 'prop_collection_http_get', msg)
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40018")
 
         try:
             ok, result = self._db_conn.prop_collection_get(
@@ -1877,9 +1894,9 @@ class VncApiServer(object):
                     obj_uuid, None, None, 'prop_collection_http_get', result)
         except NoIdError as e:
             # Not present in DB
-            raise cfgm_common.exceptions.HttpError(404, str(e))
+            raise cfgm_common.exceptions.HttpError(404, str(e), "40002")
         if not ok:
-            raise cfgm_common.exceptions.HttpError(500, result)
+            raise cfgm_common.exceptions.HttpError(500, result, "50006")
 
         # check visibility
         if (not result['id_perms'].get('user_visible', True) and
@@ -1887,7 +1904,7 @@ class VncApiServer(object):
             result = 'This object is not visible by users: %s' % id
             self.config_object_error(
                 id, None, None, 'prop_collection_http_get', result)
-            raise cfgm_common.exceptions.HttpError(404, result)
+            raise cfgm_common.exceptions.HttpError(404, result, "40018")
 
         # Prepare response
         del result['id_perms']
@@ -1903,13 +1920,13 @@ class VncApiServer(object):
         obj_uuid = request_params.get('uuid')
         if not obj_uuid:
             err_msg = 'Error: prop_collection_update needs obj_uuid'
-            raise cfgm_common.exceptions.HttpError(400, err_msg)
+            raise cfgm_common.exceptions.HttpError(400, err_msg, "40021")
 
         try:
             obj_type = self._db_conn.uuid_to_obj_type(obj_uuid)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'Object Not Found: ' + obj_uuid)
+                404, 'Object Not Found: ' + obj_uuid, "40002")
         resource_class = self.get_resource_class(obj_type)
 
         for req_param in request_params.get('updates') or []:
@@ -1921,7 +1938,7 @@ class VncApiServer(object):
             else:
                 err_msg = '%s neither "ListProperty" nor "MapProperty"' %(
                     obj_field)
-                raise cfgm_common.exceptions.HttpError(400, err_msg)
+                raise cfgm_common.exceptions.HttpError(400, err_msg, "40023")
 
             req_oper = req_param.get('operation').lower()
             field_val = req_param.get('value')
@@ -1930,32 +1947,32 @@ class VncApiServer(object):
                 if req_oper not in ('add', 'modify', 'delete'):
                     err_msg = 'Unsupported operation %s in request %s' %(
                         req_oper, json.dumps(req_param))
-                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                    raise cfgm_common.exceptions.HttpError(400, err_msg, "40025")
                 if ((req_oper == 'add') and field_val is None):
                     err_msg = 'Add needs field value in request %s' %(
                         req_oper, json.dumps(req_param))
-                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                    raise cfgm_common.exceptions.HttpError(400, err_msg, "40022")
                 elif ((req_oper == 'modify') and
                     None in (field_val, field_pos)):
                     err_msg = 'Modify needs field value and position in request %s' %(
                         req_oper, json.dumps(req_param))
-                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                    raise cfgm_common.exceptions.HttpError(400, err_msg, "40023")
                 elif ((req_oper == 'delete') and field_pos is None):
                     err_msg = 'Delete needs field position in request %s' %(
                         req_oper, json.dumps(req_param))
-                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                    raise cfgm_common.exceptions.HttpError(400, err_msg, "40022")
             elif prop_coll_type == 'map':
                 if req_oper not in ('set', 'delete'):
                     err_msg = 'Unsupported operation %s in request %s' %(
                         req_oper, json.dumps(req_param))
-                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                    raise cfgm_common.exceptions.HttpError(400, err_msg, "40025")
                 if ((req_oper == 'set') and field_val is None):
                     err_msg = 'Set needs field value in request %s' %(
                         req_oper, json.dumps(req_param))
                 elif ((req_oper == 'delete') and field_pos is None):
                     err_msg = 'Delete needs field position in request %s' %(
                         req_oper, json.dumps(req_param))
-                    raise cfgm_common.exceptions.HttpError(400, err_msg)
+                    raise cfgm_common.exceptions.HttpError(400, err_msg, "40022")
 
         # Validations over. Invoke type specific hook and extension manager
         try:
@@ -1964,7 +1981,7 @@ class VncApiServer(object):
                                          obj_type, {'uuid':obj_uuid})
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'Object Not Found: '+obj_uuid)
+                404, 'Object Not Found: '+obj_uuid, "40002")
         except Exception as e:
             read_ok = False
             read_result = cfgm_common.utils.detailed_traceback()
@@ -1972,7 +1989,7 @@ class VncApiServer(object):
         if not read_ok:
             self.config_object_error(
                 obj_uuid, None, obj_type, 'prop_collection_update', read_result)
-            raise cfgm_common.exceptions.HttpError(500, read_result)
+            raise cfgm_common.exceptions.HttpError(500, read_result, "40018")
 
         # invoke the extension
         try:
@@ -1998,7 +2015,7 @@ class VncApiServer(object):
             (code, msg) = pre_update_result
             self.config_object_error(
                 obj_uuid, None, obj_type, 'prop_collection_update', msg)
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40024")
 
         # the actual db update
         try:
@@ -2007,12 +2024,12 @@ class VncApiServer(object):
                 obj_type, obj_uuid, request_params.get('updates'))
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'uuid ' + obj_uuid + ' not found')
+                404, 'uuid ' + obj_uuid + ' not found', "40002")
         if not ok:
             (code, msg) = update_result
             self.config_object_error(
                 obj_uuid, None, obj_type, 'prop_collection_update', msg)
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40024")
 
         # type-specific hook
         get_context().set_state('POST_DBE_UPDATE')
@@ -2023,7 +2040,7 @@ class VncApiServer(object):
             (code, msg) = pre_update_result
             self.config_object_error(
                 obj_uuid, None, obj_type, 'prop_collection_update', msg)
-            raise cfgm_common.exceptions.HttpError(code, msg)
+            raise cfgm_common.exceptions.HttpError(code, msg, "40024")
 
         # invoke the extension
         try:
@@ -2072,17 +2089,17 @@ class VncApiServer(object):
             err_msg = 'Bad Request: type/uuid/ref-type/operation is null: '
             err_msg += '%s, %s, %s, %s.' \
                         %(obj_type, obj_uuid, ref_type, operation)
-            raise cfgm_common.exceptions.HttpError(400, err_msg)
+            raise cfgm_common.exceptions.HttpError(400, err_msg, "40025")
 
         operation = operation.upper()
         if operation not in ['ADD', 'DELETE']:
             err_msg = 'Bad Request: operation should be add or delete: %s' \
                       %(operation)
-            raise cfgm_common.exceptions.HttpError(400, err_msg)
+            raise cfgm_common.exceptions.HttpError(400, err_msg, "40025")
 
         if not ref_uuid and not ref_fq_name:
             err_msg = 'Bad Request: ref-uuid or ref-fq-name must be specified'
-            raise cfgm_common.exceptions.HttpError(400, err_msg)
+            raise cfgm_common.exceptions.HttpError(400, err_msg, "40021")
 
         ref_type = ref_type.replace('-', '_')
         if not ref_uuid:
@@ -2090,7 +2107,7 @@ class VncApiServer(object):
                 ref_uuid = self._db_conn.fq_name_to_uuid(ref_type, ref_fq_name)
             except NoIdError:
                 raise cfgm_common.exceptions.HttpError(
-                    404, 'Name ' + pformat(ref_fq_name) + ' not found')
+                    404, 'Name ' + pformat(ref_fq_name) + ' not found', "40002")
 
         # To verify existence of the reference being added
         if operation == 'ADD':
@@ -2099,7 +2116,7 @@ class VncApiServer(object):
                     ref_type, {'uuid': ref_uuid}, obj_fields=['fq_name'])
             except NoIdError:
                 raise cfgm_common.exceptions.HttpError(
-                    404, 'Object Not Found: ' + ref_uuid)
+                    404, 'Object Not Found: ' + ref_uuid, "40002")
             except Exception as e:
                 read_ok = False
                 read_result = cfgm_common.utils.detailed_traceback()
@@ -2110,14 +2127,14 @@ class VncApiServer(object):
                                          obj_type, get_request().json)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'Object Not Found: '+obj_uuid)
+                404, 'Object Not Found: '+obj_uuid, "40002")
         except Exception as e:
             read_ok = False
             read_result = cfgm_common.utils.detailed_traceback()
 
         if not read_ok:
             self.config_object_error(obj_uuid, None, obj_type, 'ref_update', read_result)
-            raise cfgm_common.exceptions.HttpError(500, read_result)
+            raise cfgm_common.exceptions.HttpError(500, read_result, "40015")
 
         obj_dict = copy.deepcopy(read_result)
 
@@ -2141,7 +2158,7 @@ class VncApiServer(object):
                 fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
             except NoIdError:
                 raise cfgm_common.exceptions.HttpError(
-                    404, 'UUID ' + obj_uuid + ' not found')
+                    404, 'UUID ' + obj_uuid + ' not found', "40021")
 
             if operation == 'ADD':
                 if ref_type+'_refs' not in obj_dict:
@@ -2158,7 +2175,7 @@ class VncApiServer(object):
             if not ok:
                 (code, msg) = put_result
                 self.config_object_error(obj_uuid, None, obj_type, 'ref_update', msg)
-                raise cfgm_common.exceptions.HttpError(code, msg)
+                raise cfgm_common.exceptions.HttpError(code, msg, "40016")
         # end if r_class
 
         obj_type = obj_type.replace('-', '_')
@@ -2166,7 +2183,7 @@ class VncApiServer(object):
             id = self._db_conn.ref_update(obj_type, obj_uuid, ref_type, ref_uuid, {'attr': attr}, operation)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'uuid ' + obj_uuid + ' not found')
+                404, 'uuid ' + obj_uuid + ' not found', "40002")
 
         # invoke the extension
         try:
@@ -2214,14 +2231,14 @@ class VncApiServer(object):
         if None in (obj_uuid, ref_uuid):
             err_msg = 'Bad Request: Both uuid and ref-uuid should be specified: '
             err_msg += '%s, %s.' %(obj_uuid, ref_uuid)
-            raise cfgm_common.exceptions.HttpError(400, err_msg)
+            raise cfgm_common.exceptions.HttpError(400, err_msg, "40021")
 
         try:
             obj_type = self._db_conn.uuid_to_obj_type(obj_uuid)
             self._db_conn.ref_relax_for_delete(obj_uuid, ref_uuid)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'uuid ' + obj_uuid + ' not found')
+                404, 'uuid ' + obj_uuid + ' not found', "40002")
 
         apiConfig = VncApiCommon()
         apiConfig.object_type = obj_type.replace('-', '_')
@@ -2250,13 +2267,13 @@ class VncApiServer(object):
             id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'Name ' + pformat(fq_name) + ' not found')
+                404, 'Name ' + pformat(fq_name) + ' not found', "40002")
 
         # ensure user has access to this id
         ok, result = self._permissions.check_perms_read(bottle.request, id)
         if not ok:
             err_code, err_msg = result
-            raise cfgm_common.exceptions.HttpError(err_code, err_msg)
+            raise cfgm_common.exceptions.HttpError(err_code, err_msg, "40005")
 
         return {'uuid': id}
     # end fq_name_to_id_http_post
@@ -2269,13 +2286,13 @@ class VncApiServer(object):
         ok, result = self._permissions.check_perms_read(get_request(), obj_uuid)
         if not ok:
             err_code, err_msg = result
-            raise cfgm_common.exceptions.HttpError(err_code, err_msg)
+            raise cfgm_common.exceptions.HttpError(err_code, err_msg, "40005")
 
         try:
             fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-               404, 'UUID ' + obj_uuid + ' not found')
+               404, 'UUID ' + obj_uuid + ' not found', "40002")
 
         obj_type = self._db_conn.uuid_to_obj_type(obj_uuid)
         return {'fq_name': fq_name, 'type': obj_type}
@@ -2305,12 +2322,12 @@ class VncApiServer(object):
                 return {'value': result}
             except NoUserAgentKey:
                 raise cfgm_common.exceptions.HttpError(
-                    404, "Unknown User-Agent key " + key)
+                    404, "Unknown User-Agent key " + key, "40008")
         elif oper == 'DELETE':
             result = self._db_conn.useragent_kv_delete(key)
         else:
             raise cfgm_common.exceptions.HttpError(
-                404, "Invalid Operation " + oper)
+                404, "Invalid Operation " + oper, "40025")
 
     # end useragent_kv_http_post
 
@@ -2372,7 +2389,7 @@ class VncApiServer(object):
         resource_type = get_request().json.get('type') # e.g. virtual-network
         if not resource_type:
             raise cfgm_common.exceptions.HttpError(
-                400, "Bad Request, no 'type' in POST body")
+                400, "Bad Request, no 'type' in POST body", "40004")
 
         return self._http_post_filter(resource_type)
     #end list_bulk_collection_http_post
@@ -2383,7 +2400,7 @@ class VncApiServer(object):
         obj_class = self.get_resource_class(resource_type)
         if not obj_class:
             raise cfgm_common.exceptions.HttpError(400,
-                   "Bad Request, Unknown type %s in POST body" %(resource_type))
+                   "Bad Request, Unknown type %s in POST body" %(resource_type), "40004")
 
         body = get_request().json
         try:
@@ -2419,7 +2436,7 @@ class VncApiServer(object):
                filters = {'field_names': ff_names, 'field_values': ff_values}
             except Exception as e:
                raise cfgm_common.exceptions.HttpError(
-                   400, 'Invalid filter ' + filter_params)
+                   400, 'Invalid filter ' + filter_params, "40001")
         else:
             filters = None
 
@@ -2788,7 +2805,7 @@ class VncApiServer(object):
         if not ok:
             self.config_object_error(None, None, '%ss' %(obj_type),
                                      'dbe_list', result)
-            raise cfgm_common.exceptions.HttpError(404, result)
+            raise cfgm_common.exceptions.HttpError(404, result, "40002")
 
         # If only counting, return early
         if is_count:
@@ -2820,7 +2837,7 @@ class VncApiServer(object):
                 (ok, result) = self._db_conn.dbe_read_multi(
                                     obj_type, obj_ids_list, obj_fields)
                 if not ok:
-                    raise cfgm_common.exceptions.HttpError(404, result)
+                    raise cfgm_common.exceptions.HttpError(404, result, "40002")
                 for obj_result in result:
                     if obj_result['id_perms'].get('user_visible', True):
                         obj_dict = {}
@@ -2869,7 +2886,7 @@ class VncApiServer(object):
                                 obj_type, obj_ids_list, obj_fields)
 
             if not ok:
-                raise cfgm_common.exceptions.HttpError(404, result)
+                raise cfgm_common.exceptions.HttpError(404, result, "40002")
 
             for obj_result in result:
                 obj_dict = {}
@@ -3076,18 +3093,18 @@ class VncApiServer(object):
             fval = obj_dict.get(fname)
             if not fval:
                 raise cfgm_common.exceptions.HttpError(
-                    400, "Bad Request, no %s in POST body" %(fname))
+                    400, "Bad Request, no %s in POST body" %(fname), "40023")
             name = fval[-1]
             if not name:
                 raise cfgm_common.exceptions.HttpError(
-                    400, "Bad Request, fq_name cannot be empty")
+                    400, "Bad Request, fq_name cannot be empty", "40023")
             return fval
         fq_name = _check_field_present('fq_name')
 
         # well-formed name checks
         if illegal_xml_chars_RE.search(fq_name[-1]):
             raise cfgm_common.exceptions.HttpError(400,
-                "Bad Request, name has illegal xml characters")
+                "Bad Request, name has illegal xml characters", "40001")
         if obj_type[:].replace('-','_') == 'route_target':
             invalid_chars = self._INVALID_NAME_CHARS - set(':')
         else:
@@ -3095,7 +3112,7 @@ class VncApiServer(object):
         if any((c in invalid_chars) for c in fq_name[-1]):
             raise cfgm_common.exceptions.HttpError(400,
                 "Bad Request, name has one of invalid chars %s"
-                %(invalid_chars))
+                %(invalid_chars), "40001")
     # end _http_post_validate
 
     def _update_perms2_ownership(self, request, obj_type, obj_dict, multi_tenancy_owner):
@@ -3261,7 +3278,7 @@ class VncApiServer(object):
                 obj_type, obj_dict['fq_name'])
             raise cfgm_common.exceptions.HttpError(
                 409, '' + pformat(obj_dict['fq_name']) +
-                ' already exists with uuid: ' + obj_uuid)
+                ' already exists with uuid: ' + obj_uuid, "40003")
         except NoIdError:
             pass
 
@@ -3310,7 +3327,7 @@ class VncApiServer(object):
                 fq_name = self._db_conn.uuid_to_fq_name(uuid_in_req)
                 raise cfgm_common.exceptions.HttpError(
                     409, uuid_in_req + ' already exists with fq_name: ' +
-                    pformat(fq_name))
+                    pformat(fq_name), "40003")
             except NoIdError:
                 pass
             apiConfig.identifier_uuid = uuid_in_req
@@ -3344,7 +3361,7 @@ class VncApiServer(object):
             vn_fq_name = self._db_conn.uuid_to_fq_name(id)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'Virtual Network ' + id + ' not found!')
+                404, 'Virtual Network ' + id + ' not found!', "40002")
 
         # expected format {"subnet_list" : "2.1.1.0/24", "count" : 4}
         req_dict = get_request().json
@@ -3355,9 +3372,9 @@ class VncApiServer(object):
             result = vnc_cfg_types.VirtualNetworkServer.ip_alloc(
                 vn_fq_name, subnet, count, family)
         except vnc_addr_mgmt.AddrMgmtSubnetUndefined as e:
-            raise cfgm_common.exceptions.HttpError(404, str(e))
+            raise cfgm_common.exceptions.HttpError(404, str(e), "20003")
         except vnc_addr_mgmt.AddrMgmtSubnetExhausted as e:
-            raise cfgm_common.exceptions.HttpError(409, str(e))
+            raise cfgm_common.exceptions.HttpError(409, str(e), "20004")
 
         return result
     # end vn_ip_alloc_http_post
@@ -3368,7 +3385,7 @@ class VncApiServer(object):
             vn_fq_name = self._db_conn.uuid_to_fq_name(id)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'Virtual Network ' + id + ' not found!')
+                404, 'Virtual Network ' + id + ' not found!', "40002")
 
         """
           {
@@ -3391,19 +3408,19 @@ class VncApiServer(object):
             vn_fq_name = self._db_conn.uuid_to_fq_name(id)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
-                404, 'Virtual Network ' + id + ' not found!')
+                404, 'Virtual Network ' + id + ' not found!', "40002")
 
         # expected format {"subnet_list" : ["2.1.1.0/24", "1.1.1.0/24"]
         req_dict = get_request().json
         try:
             (ok, result) = self._db_conn.dbe_read('virtual-network', {'uuid': id})
         except NoIdError as e:
-            raise cfgm_common.exceptions.HttpError(404, str(e))
+            raise cfgm_common.exceptions.HttpError(404, str(e), "40002")
         except Exception as e:
             ok = False
             result = cfgm_common.utils.detailed_traceback()
         if not ok:
-            raise cfgm_common.exceptions.HttpError(500, result)
+            raise cfgm_common.exceptions.HttpError(500, result, "40015")
 
         obj_dict = result
         subnet_list = req_dict[
@@ -3446,11 +3463,11 @@ class VncApiServer(object):
         multi_tenancy = get_request().json['enabled']
         user_token = get_request().get_header('X-Auth-Token')
         if user_token is None:
-            raise cfgm_common.exceptions.HttpError(403, " Permission denied")
+            raise cfgm_common.exceptions.HttpError(403, " Permission denied", "40020")
 
         data = self._auth_svc.verify_signed_token(user_token)
         if data is None:
-            raise cfgm_common.exceptions.HttpError(403, " Permission denied")
+            raise cfgm_common.exceptions.HttpError(403, " Permission denied", "40020")
 
         self.set_mt(multi_tenancy)
         return {}

@@ -25,6 +25,7 @@ class AddrMgmtError(Exception):
 
 
 class AddrMgmtSubnetUndefined(AddrMgmtError):
+    error_code = "20003"
 
     def __init__(self, vn_fq_name):
         self.vn_fq_name = vn_fq_name
@@ -38,6 +39,7 @@ class AddrMgmtSubnetUndefined(AddrMgmtError):
 
 
 class AddrMgmtSubnetInvalid(AddrMgmtError):
+    error_code = "20005"
 
     def __init__(self, vn_fq_name, subnet_name):
         self.vn_fq_name = vn_fq_name
@@ -52,6 +54,7 @@ class AddrMgmtSubnetInvalid(AddrMgmtError):
 
 
 class AddrMgmtSubnetExhausted(AddrMgmtError):
+    error_code = "20004"
 
     def __init__(self, vn_fq_name, subnet_val):
         self.vn_fq_name = vn_fq_name
@@ -66,6 +69,7 @@ class AddrMgmtSubnetExhausted(AddrMgmtError):
 
 
 class AddrMgmtInvalidIpAddr(AddrMgmtError):
+    error_code = "20001"
 
     def __init__(self, subnet_val, alloc_pool):
         self.subnet_val = subnet_val
@@ -80,6 +84,7 @@ class AddrMgmtInvalidIpAddr(AddrMgmtError):
 
 
 class AddrMgmtOutofBoundAllocPool(AddrMgmtError):
+    error_code = "20006"
 
     def __init__(self, subnet_val, alloc_pool):
         self.subnet_val = subnet_val
@@ -94,6 +99,7 @@ class AddrMgmtOutofBoundAllocPool(AddrMgmtError):
 
 
 class AddrMgmtInvalidAllocPool(AddrMgmtError):
+    error_code = "20007"
 
     def __init__(self, subnet_val, alloc_pool):
         self.subnet_val = subnet_val
@@ -108,6 +114,7 @@ class AddrMgmtInvalidAllocPool(AddrMgmtError):
 
 
 class AddrMgmtInvalidGatewayIp(AddrMgmtError):
+    error_code = "20002"
 
     def __init__(self, subnet_val, gateway_ip):
         self.subnet_val = subnet_val
@@ -122,6 +129,7 @@ class AddrMgmtInvalidGatewayIp(AddrMgmtError):
 
 
 class AddrMgmtInvalidServiceNodeIp(AddrMgmtError):
+    error_code = "20008"
 
     def __init__(self, subnet_val, service_address):
         self.subnet_val = subnet_val
@@ -136,6 +144,7 @@ class AddrMgmtInvalidServiceNodeIp(AddrMgmtError):
 
 
 class AddrMgmtInvalidDnsNameServer(AddrMgmtError):
+    error_code = "20009"
 
     def __init__(self, subnet_val, name_server):
         self.subnet_val = subnet_val

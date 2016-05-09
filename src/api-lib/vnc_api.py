@@ -172,7 +172,7 @@ class VncApi(object):
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warn("Exception: %s", str(e))
-            
+
         self._api_connect_protocol = VncApi._DEFAULT_API_SERVER_CONNECT
         # API server SSL Support
         use_ssl = api_server_use_ssl
@@ -793,44 +793,58 @@ class VncApi(object):
             except ConnectionError:
                 if not retry_on_error:
                     raise ConnectionError
-     
+
                 time.sleep(1)
                 self._create_api_server_session()
                 continue
-     
+
             if status == 200:
                 return content
-     
+
             # Exception Response, see if it can be resolved
             if ((status == 401) and (not self._auth_token_input) and (not retry_after_authn)):
                 self._headers = self._authenticate(content, self._headers)
                 # Recursive call after authentication (max 1 level)
                 content = self._request(op, url, data=data, retry_after_authn=True)
-     
+
                 return content
             elif status == 404:
-                raise NoIdError('Error: oper %s url %s body %s response %s'
+                ex = NoIdError('Error: oper %s url %s body %s response %s'
                                 % (op, url, data, content))
+                ex = add_error_tags_to_exception(ex, content)
+                raise ex
             elif status == 403:
-                raise PermissionDenied(content)
+                ex = PermissionDenied(content)
+                ex = add_error_tags_to_exception(ex, content)
+                raise ex
             elif status == 409:
-                raise RefsExistError(content)
+                ex = RefsExistError(content)
+                ex = add_error_tags_to_exception(ex, content)
+                raise ex
             elif status == 504:
                 # Request sent to API server, but no response came within 50s
-                raise TimeOutError('Gateway Timeout 504')
+                ex = TimeOutError('Gateway Timeout 504')
+                ex = add_error_tags_to_exception(ex, content)
+                raise ex
             elif status in [502, 503]:
                 # 502: API server died after accepting request, so retry
                 # 503: no API server available even before sending the request
                 retried += 1
                 if retried >= retry_count:
-                    raise ServiceUnavailableError('Service Unavailable Timeout %d' % status)
+                    ex = ServiceUnavailableError('Service Unavailable Timeout %d' % status)
+                    ex = add_error_tags_to_exception(ex, content)
+                    raise ex
 
                 time.sleep(1)
                 continue
             elif status == 400:
-                raise BadRequest(status, content)
+                ex = BadRequest(status, content)
+                ex = add_error_tags_to_exception(ex, content)
+                raise ex
             else:  # Unknown Error
-                raise HttpError(status, content)
+                ex = HttpError(status, content)
+                ex = add_error_tags_to_exception(ex, content)
+                raise ex
         # end while True
 
     #end _request_server
@@ -1306,3 +1320,75 @@ class PagingContext(object):
         return query
 
 # end PagingContext
+
+def add_error_tags_to_exception(exception, error_json):
+    """
+    This method adds the error tags from error_json body into an exception instance
+    :param error_json: the error json body
+    :return: An instance of Exception
+    """
+    if error_json is None or exception is None:
+        return exception
+
+    try:
+        error_json_dict = json.loads(error_json)
+        exception = add_error_tags_dict_to_exception(exception, error_json_dict)
+        return exception
+
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warn("Error while loading error json [" + error_json + "] - %s", str(e))
+        return exception
+
+
+def add_error_tags_dict_to_exception(exception, error_json_dict):
+
+    if error_json_dict is None or not isinstance(error_json_dict, dict) or len(error_json_dict) < 1 or exception is None:
+        return exception
+
+    for attribute in ['status_code', 'error_tag', 'error_app_message', 'error_message', 'error_diag', 'error_code']:
+        if not hasattr(exception, attribute):
+            if error_json_dict.has_key(attribute):
+                val = error_json_dict[attribute]
+                if attribute == 'status_code':
+                    val = int(val)
+                setattr(exception, attribute, val)
+
+    #replace contents with error_app_message if there is one
+    if hasattr(exception, 'content') and hasattr(exception, 'error_app_message'):
+        setattr(exception, 'content', getattr(exception, 'error_app_message'))
+
+    #recursively add the cause exception if there is one
+    if error_json_dict.has_key('cause'):
+        causeObj = error_json_dict['cause']
+        if causeObj.has_key('status_code'):
+            cause_status = int(causeObj['status_code'])
+            cause_exception = get_exception(cause_status)
+            setattr(cause_exception, 'status_code', cause_status)
+            cause_exception = add_error_tags_dict_to_exception(cause_exception, causeObj)
+            setattr(exception, 'cause', cause_exception)
+
+
+    return exception
+
+def get_exception(status_code):
+    ex = None
+    if status_code == 404:
+        ex = NoIdError('')
+    elif status_code == 403:
+        ex = PermissionDenied()
+    elif status_code == 409:
+        ex = RefsExistError()
+    elif status_code == 504:
+        ex = TimeOutError('Gateway Timeout 504')
+    elif status_code in [502, 503]:
+        ex = ServiceUnavailableError('Service Unavailable Timeout %d' % status_code)
+    elif status_code == 400:
+        ex = BadRequest(status_code, '')
+    else:  # Unknown Error
+        ex = HttpError(status_code, '')
+
+    return ex
+
+
+
