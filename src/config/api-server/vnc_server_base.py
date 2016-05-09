@@ -623,12 +623,6 @@ class VncApiServerBase(VncApiServer):
     def handle_error_code(self, exception):
         if exception is not None and self.error_codes:
             error_json = self.error_codes.get_error_json(exception)
-            # #FOR TEST ONLY
-            # error_dict_temp = json.loads(error_json)
-            # import copy
-            # error_dict_temp['cause'] = copy.deepcopy(error_dict_temp)
-            # error_json = json.dumps(error_dict_temp, indent=5)
-            # #FOR TEST ONLY
             setattr(exception, 'content', error_json)
             if not hasattr(exception, 'status_code'):
                 error_json_dict = json.loads(error_json)

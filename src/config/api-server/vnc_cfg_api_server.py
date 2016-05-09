@@ -1694,7 +1694,8 @@ class VncApiServer(object):
                 #A possibility to report the error with some details is to check for any content in the exception
                 #object and in case it has some content, then abort with 500 and the content as message.
 
-                self.handle_error_code(e)
+                if hasattr(self, 'handle_error_code'):
+                    self.handle_error_code(e)
 
                 # don't log details of cfgm_common.exceptions.HttpError i.e handled error cases
                 if isinstance(e, cfgm_common.exceptions.HttpError):
