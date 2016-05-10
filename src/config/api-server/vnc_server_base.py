@@ -612,10 +612,14 @@ class VncApiServerBase(VncApiServer):
     #end _get_locale_name
 
     def _get_error_code_locale_file_name(self, errcodes_file, locale_name):
-        errcodes_file_split = errcodes_file.split('.')
-        errcodes_file_name = errcodes_file_split[0] + '_' + locale_name
-        if len(errcodes_file_split) > 1:
-            errcodes_file_name = errcodes_file_name + '.' + errcodes_file_split[1]
+        errcodes_file_name = errcodes_file
+        try:
+            if errcodes_file is not None and locale_name is not None:
+                errcodes_file_name = errcodes_file.format(locale=locale_name)
+        except Exception as e:
+            err_msg = cfgm_common.utils.detailed_traceback()
+            self.config_log("Exception in creating error code filename with locale: %s" % (err_msg),
+                            level=SandeshLevel.SYS_ERR)
 
         return errcodes_file_name
     #end _get_error_code_locale_file_name
