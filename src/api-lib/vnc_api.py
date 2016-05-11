@@ -3,6 +3,7 @@
 #
 import logging
 import requests
+from cachetools import cached
 from requests.exceptions import ConnectionError
 
 import ConfigParser
@@ -14,7 +15,7 @@ import platform
 import functools
 import __main__ as main
 import ssl
-
+from threading import RLock
 import gen.resource_common
 import gen.vnc_api_client_gen
 from gen.vnc_api_client_gen import all_resource_types
@@ -25,10 +26,12 @@ from gen.generatedssuper import GeneratedsSuper
 from cfgm_common import rest, utils
 from cfgm_common.exceptions import *
 from cfgm_common import ssl_adapter
+from gen.vnc_api_client_gen import SERVICE_LOOKUP_NAME
+from gen.vnc_api_client_gen import SERVICE_PATH
 
 from pprint import pformat
-from gen.vnc_api_client_gen import SERVICE_PATH
 from threading import current_thread
+from cachetools.lru import LRUCache
 
 ASC = 'asc'
 DESC = 'desc'
@@ -93,6 +96,9 @@ class VncApi(object):
         'X-Contrail-Useragent': '%s:%s'
              %(hostname, getattr(main, '__file__', '')),
     }
+
+    cache = LRUCache(maxsize=5)
+    lock = RLock()
 
     _AUTHN_SUPPORTED_TYPES = ["keystone"]
     _DEFAULT_AUTHN_TYPE = "keystone"
@@ -692,7 +698,7 @@ class VncApi(object):
         srv_root_uri = py_obj.get('uri',"/")
         if not srv_root_uri:
             srv_root_uri = "/"
-	self._srv_root_uri = srv_root_uri
+        self._srv_root_uri = srv_root_uri
         for link in py_obj['links']:
             # strip base from *_url to get *_uri
             uri = link['link']['uri']
@@ -1205,6 +1211,22 @@ class VncApi(object):
         """
         self._headers['X-API-ROLE'] = (',').join(roles)
     #end set_user_roles
+
+    @classmethod
+    def instantiate(cls, csp_lookup, service_prefix='local', context=None):
+        auth_token = context.get('auth_token',None) if context else None
+        scheme, ip, port = csp_lookup.lookup('%s.%s' % (service_prefix, SERVICE_LOOKUP_NAME))
+        return cls._instantiate_client(scheme,ip,port, auth_token)
+
+    @classmethod
+    @cached(cache=cache, lock=lock)
+    def _instantiate_client(cls, scheme, ip, host, auth_token):
+        return VncApi(api_server_host=ip,
+                      api_server_port=host,
+                      auth_token=auth_token,
+                      api_server_use_ssl=True if scheme == 'https' else False)
+
+
 
 #end class VncApi
 
