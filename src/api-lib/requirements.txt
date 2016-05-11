@@ -1,3 +1,4 @@
 gevent==1.1a2
 requests
 cfgm_common
+cachetools==1.1.6
