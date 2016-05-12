@@ -631,7 +631,7 @@ class VncApiServerBase(VncApiServer):
             if not hasattr(exception, 'status_code'):
                 error_json_dict = json.loads(error_json)
                 if error_json_dict.has_key('status_code'):
-                    setattr(exception, 'status_code', error_json_dict['status_code'])
+                    setattr(exception, 'status_code', int(error_json_dict['status_code']))
 
     #end handle_error_code
 
