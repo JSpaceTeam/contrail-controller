@@ -265,7 +265,6 @@ class VncApiDynamicServerBase(VncApiServerBase):
         self._invoke_dynamic_extension("pre_dynamic_resource_create", obj_type, obj_dict)
         res_obj_dict = dict()
         try:
-            # TODO Read from cache (XPATH is causing the issue)
             yang_schema = self.get_yang_schema(obj_type)
             if self.get_resource_class(obj_type) is None:
                 self.set_dynamic_resource_classes(yang_schema)
@@ -320,6 +319,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             self._dynamic_resource_update(yang_element)
             res_obj_dict['uuid'] = yang_element.uuid
             res_obj_dict["uri"] = yang_element.uri
+            res_obj_dict["fq_name"] = yang_element.fq_name
         except cfgm_common.exceptions.HttpError as he:
             raise he
         except Exception:
@@ -332,17 +332,35 @@ class VncApiDynamicServerBase(VncApiServerBase):
         return res_obj_dict
 
     def http_dynamic_resource_patch(self, resource_type, id):
-        logger.debug('New Route - http_dynamic_resource_patch method ' + resource_type)
+        logger.debug('New Route - http_dynamic_resource_patch method ', resource_type)
         # obj_type = resource_type.replace('-', '_')
         obj_type = resource_type
         obj_dict = self.get_req_json_obj()
         self._invoke_dynamic_extension("pre_dynamic_resource_patch", obj_type, obj_dict)
-        if self.get_resource_class(obj_type) is None:
+        res_obj_dict = dict()
+        try:
             yang_schema = self.get_yang_schema(obj_type)
-            self.set_dynamic_resource_classes(yang_schema)
+            if self.get_resource_class(obj_type) is None:
+                self.set_dynamic_resource_classes(yang_schema)
 
-        # TODO Patch is not yet implemented
+            yang_element = self.get_yang_element(obj_dict, yang_schema)
+            yang_element.uuid = id
+            self._dynamic_resource_patch(yang_element, operation=yang_element.operation_type)
+            res_obj_dict['uuid'] = yang_element.uuid
+            res_obj_dict["uri"] = yang_element.uri
+            res_obj_dict["fq_name"] = yang_element.fq_name
+        except cfgm_common.exceptions.HttpError as he:
+            raise he
+        except Exception as e:
+            print e
+            err_msg = 'Error in http_dynamic_resource_patch for %s' % (obj_dict)
+            err_msg += cfgm_common.utils.detailed_traceback()
+            # print(err_msg)
+            self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
+            raise cfgm_common.exceptions.HttpError(500, err_msg)
+
         self._invoke_dynamic_extension("post_dynamic_resource_patch", obj_type, obj_dict)
+        return res_obj_dict
 
     def http_dynamic_resource_delete(self, resource_type, id):
         logger.debug('New Route - http_dynamic_resource_delete method ' + resource_type)
@@ -478,8 +496,6 @@ class VncApiDynamicServerBase(VncApiServerBase):
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
-        except cfgm_common.exceptions.HttpError:
-            raise
         except Exception as e:
             err_msg = 'In %s an extension had error for %s' % (method_name, obj_dict)
             err_msg += cfgm_common.utils.detailed_traceback()
@@ -497,22 +513,29 @@ class VncApiDynamicServerBase(VncApiServerBase):
         for child in yang_element.get_child_elements():
             self._dynamic_resource_update(child, yang_element)
 
-    def _dynamic_resource_patch(self, yang_element, operation, parent=None):
+    def _dynamic_resource_patch(self, yang_element, operation=None, parent=None):
         if not yang_element.is_vertex():
             return
-        if operation == _DELETE_OPERATION:
-            self._resource_delete(yang_element, parent)
-            # TODO as of now, returning. When ref-edge support comes, does this need to handle ref-edges?
-            return
         if operation == _CREATE_OPERATION:
-            self._resource_create(yang_element, parent)
-        elif operation == _UPDATE_OPERATION:
-            self._resource_update(yang_element, parent)
+            self._dynamic_resource_create(yang_element, parent)
 
-        for child in yang_element.get_child_elements():
-            self._dynamic_resource_update(child, operation if operation == _DELETE_OPERATION else child.operation_type,
-                                          yang_element)
-            # TODO Add support for ref-edges
+        if operation == _UPDATE_OPERATION:
+            self._resource_update(yang_element, parent)
+            for child in yang_element.get_child_elements():
+                self._dynamic_resource_patch(child, child.operation_type, yang_element)
+
+        if operation == _DELETE_OPERATION:
+            resource_type = yang_element.element_name
+            fqn_name = yang_element.get_fq_name_list()
+            uuid = self._get_id_from_fq_name(resource_type, fqn_name)
+            yang_element.set_uuid(uuid)
+            res_obj_dict = self.http_resource_read(resource_type, uuid)
+            # Recursively delete all the children first
+            self._delete_child_resources(res_obj_dict, resource_type)
+            # Now delete the parent
+            self.http_resource_delete(resource_type, uuid)
+
+    # End _dynamic_resource_patch
 
     def _resource_create(self, element, parent):
         if parent:
@@ -624,18 +647,18 @@ class VncApiDynamicServerBase(VncApiServerBase):
         xml_data = self._update_name_space(xml_data, name_space_dict)
         xml_tree = etree.parse(BytesIO(xml_data), etree.XMLParser())
         root_element = xml_tree.getroot()
-        module_name = root_element.tag
-
-        yang_element = YangElement(name=root_element.tag)
+        module_name = self._get_tag_name(root_element)
+        yang_element = YangElement(name=module_name)
         yang_element = self._get_yang_element(module_name, yang_schema, xml_tree.getroot(), yang_element)
         return yang_element
 
     def _get_yang_element(self, module_name, yang_schema, element, yang_element, parent_element=None):
 
-        yang_element.set_element_name(element.tag)
+        e_name = self._get_tag_name(element)
+        yang_element.set_element_name(e_name)
         yang_element.set_element_value(element.text)
         yang_element.set_operation_type(element.get(OPERATION))
-        yang_element.set_xpath(module_name + "\\" + element.tag)
+        yang_element.set_xpath(module_name + "\\" + e_name)
         if parent_element is not None:
             yang_element.add_parent_element(parent_element)
             parent_element.add_child_element(yang_element)
@@ -647,10 +670,11 @@ class VncApiDynamicServerBase(VncApiServerBase):
         yang_element.set_key_names(keys)
 
         for child in element.getchildren():
-            child_element = YangElement(name=child.tag)
-            if child.tag == META_DATA:
+            child_tag_name = self._get_tag_name(child)
+            child_element = YangElement(name=child_tag_name)
+            if child_tag_name == META_DATA:
                 self._set_vertex_dependency(child, yang_element)
-            elif child.tag == OPERATION:
+            elif child_tag_name == OPERATION:
                 yang_element.set_operation_type(child.text)
             else:
                 self._get_yang_element(module_name, yang_schema, child, child_element, yang_element)
@@ -659,9 +683,8 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
     def _set_vertex_dependency(self, element, parent_element):
         meta_data = ""
-        if element.getchildren() is not None:
-            for child in element.getchildren():
-                meta_data = meta_data + ' ' + child.text
+        for child in element.getchildren():
+            meta_data = meta_data + ' ' + child.text
         parent_element.set_meta_data(meta_data)
 
     def _get_yang_schema(self, module_name):
@@ -714,6 +737,14 @@ class VncApiDynamicServerBase(VncApiServerBase):
             ns = ' ' + ns + ">"
             json_data_xml = json_data_xml.replace(">", ns, 1)
         return str(json_data_xml)
+
+    def _get_tag_name(self, element):
+        # This is to handle name space
+        if "}" in element.tag:
+            e_name = element.tag.split("}", 1)[1]
+        else:
+            e_name = element.tag
+        return e_name
 
     def _json_to_xml(self, json_obj, line_padding=""):
         result_list = list()
@@ -1412,7 +1443,10 @@ class YangElement(object):
         """Display yang-element object in compact form."""
         print '--------------------------------------------'
         print 'Name = ', self.get_fq_name()
-        print 'Uuid = ', self.uuid
+        print 'Fq Name = ', self.get_fq_name_str()
+        print 'Uuid = ', self.get_uuid()
+        print 'Uri = ', self.get_uri()
+        print 'Type = ', self.get_type()
         print 'Namespace = ', self.get_name_space()
         print 'Element Name = ', self.get_element_name()
         print 'Element Value = ', self.get_element_value()
@@ -1421,12 +1455,15 @@ class YangElement(object):
         print 'Operation Type = ', self.get_operation_type()
         print 'Key Names = ', self.get_key_names()
         print 'Display Name = ', self.get_display_name()
+        print 'Meta Data = ', self.get_meta_data()
+        print 'Id Perms = ', self.get_id_perms()
+        print 'Perms 2 = ', self.get_perms2()
 
         for ea in self.get_parent_elements():
-            print 'HAS Parent Elements = ', ea.get_fq_name_str()
+            print 'HAS Parent Elements = ', ea.get_fq_name_string()
 
         for ea in self.get_child_elements():
-            print 'HAS Child Elements = ', ea.get_fq_name_str()
+            print 'HAS Child Elements = ', ea.get_fq_name_string()
             print(ea.dump())
 
 
