@@ -1408,11 +1408,17 @@ class YangElement(object):
                 json_data[self.get_element_name()] = self.get_element_value()
             for child in self.get_child_elements():
                 if child.is_leaf() is True:
-                    json_data[child.get_element_name()] = child.get_element_value()
+                    self.__set_value__(json_data, child)
 
             return json_data
         else:
             return None
+
+    def __set_value__(self, json_data, yang_elt):
+        if yang_elt.get_element_value() == 'None':
+            json_data[yang_elt.get_element_name()] = None
+        else:
+            json_data[yang_elt.get_element_name()] = yang_elt.get_element_value()
 
     def set_all_fields(self):
         for child in self.get_child_elements():
