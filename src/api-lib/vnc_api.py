@@ -1216,6 +1216,8 @@ class VncApi(object):
     def instantiate(cls, csp_lookup, service_prefix='local', context=None):
         auth_token = context.get('auth_token',None) if context else None
         scheme, ip, port = csp_lookup.lookup('%s.%s' % (service_prefix, SERVICE_LOOKUP_NAME))
+        logging.debug("Lookup for %s.%s returned %s://%s:%s",service_prefix,
+                      SERVICE_LOOKUP_NAME, scheme, ip, port)
         return cls._instantiate_client(scheme,ip,port, auth_token)
 
     @classmethod
