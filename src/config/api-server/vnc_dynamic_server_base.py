@@ -485,7 +485,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             self.config_log("Exception in extension load: %s" % (err_msg),
                             level=SandeshLevel.SYS_ERR)
 
-    # end _load_extensions
+    # end _load_dynamic_extensions
 
     def _invoke_dynamic_extension(self, method_name, obj_type, obj_dict):
         try:
