@@ -4,7 +4,6 @@ __author__ = 'hprakash'
 #
 
 import logging
-
 from app_cfg_server.server_core.vnc_server_base import VncApiServerBase
 
 logger = logging.getLogger(__name__)
@@ -1408,17 +1407,11 @@ class YangElement(object):
                 json_data[self.get_element_name()] = self.get_element_value()
             for child in self.get_child_elements():
                 if child.is_leaf() is True:
-                    self.__set_value__(json_data, child)
+                    json_data[child.get_element_name()] = child.get_element_value()
 
             return json_data
         else:
             return None
-
-    def __set_value__(self, json_data, yang_elt):
-        if yang_elt.get_element_value() == 'None':
-            json_data[yang_elt.get_element_name()] = None
-        else:
-            json_data[yang_elt.get_element_name()] = yang_elt.get_element_value()
 
     def set_all_fields(self):
         for child in self.get_child_elements():
