@@ -20,3 +20,4 @@ kazoo
 elasticsearch>=2.1.0
 elasticsearch-dsl>=0.0.9
 cachetools==1.1.6
+pyang
