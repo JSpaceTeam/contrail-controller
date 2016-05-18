@@ -68,6 +68,7 @@ from sandesh_common.vns.constants import USERAGENT_KEYSPACE_NAME
 from sandesh.traces.ttypes import DBRequestTrace, MessageBusNotifyTrace, \
     IfmapTrace
 import logging
+from cfgm_common import utils
 
 logger = logging.getLogger(__name__)
 
@@ -2520,19 +2521,51 @@ class VncSearchDbClient(VncSearchItf):
 
     # end _init_index
 
-    def _scrub_dict(self, obj_dict):
+    def _scrub_dict(self, obj_dict, obj_type, path=""):
         if isinstance(obj_dict, list):
             dict_list = []
             for item in obj_dict:
-                dict_list.append(self._scrub_dict(item))
+                dict_list.append(self._scrub_dict(item, obj_type, path))
             return dict_list
         elif isinstance(obj_dict, dict):
-            return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if
-                        v is not None and not self._is_unsupported_entry(k))
+            return dict((k, self._scrub_dict(v, obj_type, path + "/" + k)) for k, v in obj_dict.iteritems() if
+                        not self._is_unsupported_entry(k))
+        elif obj_dict is None:
+            items = path.split("/")
+            return self._replace_null_value(obj_type, items, 1)
         else:
             return obj_dict
 
     # end _scrub_dict
+
+    def _replace_null_value(self, class_name, items, index):
+        if index is 1:
+            obj_cls = utils.str_to_class(utils.CamelCase(class_name), __name__)
+            top_field = obj_cls.prop_field_types[items[index]]
+            if top_field['is_complex']:
+                if len(items) > index + 1:
+                    return self._replace_null_value(top_field['xsd_type'], items, index + 1)
+                else:
+                    is_list_prop = items[index] in obj_cls.prop_list_fields
+                    if is_list_prop:
+                        return None
+                    else:
+                        return None
+            else:
+                return ""
+        else:
+            obj_cls = utils.str_to_class(class_name, __name__)
+            field = obj_cls.attr_field_type_vals[items[index]]
+            if field["is_complex"]:
+                if len(items) > index + 1:
+                    return self._replace_null_value(field['attr_type'], items, index + 1)
+                else:
+                    if field["is_array"]:
+                        return None
+                    else:
+                        return None
+            else:
+                return ""
 
     def _is_unsupported_entry(self, k):
         '''
@@ -2554,7 +2587,7 @@ class VncSearchDbClient(VncSearchItf):
     def search_create(self, obj_type, obj_ids, obj_dict):
         obj_type = obj_type.replace('-', '_')
         if self.is_doc_type_mapped(obj_type):
-            obj_dict_scrubbed = self._scrub_dict(obj_dict)
+            obj_dict_scrubbed = self._scrub_dict(obj_dict,obj_type)
             self._es_client.index(index=self.get_index(obj_type), doc_type=obj_type, id=obj_ids['uuid'],
                                   body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
 
@@ -2566,7 +2599,7 @@ class VncSearchDbClient(VncSearchItf):
         obj_type = obj_type.replace('-', '_')
         if self.is_doc_type_mapped(obj_type):
             obj_dict_scrubbed = {}
-            obj_dict_scrubbed["doc"] = self._scrub_dict(new_obj_dict)
+            obj_dict_scrubbed["doc"] = self._scrub_dict(new_obj_dict,obj_type)
             if self._es_client.exists(index=self.get_index(obj_type), doc_type=obj_type, id=obj_ids['uuid']):
                 self._es_client.update(index=self.get_index(obj_type), doc_type=obj_type, id=obj_ids['uuid'],
                                        body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
