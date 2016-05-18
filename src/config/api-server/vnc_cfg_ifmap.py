@@ -2399,6 +2399,7 @@ class VncSearchDbClient(VncSearchItf):
         self._db_client_mgr = db_client_mgr
         self._msg_bus = msg_bus
         self._consistency = "quorum"
+        self._is_script_update = True if cfg.CONF.elastic_search.update == 'script' else False
         while True:
             try:
                 opts = {}
@@ -2547,10 +2548,10 @@ class VncSearchDbClient(VncSearchItf):
         if isinstance(obj_dict, list):
             dict_list = []
             for item in obj_dict:
-                dict_list.append(self._scrub_dict(item))
+                dict_list.append(self._remove_unsupported(item))
             return dict_list
         elif isinstance(obj_dict, dict):
-            return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if k != 'uuid' and not self._is_unsupported_entry(k))
+            return dict((k, self._remove_unsupported(v)) for k, v in obj_dict.iteritems() if k != 'uuid' and not self._is_unsupported_entry(k))
         else:
             return obj_dict
 
@@ -2608,7 +2609,7 @@ class VncSearchDbClient(VncSearchItf):
         obj_type = obj_type.replace('-', '_')
         if self.is_doc_type_mapped(obj_type):
             request_body = {}
-            if cfg.CONF.elastic_search.script_update:
+            if self._is_script_update:
                 obj_dict = self._remove_unsupported(new_obj_dict)
                 request_body = self.generate_es_update_commands(obj_dict)
             else:

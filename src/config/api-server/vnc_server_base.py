@@ -56,7 +56,8 @@ cfg.CONF.register_cli_opt(
     group=elastic_search_group)
 
 cfg.CONF.register_cli_opt(
-    cfg.BoolOpt(name='script_update', default=False, help="Inline script update for elastic search"),
+    cfg.StrOpt(name='update',choices=["partial", "script"], default="script",
+               help="update type for elastic search"),
     group=elastic_search_group)
 
 RBAC_RULE = 'rbac_rule'
