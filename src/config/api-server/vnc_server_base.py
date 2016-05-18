@@ -56,7 +56,7 @@ cfg.CONF.register_cli_opt(
     group=elastic_search_group)
 
 cfg.CONF.register_cli_opt(
-    cfg.StrOpt(name='update',choices=["partial", "script"], default="partial",
+    cfg.StrOpt(name='update',choices=["partial", "script"], default="script",
                help="update type for elastic search"),
     group=elastic_search_group)
 
