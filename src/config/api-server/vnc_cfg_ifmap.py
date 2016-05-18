@@ -2546,11 +2546,7 @@ class VncSearchDbClient(VncSearchItf):
                 if len(items) > index + 1:
                     return self._replace_null_value(top_field['xsd_type'], items, index + 1)
                 else:
-                    is_list_prop = items[index] in obj_cls.prop_list_fields
-                    if is_list_prop:
-                        return None
-                    else:
-                        return None
+                    return None
             else:
                 return ""
         else:
@@ -2560,10 +2556,7 @@ class VncSearchDbClient(VncSearchItf):
                 if len(items) > index + 1:
                     return self._replace_null_value(field['attr_type'], items, index + 1)
                 else:
-                    if field["is_array"]:
-                        return None
-                    else:
-                        return None
+                    return None
             else:
                 return ""
 
