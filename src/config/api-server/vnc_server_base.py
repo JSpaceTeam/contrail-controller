@@ -55,6 +55,11 @@ cfg.CONF.register_cli_opt(
     cfg.StrOpt(name='search_client', default=None, help="VncDBSearch client implementation"),
     group=elastic_search_group)
 
+cfg.CONF.register_cli_opt(
+    cfg.StrOpt(name='update',choices=["partial", "script"], default="partial",
+               help="update type for elastic search"),
+    group=elastic_search_group)
+
 RBAC_RULE = 'rbac_rule'
 MULTI_TENANCY = 'multi_tenancy'
 

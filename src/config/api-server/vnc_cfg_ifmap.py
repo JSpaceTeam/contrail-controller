@@ -42,7 +42,6 @@ from cfgm_common.vnc_kombu import VncKombuClient
 from cfgm_common.utils import cgitb_hook
 from oslo_utils.importutils import import_class
 
-
 import copy
 from cfgm_common import jsonutils as json
 import uuid
@@ -68,6 +67,7 @@ from sandesh_common.vns.constants import USERAGENT_KEYSPACE_NAME
 from sandesh.traces.ttypes import DBRequestTrace, MessageBusNotifyTrace, \
     IfmapTrace
 import logging
+from cfgm_common import utils
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +406,7 @@ class VncIfmapClient(object):
         self._queue = Queue(self._get_api_server()._args.ifmap_queue_size)
         if self._dequeue_greenlet is None:
             self._dequeue_greenlet = gevent.spawn(self._ifmap_dequeue_task)
+
     # end reset
 
 
@@ -805,22 +806,22 @@ class VncServerCassandraClient(VncCassandraClient):
                     prop_elem_pos = oper_param['position']
                     # modify is practically an insert so use add
                     self._add_to_prop_list(bch, obj_uuid,
-                        prop_name, prop_elem_val, prop_elem_pos)
+                                           prop_name, prop_elem_val, prop_elem_pos)
                 elif oper == 'delete':
                     prop_elem_pos = oper_param['position']
                     self._delete_from_prop_list(bch, obj_uuid,
-                        prop_name, prop_elem_pos)
+                                                prop_name, prop_elem_pos)
             elif prop_name in obj_class.prop_map_fields:
                 key_name = obj_class.prop_map_field_key_names[prop_name]
                 if oper == 'set':
                     prop_elem_val = oper_param['value']
                     position = prop_elem_val[key_name]
                     self._set_in_prop_map(bch, obj_uuid,
-                        prop_name, prop_elem_val, position)
+                                          prop_name, prop_elem_val, position)
                 elif oper == 'delete':
                     position = oper_param['position']
                     self._delete_from_prop_map(bch, obj_uuid,
-                        prop_name, position)
+                                               prop_name, position)
         # end for all updates
 
         self.update_last_modified(bch, obj_uuid)
@@ -854,17 +855,18 @@ class VncServerCassandraClient(VncCassandraClient):
             send = True
             bch = self._obj_uuid_cf.batch()
         bch.insert(ref_uuid, {'relaxbackref:%s' % (obj_uuid):
-                               json.dumps(None)})
+                                  json.dumps(None)})
         if send:
             bch.send()
+
     # end _relax_ref_for_delete
 
     def get_relaxed_refs(self, obj_uuid):
         try:
             relaxed_cols = self._obj_uuid_cf.get(obj_uuid,
 
-                column_start='relaxbackref:',
-                column_finish='relaxbackref;')
+                                                 column_start='relaxbackref:',
+                                                 column_finish='relaxbackref;')
         except pycassa.NotFoundException:
             return []
 
@@ -1107,7 +1109,7 @@ class VncServerKombuClient(VncKombuClient):
     def _dbe_subscribe_callback(self, oper_info):
         self._db_client_mgr.wait_for_resync_done()
         try:
-            if (not self._service_module) or (oper_info.get('namespace','') == self._service_module):
+            if (not self._service_module) or (oper_info.get('namespace', '') == self._service_module):
                 msg = "Notification Message: %s" % (pformat(oper_info))
                 self.config_log(msg, level=SandeshLevel.SYS_DEBUG)
                 trace = self._generate_msgbus_notify_trace(oper_info)
@@ -1206,7 +1208,7 @@ class VncServerKombuClient(VncKombuClient):
     # end _dbe_update_notification
 
     def dbe_delete_publish(self, obj_type, obj_ids, obj_dict):
-        oper_info = {'oper': 'DELETE', 'type': obj_type, 'namespace':self._service_module,
+        oper_info = {'oper': 'DELETE', 'type': obj_type, 'namespace': self._service_module,
                      'obj_dict': obj_dict}
         oper_info.update(obj_ids)
         self.publish(oper_info)
@@ -1287,6 +1289,7 @@ class VncZkClient(object):
         self._zk_client.master_election(
             self._zk_path_pfx + "/api-server-election", os.getpid(),
             func, *args)
+
     # end master_election
 
     def _reconnect_zk(self):
@@ -1464,7 +1467,6 @@ class VncDbClient(object):
         self._ifmap_db = VncIfmapClient(
             self, ifmap_srv_ip, ifmap_srv_port, uname, passwd, ssl_options, ifmap_disable=ifmap_disable)
 
-
         msg = "Connecting to zookeeper on %s" % (zk_server_ip)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
         self._zk_db = VncZkClient(api_svr_mgr._args.worker_id, zk_server_ip,
@@ -1488,7 +1490,7 @@ class VncDbClient(object):
                 try:
                     klass = import_class(cfg.CONF.elastic_search.search_client)
                 except ImportError as e:
-                    self.config_log('Failed to load elastic search client %s'%cfg.CONF.elastic_search.search_client,
+                    self.config_log('Failed to load elastic search client %s' % cfg.CONF.elastic_search.search_client,
                                     logging.FATAL)
                     raise
                 self._search_db = klass(self, self._msgbus, cfg.CONF.elastic_search.server_list,
@@ -1693,6 +1695,7 @@ class VncDbClient(object):
             obj_dict.update({'bgp_router_parameters': router_params})
             obj_uuid = obj_dict.get('uuid')
             self._cassandra_db.object_update('bgp_router', obj_uuid, obj_dict)
+
     # end update_bgp_router_type
 
     def _dbe_resync(self, obj_type, obj_uuids):
@@ -1720,11 +1723,10 @@ class VncDbClient(object):
                     self._cassandra_db.update_perms2(obj_uuid)
 
                 if (obj_type == 'virtual_network' and
-                        'network_ipam_refs' in obj_dict):
-
+                            'network_ipam_refs' in obj_dict):
                     self.update_subnet_uuid(obj_dict, do_update=True)
                 if (obj_type == 'bgp_router' and
-                        'bgp_router_parameters' in obj_dict):
+                            'bgp_router_parameters' in obj_dict):
                     self.update_bgp_router_type(obj_dict)
             except Exception as e:
                 self.config_object_error(
@@ -2247,6 +2249,7 @@ class VncDbClient(object):
         (ok, cassandra_result) = self._cassandra_db.prop_collection_read(
             obj_type, obj_uuid, obj_fields, position)
         return ok, cassandra_result
+
     # end prop_collection_get
 
     def prop_collection_update(self, obj_type, obj_uuid, updates):
@@ -2268,7 +2271,7 @@ class VncDbClient(object):
                                         {'uuid': obj_uuid})
         if obj_type != ref_type:
             self._msgbus.dbe_update_publish(ref_type.replace('_', '-'),
-                                        {'uuid': ref_uuid})
+                                            {'uuid': ref_uuid})
 
     # ref_update
 
@@ -2348,14 +2351,16 @@ class VncDbClient(object):
         return self._search_db.suggest(body)
         # suggest
 
-
     def reset(self):
         self._ifmap_db.reset(drain_inflight=True)
         self._msgbus.reset()
+
     # end reset
 
     def get_service_module(self):
         return self._api_svr_mgr.get_service_module()
+
+
 # end class VncDbClient
 
 class VncSearchItf(object):
@@ -2394,6 +2399,7 @@ class VncSearchDbClient(VncSearchItf):
         self._db_client_mgr = db_client_mgr
         self._msg_bus = msg_bus
         self._consistency = "quorum"
+        self._is_script_update = True if cfg.CONF.elastic_search.update == 'script' else False
         while True:
             try:
                 opts = {}
@@ -2494,7 +2500,7 @@ class VncSearchDbClient(VncSearchItf):
 
     # initialize_index_schema
 
-    def _init_index(self, index, mapping, reset_config, index_setting= None):
+    def _init_index(self, index, mapping, reset_config, index_setting=None):
         if reset_config and self._index_client.exists(index):
             self._index_client.delete(index)
 
@@ -2520,19 +2526,56 @@ class VncSearchDbClient(VncSearchItf):
 
     # end _init_index
 
-    def _scrub_dict(self, obj_dict):
+    def _scrub_dict(self, obj_dict, obj_type, path=""):
         if isinstance(obj_dict, list):
             dict_list = []
             for item in obj_dict:
-                dict_list.append(self._scrub_dict(item))
+                dict_list.append(self._scrub_dict(item, obj_type, path))
             return dict_list
         elif isinstance(obj_dict, dict):
-            return dict((k, self._scrub_dict(v)) for k, v in obj_dict.iteritems() if
-                        v is not None and not self._is_unsupported_entry(k))
+            return dict((k, self._scrub_dict(v, obj_type, path + "/" + k)) for k, v in obj_dict.iteritems() if
+                        not self._is_unsupported_entry(k))
+        elif obj_dict is None:
+            items = path.split("/")
+            return self._replace_null_value(obj_type, items, 1)
         else:
             return obj_dict
 
     # end _scrub_dict
+
+
+    def _remove_unsupported(self, obj_dict):
+        if isinstance(obj_dict, list):
+            dict_list = []
+            for item in obj_dict:
+                dict_list.append(self._remove_unsupported(item))
+            return dict_list
+        elif isinstance(obj_dict, dict):
+            return dict((k, self._remove_unsupported(v)) for k, v in obj_dict.iteritems() if k != 'uuid' and not self._is_unsupported_entry(k))
+        else:
+            return obj_dict
+
+    def _replace_null_value(self, class_name, items, index):
+        if index is 1:
+            obj_cls = utils.str_to_class(utils.CamelCase(class_name), __name__)
+            top_field = obj_cls.prop_field_types[items[index]]
+            if top_field['is_complex']:
+                if len(items) > index + 1:
+                    return self._replace_null_value(top_field['xsd_type'], items, index + 1)
+                else:
+                    return None
+            else:
+                return ""
+        else:
+            obj_cls = utils.str_to_class(class_name, __name__)
+            field = obj_cls.attr_field_type_vals[items[index]]
+            if field["is_complex"]:
+                if len(items) > index + 1:
+                    return self._replace_null_value(field['attr_type'], items, index + 1)
+                else:
+                    return None
+            else:
+                return ""
 
     def _is_unsupported_entry(self, k):
         '''
@@ -2554,7 +2597,7 @@ class VncSearchDbClient(VncSearchItf):
     def search_create(self, obj_type, obj_ids, obj_dict):
         obj_type = obj_type.replace('-', '_')
         if self.is_doc_type_mapped(obj_type):
-            obj_dict_scrubbed = self._scrub_dict(obj_dict)
+            obj_dict_scrubbed = self._scrub_dict(obj_dict,obj_type)
             self._es_client.index(index=self.get_index(obj_type), doc_type=obj_type, id=obj_ids['uuid'],
                                   body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
 
@@ -2565,15 +2608,36 @@ class VncSearchDbClient(VncSearchItf):
     def search_update(self, obj_type, obj_ids, new_obj_dict):
         obj_type = obj_type.replace('-', '_')
         if self.is_doc_type_mapped(obj_type):
-            obj_dict_scrubbed = {}
-            obj_dict_scrubbed["doc"] = self._scrub_dict(new_obj_dict)
+            request_body = {}
+            if self._is_script_update:
+                obj_dict = self._remove_unsupported(new_obj_dict)
+                request_body = self.generate_es_update_commands(obj_dict)
+            else:
+                request_body["doc"] = self._scrub_dict(new_obj_dict,obj_type)
+
             if self._es_client.exists(index=self.get_index(obj_type), doc_type=obj_type, id=obj_ids['uuid']):
                 self._es_client.update(index=self.get_index(obj_type), doc_type=obj_type, id=obj_ids['uuid'],
-                                       body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
+                                       body=json.dumps(request_body), **self.__get_default_params())
             else:
                 self.search_create(obj_type, obj_ids, new_obj_dict)
 
     # end dbe_update
+
+    @staticmethod
+    def generate_es_update_commands(new_obj_dict):
+        ctx_command = []
+        params = {}
+        for k, v in new_obj_dict.iteritems():
+            if v is None:
+                ctx_command.append('ctx._source.remove(%s)'%k)
+                params['%s' % k] = '%s' % k
+            else:
+                ctx_command.append('ctx._source.%s=%s' % (k, k))
+                params['%s' % k] = v
+        return {
+            "script": "%s" % (';'.join(ctx_command)),
+            "params": params
+        }
 
     @search_db_trace(OP_DELETE)
     def search_delete(self, obj_type, obj_ids, obj_dict=None):
@@ -2619,7 +2683,8 @@ class VncSearchDbClient(VncSearchItf):
         matches = []
         try:
             for id in ids_list:
-                match = self._es_client.get_source(index=self.get_index(obj_type), doc_type=obj_type, id=id['uuid'], params=params)
+                match = self._es_client.get_source(index=self.get_index(obj_type), doc_type=obj_type, id=id['uuid'],
+                                                   params=params)
                 matches.append(match)
         except NoIdError as e:
             return (False, str(e))
@@ -2654,7 +2719,8 @@ class VncSearchDbClient(VncSearchItf):
     def suggest(self, body=None):
         self.config_log('suggest body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_DEBUG)
         return self._es_client.suggest(body=body, index=self.get_index(obj_type=None))
-    # suggest
+        # suggest
+
 
 # end VncSearchDbClient
 
