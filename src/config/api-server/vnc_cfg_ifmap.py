@@ -2596,15 +2596,13 @@ class VncSearchDbClient(VncSearchItf):
     def generate_es_update_commands(new_obj_dict):
         ctx_command = []
         params = {}
-        count = 0
         for k, v in new_obj_dict.iteritems():
             if v is None:
-                ctx_command.append('ctx._source.remove(item%s)' % count)
-                params['item%s' % count] = '%s' % k
+                ctx_command.append('ctx._source.remove(%s)'%k)
+                params['%s' % k] = '%s' % k
             else:
                 ctx_command.append('ctx._source.%s=%s' % (k, k))
                 params['%s' % k] = v
-            count += 1
         return {
             "script": "%s" % (';'.join(ctx_command)),
             "params": params
