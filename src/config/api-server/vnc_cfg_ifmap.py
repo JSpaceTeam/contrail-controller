@@ -2603,10 +2603,7 @@ class VncSearchDbClient(VncSearchItf):
                 params['item%s' % count] = '%s' % k
             else:
                 ctx_command.append('ctx._source.%s=%s' % (k, k))
-                if isinstance(v, basestring):
-                    params['%s' % k] = '"%s"' % v
-                else:
-                    params['%s' % k] = v
+                params['%s' % k] = v
             count += 1
         return {
             "script": "%s" % (';'.join(ctx_command)),
