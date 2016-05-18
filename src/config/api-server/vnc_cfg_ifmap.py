@@ -2526,7 +2526,37 @@ class VncSearchDbClient(VncSearchItf):
 
     # end _init_index
 
+    def _scrub_dict_remove_none(self, obj_dict):
+        """
+        Removes None for dict
+        Args:
+            obj_dict:
+
+        Returns:
+
+        """
+        if isinstance(obj_dict, list):
+            dict_list = []
+            for item in obj_dict:
+                dict_list.append(self._scrub_dict_remove_none(item))
+            return dict_list
+        elif isinstance(obj_dict, dict):
+            return dict((k, self._scrub_dict_remove_none(v)) for k, v in obj_dict.iteritems()
+                        if v is not None and not self._is_unsupported_entry(k))
+        else:
+            return obj_dict
+
     def _scrub_dict(self, obj_dict, obj_type, path=""):
+        """
+        Replace None values with string or None in case of containers and list
+        Args:
+            obj_dict:
+            obj_type:
+            path:
+
+        Returns:
+
+        """
         if isinstance(obj_dict, list):
             dict_list = []
             for item in obj_dict:
@@ -2545,13 +2575,22 @@ class VncSearchDbClient(VncSearchItf):
 
 
     def _remove_unsupported(self, obj_dict):
+        """
+        Remove all unsupported keys from dict
+        Args:
+            obj_dict:
+
+        Returns:
+
+        """
         if isinstance(obj_dict, list):
             dict_list = []
             for item in obj_dict:
                 dict_list.append(self._remove_unsupported(item))
             return dict_list
         elif isinstance(obj_dict, dict):
-            return dict((k, self._remove_unsupported(v)) for k, v in obj_dict.iteritems() if k != 'uuid' and not self._is_unsupported_entry(k))
+            return dict((k, self._remove_unsupported(v)) for k, v in obj_dict.iteritems() if
+                        k != 'uuid' and not self._is_unsupported_entry(k))
         else:
             return obj_dict
 
@@ -2597,11 +2636,12 @@ class VncSearchDbClient(VncSearchItf):
     def search_create(self, obj_type, obj_ids, obj_dict):
         obj_type = obj_type.replace('-', '_')
         if self.is_doc_type_mapped(obj_type):
-            obj_dict_scrubbed = self._scrub_dict(obj_dict,obj_type)
+            obj_dict_scrubbed = self._scrub_dict_remove_none(obj_dict)
             self._es_client.index(index=self.get_index(obj_type), doc_type=obj_type, id=obj_ids['uuid'],
                                   body=json.dumps(obj_dict_scrubbed), **self.__get_default_params())
 
     # end create
+
 
 
     @search_db_trace(OP_UPDATE)
@@ -2613,7 +2653,7 @@ class VncSearchDbClient(VncSearchItf):
                 obj_dict = self._remove_unsupported(new_obj_dict)
                 request_body = self.generate_es_update_commands(obj_dict)
             else:
-                request_body["doc"] = self._scrub_dict(new_obj_dict,obj_type)
+                request_body["doc"] = self._scrub_dict(new_obj_dict, obj_type)
 
             if self._es_client.exists(index=self.get_index(obj_type), doc_type=obj_type, id=obj_ids['uuid']):
                 self._es_client.update(index=self.get_index(obj_type), doc_type=obj_type, id=obj_ids['uuid'],
@@ -2623,17 +2663,16 @@ class VncSearchDbClient(VncSearchItf):
 
     # end dbe_update
 
-    @staticmethod
-    def generate_es_update_commands(new_obj_dict):
+    def generate_es_update_commands(self, new_obj_dict):
         ctx_command = []
         params = {}
         for k, v in new_obj_dict.iteritems():
             if v is None:
-                ctx_command.append('ctx._source.remove(%s)'%k)
+                ctx_command.append('ctx._source.remove(%s)' % k)
                 params['%s' % k] = '%s' % k
             else:
                 ctx_command.append('ctx._source.%s=%s' % (k, k))
-                params['%s' % k] = v
+                params['%s' % k] = self._scrub_dict_remove_none(v)
         return {
             "script": "%s" % (';'.join(ctx_command)),
             "params": params
