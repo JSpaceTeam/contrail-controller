@@ -10,7 +10,7 @@ import kazoo.handlers.gevent
 import kazoo.recipe.election
 from kazoo.client import KazooState
 from kazoo.retry import KazooRetry
-
+from oslo_config import cfg
 from bitarray import bitarray
 from cfgm_common.exceptions import ResourceExhaustionError, ResourceExistsError
 from gevent.coros import BoundedSemaphore
@@ -241,13 +241,17 @@ class ZookeeperClient(object):
             self.log = logging_fn
         else:
             self.log = self.syslog
+
+        self._client_connect_timeout = (cfg.CONF.zk_connect_timeout / (len(server_list.split(',')))) #Scale down timeout
+        self._connect_timeout = len(server_list.split(',')) * self._client_connect_timeout + 10.0
         self.timeout_ex = timeout_exception_cls
         # KazooRetry to retry keeper CRUD operations
         self._retry = KazooRetry(max_tries=None, max_delay=300,
                                  sleep_func=sleep_func)
+
         self._zk_client = kazoo.client.KazooClient(
                 server_list,
-                timeout=400,
+                timeout=self._client_connect_timeout,
                 handler=client_handler,
                 logger=logger,
                 connection_retry=self._retry,
@@ -268,7 +272,7 @@ class ZookeeperClient(object):
     def connect(self):
         while True:
             try:
-                self._zk_client.start()
+                self._zk_client.start(self._connect_timeout)
                 break
             except self.timeout_ex  as e:
                 #Update connection info
