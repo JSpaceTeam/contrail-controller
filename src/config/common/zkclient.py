@@ -423,6 +423,26 @@ class ZookeeperClient(object):
             return []
     # end exists
 
+    def lock(self, path, identifier=None):
+        """
+        Returns kazoo lock object
+        Args:
+            path:
+            identifier:
+
+        Returns:
+
+        """
+        return self._zk_client.Lock(path, identifier)
+
+    def real_client(self):
+        """
+        get the real kazoo client
+        Returns:
+
+        """
+        return self._zk_client
+
 
     def _sandesh_connection_info_update(self, status, message):
         from pysandesh.connection_info import ConnectionState
