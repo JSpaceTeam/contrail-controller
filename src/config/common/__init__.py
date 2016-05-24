@@ -5,7 +5,7 @@
 import sys
 import re
 from oslo_config import cfg
-
+from oslo_config.cfg import ArgsAlreadyParsedError
 
 IP_FABRIC_VN_FQ_NAME = ['default-domain', 'default-project', 'ip-fabric']
 IP_FABRIC_RI_FQ_NAME = IP_FABRIC_VN_FQ_NAME + ['__default__']
@@ -58,4 +58,7 @@ _illegal_ranges = ["%s-%s" % (unichr(low), unichr(high))
                    for (low, high) in _illegal_unichrs]
 illegal_xml_chars_RE = re.compile(u'[%s]' % u''.join(_illegal_ranges))
 
-cfg.CONF.register_cli_opt(cfg.IntOpt(name="zk_connect_timeout", default=30))
+try:
+    cfg.CONF.register_cli_opt(cfg.IntOpt(name="zk_connect_timeout", default=30))
+except ArgsAlreadyParsedError:
+    pass
