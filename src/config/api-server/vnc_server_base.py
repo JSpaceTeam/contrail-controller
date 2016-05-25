@@ -105,6 +105,7 @@ class VncApiServerBase(VncApiServer):
         self._db_conn = None
         self._get_common = None
         self._post_common = None
+        self.error_codes = None
         self._resource_classes = {}
         self._rpc_input_types = {}
         for resource_type in all_resource_types:
