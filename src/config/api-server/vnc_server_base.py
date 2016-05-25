@@ -2,6 +2,7 @@ from gevent import monkey
 
 monkey.patch_all()
 import abc
+import locale
 
 """
 Overriding the base api_stats logger to do nothing
@@ -27,6 +28,7 @@ from gen.resource_xsd import *
 from cfgm_common.vnc_extensions import ExtensionManager, ApiHookManager
 from pysandesh.sandesh_base_logger import SandeshBaseLogger
 from csp_services_common import cfg
+from cfgm_common.errorcodes import ErrorCodes
 from gen.vnc_api_client_gen import *
 
 # Parse config for olso configs. Try to move all config parsing to oslo cfg
@@ -103,6 +105,7 @@ class VncApiServerBase(VncApiServer):
         self._db_conn = None
         self._get_common = None
         self._post_common = None
+        self.error_codes = None
         self._resource_classes = {}
         self._rpc_input_types = {}
         for resource_type in all_resource_types:
@@ -165,6 +168,8 @@ class VncApiServerBase(VncApiServer):
         # GreenletProfiler.set_clock_type('wall')
         self._profile_info = None
         self._sandesh = None
+
+        self._load_error_codes()
 
         # REST interface initialization
         self._get_common = self._http_get_common
@@ -371,7 +376,7 @@ class VncApiServerBase(VncApiServer):
         except (KeyError, TypeError):
             #Verify if input is needed
             if r_class.attr_fields:
-                raise HttpError(400, 'invalid request, key "%s" not found' % _key)
+                raise HttpError(400, 'invalid request, key "%s" not found' % _key, "40001")
             else:
                 obj_dict = {}
 
@@ -384,7 +389,7 @@ class VncApiServerBase(VncApiServer):
             self._validate_complex_type(r_class, prop_dict)
         except Exception as e:
             err_msg = str(e.message)
-            raise cfgm_common.exceptions.HttpError(400, err_msg)
+            raise cfgm_common.exceptions.HttpError(400, err_msg, "40001")
 
         env = request.headers.environ
         tenant_name = env.get(hdr_server_tenant(), 'default-project')
@@ -400,7 +405,7 @@ class VncApiServerBase(VncApiServer):
                     fail_cleanup_callable(*cleanup_args)
                 (code, msg) = result
                 self.config_object_error(None, resource_type, '%s_execute' % (resource_type), 'http_post', msg)
-                raise HttpError(code, msg)
+                raise HttpError(code, msg, "40012")
         callable = getattr(r_class, 'http_post_collection_fail', None)
         if callable:
             cleanup_on_failure.append((callable, [tenant_name, obj_dict]))
@@ -412,7 +417,7 @@ class VncApiServerBase(VncApiServer):
             rsp_body = self._extension_mgrs['rpcApi'].map_method('%s_execute' % method_name, obj_dict)
         except KeyError as e:
             ok = False
-            result = HttpError(404, "RPC not available")
+            result = HttpError(404, "RPC not available", "40013")
 
         except Exception as e:
             ok = False
@@ -424,7 +429,7 @@ class VncApiServerBase(VncApiServer):
             if isinstance(result, cfgm_common.exceptions.HttpError):
                 raise result
             if hasattr(result, 'status_code') and hasattr(result, 'content'):
-                raise HttpError(getattr(result, 'status_code'), getattr(result, 'content'))
+                raise HttpError(getattr(result, 'status_code'), getattr(result, 'content'), "40011")
             raise result
 
         return rsp_body
@@ -436,7 +441,7 @@ class VncApiServerBase(VncApiServer):
         if request.json is not None:
             body = request.json
         else:
-            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
+            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found', "40001")
         result = db_conn.search(resource_type, body)
         return result
 
@@ -447,7 +452,7 @@ class VncApiServerBase(VncApiServer):
         if request.json is not None:
             body = request.json
         else:
-            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
+            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found', "40001")
         result = db_conn.suggest(body)
         return result
 
@@ -458,7 +463,7 @@ class VncApiServerBase(VncApiServer):
         if request.json is not None:
             body = request.json
         else:
-            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found')
+            raise cfgm_common.exceptions.HttpError(400, 'invalid request, search body not found', "40001")
         result = db_conn.search(None, body)
         return result
 
@@ -496,7 +501,7 @@ class VncApiServerBase(VncApiServer):
         if not ok:
             self.config_object_error(None, None, '%ss' % (obj_type),
                                      'dbe_list', result)
-            raise cfgm_common.exceptions.HttpError(404, result)
+            raise cfgm_common.exceptions.HttpError(404, result, "40012")
         obj_ids_list = [{'uuid': obj_uuid}
                         for _, obj_uuid in result]
 
@@ -508,7 +513,7 @@ class VncApiServerBase(VncApiServer):
             obj_type, obj_ids_list, obj_fields)
 
         if not ok:
-            raise cfgm_common.exceptions.HttpError(404, result)
+            raise cfgm_common.exceptions.HttpError(404, result, "40012")
         for obj_result in result:
             obj_dict = {}
             obj_dict['name'] = obj_result['fq_name'][-1]
@@ -564,6 +569,74 @@ class VncApiServerBase(VncApiServer):
                             level=SandeshLevel.SYS_ERR)
 
     # end _load_extensions
+
+    def _load_error_codes(self):
+        try:
+            common_errcodes_dir = cfg.CONF.ERROR_CODES.common_error_codes_dir
+            ms_errcodes_dir = cfg.CONF.ERROR_CODES.ms_error_codes_dir
+            if not common_errcodes_dir.endswith("/"):
+                common_errcodes_dir = common_errcodes_dir + "/"
+            if not ms_errcodes_dir.endswith("/"):
+                ms_errcodes_dir = ms_errcodes_dir + "/"
+
+            common_errcodes_file = cfg.CONF.ERROR_CODES.common_error_codes_file
+            ms_errcodes_file = cfg.CONF.ERROR_CODES.ms_error_codes_file
+            locale_name = self._get_locale_name()
+
+            common_errcodes_file_name = self._get_error_code_locale_file_name(common_errcodes_file, locale_name)
+            ms_errcodes_file_name = self._get_error_code_locale_file_name(ms_errcodes_file, locale_name)
+
+            err_codes = ErrorCodes(common_errcodes_dir + common_errcodes_file_name, ms_errcodes_dir + ms_errcodes_file_name)
+            self.error_codes = err_codes
+
+        except Exception as e:
+            err_msg = cfgm_common.utils.detailed_traceback()
+            self.config_log("Exception in error_codes loading: %s" % (err_msg),
+                            level=SandeshLevel.SYS_ERR)
+
+    #end _load_error_codes
+
+    def _get_locale_name(self):
+        use_localization = cfg.CONF.use_locales
+        locale_name = cfg.CONF.default_locale
+        if use_localization:
+            locale_tup = locale.getlocale(locale.LC_ALL)
+            if locale_tup is not None and locale_tup[0] is not None:
+                locale_name = locale_tup[0]
+            else:
+                locale_tup = locale.getdefaultlocale()
+                if locale_tup[0] is not None:
+                    locale_name = locale_tup[0]
+
+        return locale_name
+
+    #end _get_locale_name
+
+    def _get_error_code_locale_file_name(self, errcodes_file, locale_name):
+        errcodes_file_name = errcodes_file
+        try:
+            if errcodes_file is not None and locale_name is not None:
+                errcodes_file_name = errcodes_file.format(locale=locale_name)
+        except Exception as e:
+            err_msg = cfgm_common.utils.detailed_traceback()
+            self.config_log("Exception in creating error code filename with locale: %s" % (err_msg),
+                            level=SandeshLevel.SYS_ERR)
+
+        return errcodes_file_name
+    #end _get_error_code_locale_file_name
+
+    def handle_error_code(self, exception):
+        if exception is not None and self.error_codes:
+            error_json = self.error_codes.get_error_json(exception)
+            setattr(exception, 'content', error_json)
+            if not hasattr(exception, 'status_code'):
+                error_json_dict = json.loads(error_json)
+                if error_json_dict.has_key('status_code'):
+                    setattr(exception, 'status_code', int(error_json_dict['status_code']))
+
+    #end handle_error_code
+
+
 
 
     def start_server(self):
