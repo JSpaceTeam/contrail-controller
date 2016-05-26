@@ -117,9 +117,8 @@ class VncApiDynamicServerBase(VncApiServerBase):
                 route_name = result['module_name']
                 self._generate_dynamic_resource_crud_methods(route_name)
                 self._generate_dynamic_resource_crud_uri(route_name)
-                if 'es_schema' in result:
-                    es_schema = result['es_schema']
-                    self.init_es_schema(route_name, es_schema)
+                if 'es_schema' in result and len(result['es_schema']) != 0:
+                    self.init_es_schema(route_name, result['es_schema'])
         except Exception as e:
             err_msg = cfgm_common.utils.detailed_traceback()
             logger.error(err_msg)
@@ -775,8 +774,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         xml_data = self._json_to_xml(json_data_dict)
         xml_data = self._update_name_space(xml_data, name_space_dict)
         xml_tree = etree.parse(BytesIO(xml_data), etree.XMLParser())
-        root_element = xml_tree.getroot()
-        module_name = self._get_tag_name(root_element)
+        module_name = yang_schema.get_element_name()
         yang_element = YangElement(name=module_name)
         yang_element = self._get_yang_element(module_name, yang_schema, xml_tree.getroot(), yang_element)
         return yang_element
