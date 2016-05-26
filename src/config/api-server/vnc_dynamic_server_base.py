@@ -49,6 +49,11 @@ _ROUTE = 'route'
 
 _WITH_CHILDS = 'children'
 
+_VERTEX_DEPENDENCY = 'vertex_extn'
+_DRAFT_DEPENDENCY = 'draft_uuid'
+_DB_OBJ_DICT = 'db_obj_dict'
+_QUERY_PARAMS = 'query_params'
+
 
 class VncApiDynamicServerBase(VncApiServerBase):
     """
@@ -123,8 +128,10 @@ class VncApiDynamicServerBase(VncApiServerBase):
             module_element = xml_tree.getroot()
             default_ns = "{" + module_element.nsmap[None] + "}"
             module_name = module_element.get(YangSchemaMgr.NAME_ATTRIB)
-            module_name_space = module_element.find(default_ns + YangSchemaMgr.YANG_NAMESPACE).get(YangSchemaMgr.URI_ATTRIB)
-            module_revision = module_element.find(default_ns + YangSchemaMgr.YANG_REVISION).get(YangSchemaMgr.DATE_ATTRIB)
+            module_name_space = module_element.find(default_ns + YangSchemaMgr.YANG_NAMESPACE).get(
+                YangSchemaMgr.URI_ATTRIB)
+            module_revision = module_element.find(default_ns + YangSchemaMgr.YANG_REVISION).get(
+                YangSchemaMgr.DATE_ATTRIB)
             module_json_schema = json.dumps(xmltodict.parse(yin_schema))
             module_yin_schema = yin_schema
 
@@ -255,6 +262,97 @@ class VncApiDynamicServerBase(VncApiServerBase):
                 return True
         return False
 
+    def _remove_auto_gen_prop(self, obj):
+        props = {'uri', 'parent_uri', 'parent_uuid', 'parent_type', 'uuid', 'perms2', 'id_perms', 'name',
+                 'display_name', 'fq_name'}
+        for removable_property in props:
+            if removable_property in obj:
+                obj.__delitem__(removable_property)
+
+    def read_db_obj(self, db_obj, yang_schema=None, parent_xpath=None):
+        try:
+            if db_obj is None or not isinstance(db_obj, dict):
+                return
+
+            new_obj = dict()
+            for k, v in db_obj.iteritems():
+                if isinstance(v, list) and str(k).endswith('s'):
+                    # Assume given is a list
+                    res_type = str(k)[:str(k).__len__() - 1].replace('_', '-')
+                    cls = self.get_resource_class(res_type)
+
+                    ary = list()
+                    if cls is not None:
+                        for elt in v:
+                            if 'uuid' in elt:
+                                child_db_obj = self.http_resource_read(str(elt['to'][-1]), elt['uuid'])
+                                if child_db_obj is not None and res_type in child_db_obj:
+                                    child_db_obj = child_db_obj[res_type]
+                                    self._remove_auto_gen_prop(child_db_obj)
+
+                                    inner_objs = self.read_db_obj(child_db_obj, yang_schema,
+                                                                  parent_xpath + '\\' + res_type)
+                                    child_db_obj.update(inner_objs)
+
+                                    ary.append(child_db_obj)
+                    xpath = parent_xpath + '\\' + res_type
+                    yang_elt = YangSchemaMgr.get_yang_schema_element(xpath, yang_schema)
+
+                    if yang_elt.get_yang_type() == YangSchemaMgr.YANG_CONTAINER:
+                        new_obj[res_type] = ary[0]
+                    else:
+                        new_obj[res_type] = ary
+
+            for k, v in new_obj.iteritems():
+                db_obj.__delitem__((str(k) + 's').replace('-', '_'))
+
+            return new_obj
+        except Exception as e:
+            logger.error('Exception while forming db_obj ', e)
+            return
+
+    def pre_process_dynamic_service_dependency(func):
+        def wrapper(server_obj, resource_type, *args, **kwargs):
+            try:
+                obj_type = resource_type
+                obj_dict = server_obj.get_req_json_obj()
+                qry_dict = server_obj.get_req_query_obj()
+
+                if _VERTEX_DEPENDENCY in qry_dict:
+                    yang_schema = server_obj.get_yang_schema(obj_type)
+                    if server_obj.get_resource_class(obj_type) is None:
+                        server_obj.set_dynamic_resource_classes(yang_schema)
+
+                    yang_element = server_obj.get_yang_element(obj_dict, yang_schema)
+
+                    fq_name = yang_element.get_fq_name_list()
+                    uuid = server_obj._get_id_from_fq_name(resource_type, fq_name)
+
+                    db_obj_dict = None
+
+                    if uuid is not None:
+                        db_obj_dict = server_obj.http_resource_read(resource_type, uuid)
+
+                        if db_obj_dict is not None:
+                            server_obj._remove_auto_gen_prop(db_obj_dict[resource_type])
+                            xpath = yang_schema.get_xpath() + '\\' + resource_type
+                            new_child_objs = server_obj.read_db_obj(db_obj_dict[resource_type], yang_schema, xpath)
+                            db_obj_dict[resource_type].update(new_child_objs)
+
+                    server_obj._invoke_dynamic_extension("process_vertex_dependency", obj_type, obj_dict, db_obj_dict=db_obj_dict)
+
+                if _DRAFT_DEPENDENCY in qry_dict:
+                    server_obj._invoke_dynamic_extension("process_draft_dependency", obj_type, obj_dict)
+
+                if _VERTEX_DEPENDENCY not in qry_dict and _DRAFT_DEPENDENCY not in qry_dict:
+                    return func(server_obj, resource_type, *args, **kwargs)
+            except Exception as e:
+                logger.error('Exception while processing dynamic services dependency ', e)
+                raise
+
+        return wrapper
+
+    @pre_process_dynamic_service_dependency
     def http_dynamic_resource_create(self, resource_type):
         logger.debug('New Route - http_dynamic_resource_create method ' + resource_type)
         # obj_type = resource_type.replace('-', '_')
@@ -302,6 +400,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         self._invoke_dynamic_extension("post_dynamic_resource_read", obj_type, res_obj_dict)
         return res_obj_dict
 
+    @pre_process_dynamic_service_dependency
     def http_dynamic_resource_update(self, resource_type, id):
         logger.debug('New Route - http_dynamic_resource_update method ' + resource_type)
         # obj_type = resource_type.replace('-', '_')
@@ -330,6 +429,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         self._invoke_dynamic_extension("post_dynamic_resource_update", obj_type, obj_dict)
         return res_obj_dict
 
+    @pre_process_dynamic_service_dependency
     def http_dynamic_resource_patch(self, resource_type, id):
         logger.debug('New Route - http_dynamic_resource_patch method ', resource_type)
         # obj_type = resource_type.replace('-', '_')
@@ -486,11 +586,11 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
     # end _load_dynamic_extensions
 
-    def _invoke_dynamic_extension(self, method_name, obj_type, obj_dict):
+    def _invoke_dynamic_extension(self, method_name, obj_type, obj_dict, db_obj_dict=None):
         try:
             params = dict()
-            params['server_obj'] = self
-            params['query_params'] = self.get_req_query_obj()
+            params[_QUERY_PARAMS] = self.get_req_query_obj()
+            params[_DB_OBJ_DICT] = db_obj_dict
             self._extension_mgrs['dynamicResourceApi'].map_method(method_name, obj_dict, **params)
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
@@ -771,6 +871,23 @@ class VncApiDynamicServerBase(VncApiServerBase):
 # end class VncApiServer
 
 class DynamicResourceApiGen(object):
+    def process_draft_dependency(self, resource_dict, **kwargs):
+        """
+        Method called to process dynamic resource draft
+        """
+        pass
+
+    # end process_draft_dependency
+
+    def process_vertex_dependency(self, resource_dict, **kwargs):
+        """
+        Method called to process dynamic resource vertex depencies
+        """
+        pass
+
+    # end process_vertex_dependency
+
+
     def pre_dynamic_resource_create(self, resource_dict, **kwargs):
         """
         Method called before dynamic resource is created
