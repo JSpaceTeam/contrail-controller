@@ -3,31 +3,38 @@ __author__ = 'hprakash'
 # Copyright (c) 2016 Juniper Networks, Inc. All rights reserved.
 #
 
-import logging
-from app_cfg_server.server_core.vnc_server_base import VncApiServerBase
-
-logger = logging.getLogger(__name__)
-import os
-import xmltodict
-import commands
-import functools
-import traceback
-from cfgm_common.vnc_extensions import ExtensionManager
 import cfgm_common
-from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
-from app_cfg_server.server_core.context import get_request
-import json
+import commands
 import copy
-from lxml import etree
-from lxml.etree import XMLSyntaxError
-from io import BytesIO
-from cfgm_common import utils
-from app_cfg_server.server_core.vnc_cfg_base_type import Resource
+import functools
+import json
+import logging
+import os
+import sys
+import threading
+import traceback
+import xmltodict
 from app_cfg_server.gen.resource_common import YangSchema
 from app_cfg_server.gen.vnc_api_client_gen import SERVICE_PATH
+from app_cfg_server.server_core.context import get_request
+from app_cfg_server.server_core.vnc_cfg_base_type import Resource
+from app_cfg_server.server_core.vnc_server_base import VncApiServerBase
+from cfgm_common import utils
+from cfgm_common.vnc_extensions import ExtensionManager
+from io import BytesIO
+from kombu import Exchange, Queue, BrokerConnection
+from kombu.connection import Connection
+from kombu.mixins import ConsumerMixin
+from kombu.pools import producers
+from lxml import etree
+from lxml.etree import XMLSyntaxError
 from oslo_config import cfg
+from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 
 logger = logging.getLogger(__name__)
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+ES_FILE = os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "gesm.py"
 
 TEMP_DIR = "/tmp/yangs"
 TEMP_ES_DIR = "/tmp/yangs/es"
@@ -54,6 +61,28 @@ _DRAFT_DEPENDENCY = 'draft_uuid'
 _DB_OBJ_DICT = 'db_obj_dict'
 _QUERY_PARAMS = 'query_params'
 
+# Register RabbitMQ Configuration
+route_key = 'dynamic_route'
+route_exchange = Exchange('dynamic_route_exchange', type='direct')
+route_queue = Queue('dynamic_route_queue', route_exchange, routing_key=route_key)
+
+rabit_mq_conf = cfg.OptGroup(name='oslo_messaging_rabbit', title="Register RabbitMQ")
+cfg.CONF.register_cli_opt(
+    cfg.StrOpt(name='rabbit_hosts', default='localhost', help='RabbitMQ Host'),
+    group=rabit_mq_conf)
+
+cfg.CONF.register_cli_opt(
+    cfg.StrOpt(name='rabbit_userid', default='guest', help='RabbitMQ USER ID'),
+    group=rabit_mq_conf)
+
+cfg.CONF.register_cli_opt(
+    cfg.StrOpt(name='rabbit_password', default='guest', help='RabbitMQ PWD'),
+    group=rabit_mq_conf)
+
+cfg.CONF.register_cli_opt(
+    cfg.StrOpt(name='rabbit_port', default=5672, help='RabbitMQ Port'),
+    group=rabit_mq_conf)
+
 
 class VncApiDynamicServerBase(VncApiServerBase):
     """
@@ -68,10 +97,13 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
     # end __new__
 
-    def __init__(self, args_str=None):
+    def __init__(self, args_str=None):  # pragma: no cover
         super(VncApiDynamicServerBase, self).__init__(args_str)
         self._load_dynamic_extensions()
         self._initialize_dynamic_resources_from_db()
+
+        self.routeHandler = DynamicRouteNotificationHandler(self)
+        self.routeHandler.start_consumer()
 
     # end __init__
 
@@ -161,8 +193,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             else:
                 response = self.http_resource_create(yang_schema.get_type())
                 if create_routes == 'true':
-                    self._generate_dynamic_resource_crud_methods(module_name)
-                    self._generate_dynamic_resource_crud_uri(module_name)
+                    self.routeHandler.send_new_route_notification(module_name)
                     response[yang_schema.get_type()]["dynamic-uri"] = SERVICE_PATH + "/" + module_name
                     logger.info("New dynamic uri created for yang module :" + SERVICE_PATH + "/" + module_name)
                 else:
@@ -192,8 +223,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             os.makedirs(TEMP_ES_DIR)
 
         # Copy ES Yang Plugin
-        src = os.getcwd() + '/server_core/gesm.py'
-        copy_cmd = 'cp %s %s' % (src, TEMP_ES_DIR)
+        copy_cmd = 'cp %s %s' % (ES_FILE, TEMP_ES_DIR)
         commands.getoutput(copy_cmd)
 
         pyang_cmd = "pyang  -p " + TEMP_DIR + " --plugindir %s %s -f gesm --gesm-output %s"
@@ -339,12 +369,12 @@ class VncApiDynamicServerBase(VncApiServerBase):
                             new_child_objs = server_obj.read_db_obj(db_obj_dict[resource_type], yang_schema, xpath)
                             db_obj_dict[resource_type].update(new_child_objs)
 
-                    server_obj._invoke_dynamic_extension("process_vertex_dependency", obj_type, obj_dict, db_obj_dict=db_obj_dict)
+                    server_obj._invoke_dynamic_extension("process_vertex_dependency", obj_type, obj_dict,
+                                                         db_obj_dict=db_obj_dict)
 
                 if _DRAFT_DEPENDENCY in qry_dict:
                     server_obj._invoke_dynamic_extension("process_draft_dependency", obj_type, obj_dict)
-
-                if _VERTEX_DEPENDENCY not in qry_dict and _DRAFT_DEPENDENCY not in qry_dict:
+                else:
                     return func(server_obj, resource_type, *args, **kwargs)
             except Exception as e:
                 logger.error('Exception while processing dynamic services dependency ', e)
@@ -1712,3 +1742,70 @@ class YangSchemaMgr:
         for child_schema in yang_schema.get_child_elements():
             YangSchemaMgr.get_yang_schema_elements(xpaths, child_schema, yang_dict)
         return yang_dict
+
+class DynamicRouteNotificationHandler(object):
+    def __init__(self, server):
+        self.server = server
+
+    def get_ampq_broker_url(self):
+        rabbit_user = cfg.CONF.oslo_messaging_rabbit.rabbit_userid
+        rabbit_pwd = cfg.CONF.oslo_messaging_rabbit.rabbit_password
+        rabbit_hosts = cfg.CONF.oslo_messaging_rabbit.rabbit_hosts
+        rabbit_port = cfg.CONF.oslo_messaging_rabbit.rabbit_port
+
+        rabbit_host = rabbit_hosts
+        if isinstance(rabbit_hosts, list):  # pragma: no cover
+            rabbit_host = rabbit_hosts[0]
+
+        url = 'amqp://{0}:{1}@{2}//'.format(rabbit_user, rabbit_pwd, rabbit_host) if ':' in rabbit_host \
+            else 'amqp://{0}:{1}@{2}:{3}//'.format(rabbit_user, rabbit_pwd, rabbit_host, rabbit_port)
+
+        logging.info('RabbitMQ URL ' + url)
+        return url
+
+    def send_new_route_notification(self, route): # pragma: no cover
+        rabbitmq_url = self.get_ampq_broker_url()
+        connection = Connection(rabbitmq_url)
+
+        payload = {'route': route}
+
+        with producers[connection].acquire(block=True) as producer:
+            producer.publish(payload,
+                             exchange=route_exchange,
+                             declare=[route_exchange],
+                             routing_key=route_key)
+        return
+
+    def start_consumer(self):
+        class Worker(threading.Thread):
+            def run(this):
+                url = self.get_ampq_broker_url()
+                with BrokerConnection(url) as connection:
+                    try:
+                        DynamicRouteListener(connection, self.server).run()
+                    except Exception as e:
+                        logging.error('Stopping Worker Thread for Route Listener ', e)
+
+        Worker().start()
+
+
+class DynamicRouteListener(ConsumerMixin):
+    def __init__(self, connection, server):
+        self.connection = connection
+        self.server = server
+
+    def get_consumers(self, Consumer, channel):
+        return [Consumer(route_queue, callbacks=[self.on_message])]
+
+    def on_message(self, body, message):
+        logging.info("RECEIVED MSG - body: %r" % (body,))
+        logging.info("RECEIVED MSG - message: %r" % (message,))
+
+        try:
+            route = body['route']
+            self.server._generate_dynamic_resource_crud_methods(route)
+            self.server._generate_dynamic_resource_crud_uri(route)
+        except Exception as e:
+            logging.error('Exception while installing new routes ', e)
+
+        message.ack()
