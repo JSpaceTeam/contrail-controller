@@ -358,6 +358,7 @@ class VncApiServer(object):
                 attr_cls = cfgm_common.utils.str_to_class(ref_link_type, __name__)
                 tmp_attr = attr_cls(**ref_dict['attr'])
                 tmp_attr.export(buf)
+                tmp_attr = attr_cls()
                 node = etree.fromstring(buf.getvalue())
                 try:
                     tmp_attr.build(node)
