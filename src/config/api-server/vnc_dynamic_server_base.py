@@ -66,24 +66,6 @@ route_key = 'dynamic_route'
 route_exchange = Exchange('dynamic_route_exchange', type='direct')
 route_queue = Queue('dynamic_route_queue', route_exchange, routing_key=route_key)
 
-rabit_mq_conf = cfg.OptGroup(name='oslo_messaging_rabbit', title="Register RabbitMQ")
-cfg.CONF.register_cli_opt(
-    cfg.StrOpt(name='rabbit_hosts', default='localhost', help='RabbitMQ Host'),
-    group=rabit_mq_conf)
-
-cfg.CONF.register_cli_opt(
-    cfg.StrOpt(name='rabbit_userid', default='guest', help='RabbitMQ USER ID'),
-    group=rabit_mq_conf)
-
-cfg.CONF.register_cli_opt(
-    cfg.StrOpt(name='rabbit_password', default='guest', help='RabbitMQ PWD'),
-    group=rabit_mq_conf)
-
-cfg.CONF.register_cli_opt(
-    cfg.StrOpt(name='rabbit_port', default=5672, help='RabbitMQ Port'),
-    group=rabit_mq_conf)
-
-
 class VncApiDynamicServerBase(VncApiServerBase):
     """
     This is the manager class co-ordinating all dynamic classes present in the package
@@ -1746,14 +1728,10 @@ class DynamicRouteNotificationHandler(object):
         self.server = server
 
     def get_ampq_broker_url(self):
-        rabbit_user = cfg.CONF.oslo_messaging_rabbit.rabbit_userid
-        rabbit_pwd = cfg.CONF.oslo_messaging_rabbit.rabbit_password
-        rabbit_hosts = cfg.CONF.oslo_messaging_rabbit.rabbit_hosts
-        rabbit_port = cfg.CONF.oslo_messaging_rabbit.rabbit_port
-
-        rabbit_host = rabbit_hosts
-        if isinstance(rabbit_hosts, list):  # pragma: no cover
-            rabbit_host = rabbit_hosts[0]
+        rabbit_user = cfg.CONF.rabbit_user
+        rabbit_pwd = cfg.CONF.rabbit_password
+        rabbit_host = cfg.CONF.rabbit_server
+        rabbit_port = cfg.CONF.rabbit_port
 
         url = 'amqp://{0}:{1}@{2}//'.format(rabbit_user, rabbit_pwd, rabbit_host) if ':' in rabbit_host \
             else 'amqp://{0}:{1}@{2}:{3}//'.format(rabbit_user, rabbit_pwd, rabbit_host, rabbit_port)
