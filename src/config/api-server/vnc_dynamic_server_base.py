@@ -66,6 +66,7 @@ route_key = 'dynamic_route'
 route_exchange = Exchange('dynamic_route_exchange', type='direct')
 route_queue = Queue('dynamic_route_queue', route_exchange, routing_key=route_key)
 
+
 class VncApiDynamicServerBase(VncApiServerBase):
     """
     This is the manager class co-ordinating all dynamic classes present in the package
@@ -127,7 +128,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             create_routes = 'true'
             if "create-routes" in req:
                 create_routes = req['create-routes']
-            if not os.path.exists(TEMP_DIR): # pragma: no cover
+            if not os.path.exists(TEMP_DIR):  # pragma: no cover
                 os.makedirs(TEMP_DIR)
             file_name = TEMP_DIR + "/" + module_name
             file_obj = open(file_name, 'w')
@@ -200,7 +201,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
     def update_es_schema(self, module_name, file_name):
         logger.debug('Create Elastic Search Schema -- input  ' + module_name)
 
-        if not os.path.exists(TEMP_ES_DIR): # pragma: no cover
+        if not os.path.exists(TEMP_ES_DIR):  # pragma: no cover
             os.makedirs(TEMP_ES_DIR)
 
         # Copy ES Yang Plugin
@@ -263,7 +264,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
     def get_req_json_obj(self):  # pragma: no cover
         return get_request().json
 
-    def get_req_query_obj(self): # pragma: no cover
+    def get_req_query_obj(self):  # pragma: no cover
         return get_request().query.dict
 
     def apply_to_children(self):
@@ -312,13 +313,13 @@ class VncApiDynamicServerBase(VncApiServerBase):
                     if yang_elt.get_yang_type() == YangSchemaMgr.YANG_CONTAINER:
                         new_obj[res_type] = ary[0]
                     else:
-                        new_obj[res_type] = ary # pragma: no cover
+                        new_obj[res_type] = ary  # pragma: no cover
 
             for k, v in new_obj.iteritems():
                 db_obj.__delitem__((str(k) + 's').replace('-', '_'))
 
             return new_obj
-        except Exception as e: # pragma: no cover
+        except Exception as e:  # pragma: no cover
             logger.error('Exception while forming db_obj ', e)
             return
 
@@ -380,7 +381,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             yang_element = self.get_yang_element(obj_dict, yang_schema)
             self._dynamic_resource_create(yang_element)
 
-            #Update Leaf Ref - Objects
+            # Update Leaf Ref - Objects
             self.update_leaf_ref(yang_element)
 
             res_obj_dict['uuid'] = yang_element.uuid
@@ -431,7 +432,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             yang_element = self.get_yang_element(obj_dict, yang_schema)
             self._dynamic_resource_update(yang_element)
 
-            #Update Leaf Ref - Objects
+            # Update Leaf Ref - Objects
             self.update_leaf_ref(yang_element)
 
             res_obj_dict['uuid'] = yang_element.uuid
@@ -636,13 +637,13 @@ class VncApiDynamicServerBase(VncApiServerBase):
         if operation == _CREATE_OPERATION:
             self._dynamic_resource_create(yang_element, parent)
 
-            #Update leaf ref if any
+            # Update leaf ref if any
             self.update_leaf_ref(yang_element)
 
         if operation == _UPDATE_OPERATION:
             self._resource_update(yang_element, parent)
 
-            #Update leaf ref if any
+            # Update leaf ref if any
             self.update_leaf_ref(yang_element, deep_fetch=False)
 
             for child in yang_element.get_child_elements():
@@ -661,7 +662,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
     # End _dynamic_resource_patch
 
-    def update_leaf_ref(self, yang_element, deep_fetch = True):
+    def update_leaf_ref(self, yang_element, deep_fetch=True):
         try:
             if yang_element.is_leaf_ref():
                 self._update_leaf_ref(yang_element)
@@ -670,7 +671,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
                 for child in yang_element.get_child_elements():
                     self.update_leaf_ref(child)
             else:
-                #PATCH USE CASE - DO FOR ONE LEVEL LOOKUP ONLY - Update happens for every level
+                # PATCH USE CASE - DO FOR ONE LEVEL LOOKUP ONLY - Update happens for every level
                 for child in yang_element.get_child_elements():
                     if child.is_leaf_ref():
                         self._update_leaf_ref(child)
@@ -801,7 +802,6 @@ class VncApiDynamicServerBase(VncApiServerBase):
         module_name = yang_schema.get_element_name()
         yang_element = YangElement(name=module_name)
         yang_element = self._get_yang_element(module_name, yang_schema, xml_tree.getroot(), yang_element)
-        YangSchemaMgr().process_leaf_ref(yang_element)
         return yang_element
 
     def _get_yang_element(self, module_name, yang_schema, element, yang_element, parent_element=None):
@@ -817,7 +817,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             xpath = parent_element.get_xpath() + "\\" + yang_element.get_element_name()
             yang_element.set_xpath(xpath)
 
-        schema_elt =  self._get_yang_element_schema(yang_element, yang_schema)
+        schema_elt = self._get_yang_element_schema(yang_element, yang_schema)
         yang_element.set_yang_type(schema_elt.get_yang_type())
         yang_element.set_key_names(schema_elt.get_key_names())
 
@@ -1637,7 +1637,7 @@ class YangElement(object):
     def is_leaf_ref(self):
         return self._data_type == YangSchemaMgr.LEAFREF
 
-    def get_json(self, include_leaf_ref = False):
+    def get_json(self, include_leaf_ref=False):
         if self.is_leaf() is not True:
             json_data = dict()
             list_fq_names = self.get_fq_name_list()
@@ -1674,14 +1674,14 @@ class YangElement(object):
 
     def _update_leaf_ref_json(self, json_data):
         path = self.get_leaf_ref_path()
-        level  = (len(path) - len(path.replace('..', '')))/2
+        level = (len(path) - len(path.replace('..', ''))) / 2
         level_path = path.replace(level * '../', '')
         index = level_path.index('/')
         ref_obj_name = level_path[:index]
 
         ref_obj = self.get_leaf_ref_object(self, level, ref_obj_name)
 
-        if ref_obj is None:  #Wrong Input - For dynamic services case  # pragma: no cover
+        if ref_obj is None:  # Wrong Input - For dynamic services case  # pragma: no cover
             return
 
         ref_json_data = ref_obj.get_json()
@@ -1805,7 +1805,7 @@ class YangSchemaMgr:
     def process_leaf_ref(self, yang_schema):
         if yang_schema.is_leaf_ref():
             path = yang_schema.get_leaf_ref_path()
-            level  = (len(path) - len(path.replace('..', '')))/2
+            level = (len(path) - len(path.replace('..', ''))) / 2
             ref_levels = path.replace(level * '../', '')
             index = ref_levels.index('/')
             ref_edge_name = ref_levels[:index]
@@ -1818,8 +1818,8 @@ class YangSchemaMgr:
                     ref_obj = elt
                     break
 
-                #Set Dependencies - Set backref in immediate parent and Ref in Parent Element
-                back_ref_key = unicode(ref_obj.element_name+'_back_refs')
+                # Set Dependencies - Set backref in immediate parent and Ref in Parent Element
+                back_ref_key = unicode(ref_obj.element_name + '_back_refs')
                 back_ref_obj.backref_fields.add(unicode(back_ref_key))
                 back_ref_obj.backref_field_types[back_ref_key] = (ref_obj.element_name, 'None', False)
 
@@ -1904,7 +1904,8 @@ class YangSchemaMgr:
                     yang_element.set_data_type(data_type_elt.get(self.NAME_ATTRIB))
 
                 if yang_element.is_leaf_ref():
-                    path = schema_element.find(default_ns + self.YANG_TYPE).find(default_ns + self.PATH).get(self.VALUE_ATTRIB)
+                    path = schema_element.find(default_ns + self.YANG_TYPE).find(default_ns + self.PATH).get(
+                        self.VALUE_ATTRIB)
                     yang_element.set_leaf_ref_path(path)
 
                 yang_element.set_element_name(element_name)
@@ -1950,6 +1951,7 @@ class YangSchemaMgr:
             YangSchemaMgr.get_yang_schema_elements(xpaths, child_schema, yang_dict)
         return yang_dict
 
+
 class DynamicRouteNotificationHandler(object):
     def __init__(self, server):
         self.server = server
@@ -1966,7 +1968,7 @@ class DynamicRouteNotificationHandler(object):
         logging.info('RabbitMQ URL ' + url)
         return url
 
-    def send_new_route_notification(self, route): # pragma: no cover
+    def send_new_route_notification(self, route):  # pragma: no cover
         rabbitmq_url = self.get_ampq_broker_url()
         connection = Connection(rabbitmq_url)
 
