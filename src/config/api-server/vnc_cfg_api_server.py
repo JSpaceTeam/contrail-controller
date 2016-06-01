@@ -234,7 +234,7 @@ class VncApiServer(object):
     # end __new__
 
     @classmethod
-    def _validate_complex_type(cls, dict_cls, dict_body):
+    def _validate_complex_type(cls, dict_cls, dict_body, is_update = False):
         if dict_body is None:
             return
         for key, value in dict_body.items():
@@ -266,17 +266,17 @@ class VncApiServer(object):
                                 raise ValueError("key '%s' not unique"%(value))
                             else:
                                 key_set.add(value)
-                    cls._validate_complex_type(attr_cls, item)
+                    cls._validate_complex_type(attr_cls, item, is_update)
             else:
                 for item in values:
-                    cls._validate_simple_type(key, attr_type, item, optional, restrictions)
+                    cls._validate_simple_type(key, attr_type, item, optional, restrictions, is_update)
     # end _validate_complex_type
 
     @classmethod
-    def _validate_simple_type(cls, type_name, xsd_type, value, optional, restrictions=None):
+    def _validate_simple_type(cls, type_name, xsd_type, value, optional, restrictions=None, is_update=False):
         error_msg="Value '%s' is not facet-valid with respect to %s '%s' for type '%s'"
         if value is None:
-            if optional:
+            if is_update or optional:
                 return
             else:
                 raise ValueError('%s is expected' %(type_name))
@@ -337,7 +337,7 @@ class VncApiServer(object):
                             for restr in v:
                                 if not match:
                                     try:
-                                        cls._validate_simple_type(type_name, xsd_type, value, optional, restr)
+                                        cls._validate_simple_type(type_name, xsd_type, value, optional, restr, is_update)
                                         match = True
                                     except Exception as e:
                                         err_msg = 'Error ' + str(e)
@@ -382,7 +382,7 @@ class VncApiServer(object):
                             for restr in v:
                                 if not match:
                                     try:
-                                        cls._validate_simple_type(type_name, xsd_type, value, optional, restr)
+                                        cls._validate_simple_type(type_name, xsd_type, value, optional, restr, is_update)
                                         match = True
                                     except Exception as e:
                                         err_msg = 'Error ' + str(e)
@@ -390,7 +390,7 @@ class VncApiServer(object):
                                 raise ValueError("%s: value must be one of %s"%(type_name,str(v)))
     # end _validate_simple_type
 
-    def _validate_props_in_request(self, resource_class, obj_dict):
+    def _validate_props_in_request(self, resource_class, obj_dict, is_update=False):
         for prop_name in resource_class.prop_fields:
             prop_field_types = resource_class.prop_field_types[prop_name]
             is_simple = not prop_field_types['is_complex']
@@ -402,7 +402,7 @@ class VncApiServer(object):
 
             if is_simple and (not is_list_prop) and (not is_map_prop):
                 try:
-                   self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name), optional, restrictions)
+                   self._validate_simple_type(prop_name, prop_type,obj_dict.get(prop_name), optional, restrictions, is_update)
                    continue
                 except Exception as e:
                    err_msg = 'Error validating property. '+str(e)
@@ -415,7 +415,7 @@ class VncApiServer(object):
             prop_cls = cfgm_common.utils.str_to_class(prop_type, __name__)
             if isinstance(prop_value, dict):
                 try:
-                    self._validate_complex_type(prop_cls, prop_value)
+                    self._validate_complex_type(prop_cls, prop_value, is_update)
                 except Exception as e:
                     err_msg = 'Error validating property %s value %s. ' %(
                         prop_name, prop_value)
@@ -427,7 +427,7 @@ class VncApiServer(object):
                     try:
                         if is_simple:
                             self._validate_simple_type(prop_name, prop_type,
-                                                       elem, restrictions)
+                                                       elem, restrictions, is_update)
                         else:
                             if prop_cls.key_field is not None and prop_cls.key_field not in elem:
                                 raise ValueError("key '%s' is expected"%(prop_cls.key_field))
@@ -437,7 +437,7 @@ class VncApiServer(object):
                                     raise ValueError("Key '%s' is not unique"%(value))
                                 else:
                                     key_set.add(value)
-                            self._validate_complex_type(prop_cls, elem)
+                            self._validate_complex_type(prop_cls, elem, is_update)
                     except Exception as e:
                         err_msg = 'Error validating property %s elem %s. ' %(
                             prop_name, elem)
@@ -514,7 +514,7 @@ class VncApiServer(object):
             self.config_log(err_msg, level=SandeshLevel.SYS_NOTICE)
 
         # properties validator
-        ok, result = self._validate_props_in_request(r_class, obj_dict)
+        ok, result = self._validate_props_in_request(r_class, obj_dict, is_update=False)
         if not ok:
             result = 'Bad property in create: ' + result
             raise cfgm_common.exceptions.HttpError(400, result, "40001")
@@ -815,7 +815,7 @@ class VncApiServer(object):
             raise cfgm_common.exceptions.HttpError(404, str(e), "40002")
 
         # properties validator
-        ok, result = self._validate_props_in_request(r_class, obj_dict)
+        ok, result = self._validate_props_in_request(r_class, obj_dict, is_update=True)
         if not ok:
             result = 'Bad property in update: ' + result
             raise cfgm_common.exceptions.HttpError(400, result, "40001")
