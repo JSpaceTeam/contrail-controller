@@ -256,3 +256,7 @@ class GeneratedsSuper(object):
     @staticmethod
     def populate_decimal(name):
         return "+12.45"
+
+    @staticmethod
+    def populate_ip(*args, **kwargs):
+        return "1.2.2.3/32"
