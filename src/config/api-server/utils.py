@@ -74,6 +74,7 @@ def parse_args(args_str):
         'stale_lock_seconds': '5',  # lock but no resource past this => stale
         'disable_ifmap': False,
         'cloud_admin_role': _CLOUD_ADMIN_ROLE,
+        'disable_validation': False
     }
     # ssl options
     secopts = {
@@ -310,6 +311,7 @@ def parse_args(args_str):
         help="Service lookup yaml file", default='/opt/csp-service/lookup.yaml')
     parser.add_argument( "--cloud_admin_role",
         help="Role name of cloud administrator")
+    parser.add_argument("--disable_validation", action='store_true', help="Disable validation on requests")
     args_obj, remaining_argv = parser.parse_known_args(remaining_argv)
     args_obj.config_sections = config
     if type(args_obj.cassandra_server_list) is str:

@@ -237,6 +237,7 @@ class VncApiServer(object):
     def _validate_complex_type(cls, dict_cls, dict_body, is_update = False):
         if dict_body is None:
             return
+
         for key, value in dict_body.items():
             if key not in dict_cls.attr_fields:
                 raise ValueError('class %s does not have field %s' % (
@@ -391,6 +392,8 @@ class VncApiServer(object):
     # end _validate_simple_type
 
     def _validate_props_in_request(self, resource_class, obj_dict, is_update=False):
+        if self._args.disable_validation:
+            return True, ''
         for prop_name in resource_class.prop_fields:
             prop_field_types = resource_class.prop_field_types[prop_name]
             is_simple = not prop_field_types['is_complex']
