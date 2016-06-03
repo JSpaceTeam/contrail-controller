@@ -258,5 +258,17 @@ class GeneratedsSuper(object):
         return "+12.45"
 
     @staticmethod
-    def populate_ip(*args, **kwargs):
-        return "1.2.2.3/32"
+    def populate_ipv4_prefix(*args, **kwargs):
+        return "1.12.2.3/32"
+
+    @staticmethod
+    def populate_ipv6_prefix(*args, **kwargs):
+        return "1234::12/96"
+
+    @staticmethod
+    def populate_ipv6_address(*args, **kwargs):
+        return '1234:11::'
+
+    @staticmethod
+    def populate_ipv4_address(*args, **kwargs):
+        return '1.1.1.1'

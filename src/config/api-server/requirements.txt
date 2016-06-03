@@ -22,3 +22,4 @@ elasticsearch-dsl>=0.0.9
 cachetools==1.1.6
 pyang
 oslo.config
+memoized==0.2

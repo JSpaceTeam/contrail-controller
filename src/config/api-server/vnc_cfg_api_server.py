@@ -9,6 +9,7 @@ import re
 from decimal import Decimal, InvalidOperation
 
 from gevent import monkey
+from memoized import memoized
 monkey.patch_all()
 from gevent import hub
 # from neutron plugin to api server, the request URL could be large. fix the const
@@ -31,6 +32,8 @@ import copy
 from pprint import pformat
 from cStringIO import StringIO
 from lxml import etree
+from xml.sax.saxutils import quoteattr
+from xml.sax.saxutils import escape
 from oslo_config import cfg
 #import GreenletProfiler
 from gen.vnc_api_client_gen import SERVICE_PATH
@@ -273,6 +276,36 @@ class VncApiServer(object):
                     cls._validate_simple_type(key, attr_type, item, optional, restrictions, is_update)
     # end _validate_complex_type
 
+    @staticmethod
+    @memoized
+    def _pattern_validator(pattern):
+        # static method one arg memomization is fast with no additional function call other than dict lookup if key is available
+        doc = StringIO(
+            '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema">'\
+            '  <xsd:element name="a" type="x"/>'\
+            '    <xsd:simpleType name="x">'\
+            '      <xsd:restriction base="xsd:string">'\
+            '        <xsd:pattern value=%s/>'\
+            '      </xsd:restriction>'\
+            '     </xsd:simpleType>'\
+            '   </xsd:schema>' % quoteattr(pattern))
+        try:
+            sch = etree.XMLSchema(etree.parse(doc))
+            return sch
+        except etree.XMLSchemaParseError as v:
+            logging.warn("Failed to parse pattern validation %s  %v", pattern, v)
+            return None
+
+    @classmethod
+    def _validate_pattern(cls, pattern, value):
+        #idea from pyang
+        rex = cls._pattern_validator(pattern)
+        if not rex:
+            return False
+        doc = StringIO('<a>%s</a>' % escape(value))
+        return rex.validate(etree.parse(doc))
+
+
     @classmethod
     def _validate_simple_type(cls, type_name, xsd_type, value, optional, restrictions=None, is_update=False):
         error_msg="Value '%s' is not facet-valid with respect to %s '%s' for type '%s'"
@@ -374,8 +407,7 @@ class VncApiServer(object):
                             if not (long(v) >= len(value)):
                                 raise ValueError(error_msg%(value, k, v, type_name))
                         if 'pattern' == k:
-                            pattern = re.compile(v)
-                            match = pattern.match(value)
+                            match = cls._validate_pattern(v, value)
                             if not match:
                                 raise ValueError(error_msg%(value, k, v, type_name))
                         if 'union' == k:
