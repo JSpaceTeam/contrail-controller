@@ -66,7 +66,9 @@ from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from sandesh_common.vns.constants import USERAGENT_KEYSPACE_NAME
 from sandesh.traces.ttypes import DBRequestTrace, MessageBusNotifyTrace, \
     IfmapTrace
+from vnc_perms import VncPermissions
 import logging
+
 from cfgm_common import utils
 
 logger = logging.getLogger(__name__)
@@ -1022,7 +1024,8 @@ class VncServerKombuClient(VncKombuClient):
         q_name = 'vnc_config.%s-%s' % (socket.gethostname(), listen_port)
         super(VncServerKombuClient, self).__init__(
             rabbit_ip, rabbit_port, rabbit_user, rabbit_password, rabbit_vhost,
-            rabbit_ha_mode, q_name, self._dbe_subscribe_callback, self.config_log)
+            rabbit_ha_mode, q_name, self._dbe_subscribe_callback, self.config_log,
+            '%s.#' % self._db_client_mgr.get_service_module())
         self._rc_queue = Queue()
         self._search_rc_publish_greenlet = gevent.spawn(self._search_rc_publish)
 
@@ -1134,17 +1137,20 @@ class VncServerKombuClient(VncKombuClient):
 
     # end _dbe_subscribe_callback
 
-    def dbe_create_publish(self, obj_type, obj_ids, obj_dict):
+    def dbe_create_publish(self, obj_type, obj_ids, obj_dict, tenant_id=None):
         req_id = get_trace_id()
         oper_info = {'request-id': req_id,
                      'oper': 'CREATE',
                      'type': obj_type,
                      'namespace': self._service_module,
-                     'obj_dict': obj_dict}
+                     'obj_dict': obj_dict,
+                     'tenantid': tenant_id}
         oper_info.update(obj_ids)
         self.publish(oper_info)
 
     # end dbe_create_publish
+
+
 
     def _dbe_create_notification(self, obj_info):
         obj_dict = obj_info['obj_dict']
@@ -1170,8 +1176,8 @@ class VncServerKombuClient(VncKombuClient):
 
     # end _dbe_create_notification
 
-    def dbe_update_publish(self, obj_type, obj_ids):
-        oper_info = {'oper': 'UPDATE', 'type': obj_type, 'namespace': self._service_module}
+    def dbe_update_publish(self, obj_type, obj_ids, tenantid=None):
+        oper_info = {'oper': 'UPDATE', 'type': obj_type, 'namespace': self._service_module, 'tenantid': tenantid}
         oper_info.update(obj_ids)
         self.publish(oper_info)
 
@@ -1207,9 +1213,9 @@ class VncServerKombuClient(VncKombuClient):
 
     # end _dbe_update_notification
 
-    def dbe_delete_publish(self, obj_type, obj_ids, obj_dict):
+    def dbe_delete_publish(self, obj_type, obj_ids, obj_dict, tenantid=None):
         oper_info = {'oper': 'DELETE', 'type': obj_type, 'namespace': self._service_module,
-                     'obj_dict': obj_dict}
+                     'obj_dict': obj_dict, 'tenantid': tenantid}
         oper_info.update(obj_ids)
         self.publish(oper_info)
 
@@ -1976,7 +1982,8 @@ class VncDbClient(object):
             obj_type, obj_ids['uuid'], obj_dict)
 
         # publish to ifmap via msgbus
-        self._msgbus.dbe_create_publish(obj_type, obj_ids, obj_dict)
+        self._msgbus.dbe_create_publish(obj_type, obj_ids, obj_dict,
+                                        VncPermissions.get_tenant_id(obj_dict, obj_ids, self))
 
         return (ok, result)
 
@@ -2062,7 +2069,7 @@ class VncDbClient(object):
             obj_type, obj_ids['uuid'], new_obj_dict)
 
         # publish to ifmap via message bus (rabbitmq)
-        self._msgbus.dbe_update_publish(obj_type, obj_ids)
+        self._msgbus.dbe_update_publish(obj_type, obj_ids, VncPermissions.get_tenant_id(None, obj_ids, self))
 
         return (ok, cassandra_result)
 
@@ -2123,7 +2130,8 @@ class VncDbClient(object):
 
         self._search_db.search_delete(obj_type, obj_ids, obj_dict)
         # publish to ifmap via message bus (rabbitmq)
-        self._msgbus.dbe_delete_publish(obj_type, obj_ids, obj_dict)
+        self._msgbus.dbe_delete_publish(obj_type, obj_ids, obj_dict,
+                                        VncPermissions.get_tenant_id(obj_dict, obj_ids, self))
 
         # finally remove mapping in zk
         fq_name = cfgm_common.imid.get_fq_name_from_ifmap_id(obj_ids['imid'])
@@ -2258,7 +2266,8 @@ class VncDbClient(object):
 
         self._cassandra_db.prop_collection_update(obj_type, obj_uuid, updates)
         self._msgbus.dbe_update_publish(obj_type.replace('_', '-'),
-                                        {'uuid': obj_uuid})
+                                        {'uuid': obj_uuid},
+                                        VncPermissions.get_tenant_id(None, {'uuid': obj_uuid}, self))
         return True, ''
 
     # end prop_collection_update
@@ -2268,10 +2277,12 @@ class VncDbClient(object):
         self._cassandra_db.ref_update(obj_type, obj_uuid, ref_type, ref_uuid,
                                       ref_data, operation)
         self._msgbus.dbe_update_publish(obj_type.replace('_', '-'),
-                                        {'uuid': obj_uuid})
+                                        {'uuid': obj_uuid},
+                                        VncPermissions.get_tenant_id(None, {'uuid': obj_uuid}, self))
         if obj_type != ref_type:
             self._msgbus.dbe_update_publish(ref_type.replace('_', '-'),
-                                            {'uuid': ref_uuid})
+                                            {'uuid': ref_uuid},
+                                            VncPermissions.get_tenant_id(None, {'uuid': ref_uuid}, self))
 
     # ref_update
 
