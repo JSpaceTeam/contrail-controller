@@ -150,7 +150,7 @@ class ErrorCodes(object):
                 error_code = getattr(exceptionObj, ErrorCodes.ERROR_CODE)
                 error_json[ErrorCodes.ERROR_CODE] = error_code
 
-                error_code_details = self.__get_error_code_details_formatted(exceptionObj, error_code)
+                error_code_details = self.__get_error_code_details_formatted(exceptionObj, str(error_code))
 
                 #add defaults from the error definition
                 if error_code_details is not None:
@@ -158,7 +158,7 @@ class ErrorCodes(object):
                         if error_code_details.has_key(attribute):
                             error_json[attribute] = error_code_details.get(attribute)
                 else:
-                    logger.warning('No details found for error_code ['+ error_code + ']. Possibly invalid error_code in exception.')
+                    logger.warning('No details found for error_code ['+ str(error_code) + ']. Possibly invalid error_code in exception.')
                     #return empty dict in this case
                     return dict()
 
