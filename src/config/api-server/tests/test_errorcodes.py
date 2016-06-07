@@ -514,3 +514,20 @@ class ErrorCodesTest(unittest.TestCase):
         }
         self.assertDictEqual(expected_formatted_val_dict, self.get_dict_from_json(error_json_str))
 
+
+    def test_get_error_json_from_CommonException_with_None_error_code(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        commonException = CommonException(None)
+        error_json_str = error_codes.get_error_json(commonException)
+        empty = dict()
+        self.assertDictEqual(empty, self.get_dict_from_json(error_json_str), 'must return empty json')
+
+
+    def test_get_error_json_from_CommonException_with_GarbageObj_error_code(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        commonException = CommonException(None)
+        commonException.error_code = Exception()
+        error_json_str = error_codes.get_error_json(commonException)
+        empty = dict()
+        self.assertDictEqual(empty, self.get_dict_from_json(error_json_str), 'must return empty json')
+
