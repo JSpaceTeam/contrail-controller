@@ -166,6 +166,10 @@ def error_409(err):
     return err.body
 # end error_409
 
+@bottle.error(412)
+def error_412(err):
+    return err.body
+# end error_503
 
 @bottle.error(500)
 def error_500(err):
@@ -1699,7 +1703,7 @@ class VncApiServer(object):
                     self.handle_error_code(e)
 
                 # don't log details of cfgm_common.exceptions.HttpError i.e handled error cases
-                if isinstance(e, cfgm_common.exceptions.HttpError):
+                if isinstance(e, cfgm_common.exceptions.HttpError) or isinstance(e, VncError):
                     bottle.abort(e.status_code, e.content)
                 else:
                     string_buf = StringIO()

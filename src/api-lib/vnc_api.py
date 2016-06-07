@@ -1347,12 +1347,11 @@ def add_error_tags_dict_to_exception(exception, error_json_dict):
         return exception
 
     for attribute in ['status_code', 'error_tag', 'error_app_message', 'error_message', 'error_diag', 'error_code']:
-        if not hasattr(exception, attribute):
-            if error_json_dict.has_key(attribute):
-                val = error_json_dict[attribute]
-                if attribute == 'status_code':
-                    val = int(val)
-                setattr(exception, attribute, val)
+        if error_json_dict.has_key(attribute):
+            val = error_json_dict[attribute]
+            if attribute == 'status_code':
+                val = int(val)
+            setattr(exception, attribute, val)
 
     #replace contents with error_app_message if there is one
     if hasattr(exception, 'content') and hasattr(exception, 'error_app_message'):
