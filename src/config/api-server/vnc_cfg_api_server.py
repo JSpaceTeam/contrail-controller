@@ -462,7 +462,7 @@ class VncApiServer(object):
                     try:
                         if is_simple:
                             self._validate_simple_type(prop_name, prop_type,
-                                                       elem, restrictions, is_update)
+                                                       elem, optional, restrictions, is_update)
                         else:
                             if prop_cls.key_field is not None and prop_cls.key_field not in elem:
                                 raise ValueError("key '%s' is expected"%(prop_cls.key_field))
