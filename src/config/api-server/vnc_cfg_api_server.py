@@ -1668,7 +1668,7 @@ class VncApiServer(object):
 
     # Public Methods
     def route(self, uri, method, handler):
-	#print("ADD ROUTE {}".format(uri))
+        #print("ADD ROUTE {}".format(uri))
         def handler_trap_exception(*args, **kwargs):
             set_context(ApiContext(external_req=bottle.request))
             trace = None
@@ -1703,7 +1703,8 @@ class VncApiServer(object):
                     self.handle_error_code(e)
 
                 # don't log details of cfgm_common.exceptions.HttpError i.e handled error cases
-                if isinstance(e, cfgm_common.exceptions.HttpError) or isinstance(e, VncError):
+                if isinstance(e, cfgm_common.exceptions.HttpError) \
+                        or (isinstance(e, VncError) and hasattr(e, 'status_code') and hasattr(e, 'content')):
                     bottle.abort(e.status_code, e.content)
                 else:
                     string_buf = StringIO()
