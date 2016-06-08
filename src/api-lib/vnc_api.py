@@ -1355,7 +1355,8 @@ def add_error_tags_dict_to_exception(exception, error_json_dict):
 
     #replace contents with error_app_message if there is one
     if hasattr(exception, 'content') and hasattr(exception, 'error_app_message'):
-        setattr(exception, 'content', getattr(exception, 'error_app_message'))
+        if getattr(exception, 'error_app_message'):
+            setattr(exception, 'content', getattr(exception, 'error_app_message'))
 
     #recursively add the cause exception if there is one
     if error_json_dict.has_key('cause'):
