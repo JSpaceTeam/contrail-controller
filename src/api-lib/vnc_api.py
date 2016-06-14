@@ -146,7 +146,7 @@ class VncApi(object):
         for resource_type in gen.vnc_api_client_gen.all_resource_types:
             obj_type = resource_type.replace('-', '_')
             for oper_str in ('_create', '_read', '_update', '_delete',
-                         's_list', '_get_default_id'):
+                         's_list', '_get_default_id', '_search'):
                 method = getattr(self, '_object%s' %(oper_str))
                 bound_method = functools.partial(method, resource_type)
                 functools.update_wrapper(bound_method, method)
@@ -530,6 +530,16 @@ class VncApi(object):
 
         content = self._request_server(rest.OP_DELETE, uri)
     # end _object_delete
+
+    @check_homepage
+    def _object_search(self, res_type, search_body):
+        obj_cls = get_object_class(res_type)
+        uri = obj_cls.resource_uri_base[res_type] + '/_search'
+        content = self._request_server(rest.OP_POST,
+                                       uri, search_body)
+        return json.loads(content)
+
+    # end _object_search
 
     @check_homepage
     def _rpc_execute(self, res_type, obj=None):
