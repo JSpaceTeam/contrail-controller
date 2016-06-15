@@ -2,6 +2,7 @@ from gevent import monkey
 
 monkey.patch_all()
 import abc
+import locale
 
 """
 Overriding the base api_stats logger to do nothing
@@ -27,7 +28,7 @@ from gen.resource_xsd import *
 from cfgm_common.vnc_extensions import ExtensionManager, ApiHookManager
 from pysandesh.sandesh_base_logger import SandeshBaseLogger
 from csp_services_common import cfg
-from cfgm_common.errorcode_utils import ErrorCodeRepo
+from cfgm_common.errorcodes import ErrorCodes
 from gen.vnc_api_client_gen import *
 
 # Parse config for olso configs. Try to move all config parsing to oslo cfg
@@ -429,7 +430,7 @@ class VncApiServerBase(VncApiServer):
                 raise result
             if hasattr(result, 'status_code') and hasattr(result, 'content'):
                 raise HttpError(getattr(result, 'status_code'), getattr(result, 'content'), "40011")
-            raise
+            raise result
 
         return rsp_body
 
@@ -569,17 +570,60 @@ class VncApiServerBase(VncApiServer):
 
     # end _load_extensions
 
-
     def _load_error_codes(self):
         try:
-            error_code_repo = ErrorCodeRepo(cfg.CONF)
-            self.error_codes = error_code_repo.getErrorCodes()
+            common_errcodes_dir = cfg.CONF.ERROR_CODES.common_error_codes_dir
+            ms_errcodes_dir = cfg.CONF.ERROR_CODES.ms_error_codes_dir
+            if not common_errcodes_dir.endswith("/"):
+                common_errcodes_dir = common_errcodes_dir + "/"
+            if not ms_errcodes_dir.endswith("/"):
+                ms_errcodes_dir = ms_errcodes_dir + "/"
+
+            common_errcodes_file = cfg.CONF.ERROR_CODES.common_error_codes_file
+            ms_errcodes_file = cfg.CONF.ERROR_CODES.ms_error_codes_file
+            locale_name = self._get_locale_name()
+
+            common_errcodes_file_name = self._get_error_code_locale_file_name(common_errcodes_file, locale_name)
+            ms_errcodes_file_name = self._get_error_code_locale_file_name(ms_errcodes_file, locale_name)
+
+            err_codes = ErrorCodes(common_errcodes_dir + common_errcodes_file_name, ms_errcodes_dir + ms_errcodes_file_name)
+            self.error_codes = err_codes
+
         except Exception as e:
             err_msg = cfgm_common.utils.detailed_traceback()
             self.config_log("Exception in error_codes loading: %s" % (err_msg),
                             level=SandeshLevel.SYS_ERR)
 
+    #end _load_error_codes
 
+    def _get_locale_name(self):
+        use_localization = cfg.CONF.use_locales
+        locale_name = cfg.CONF.default_locale
+        if use_localization:
+            locale_tup = locale.getlocale(locale.LC_ALL)
+            if locale_tup is not None and locale_tup[0] is not None:
+                locale_name = locale_tup[0]
+            else:
+                locale_tup = locale.getdefaultlocale()
+                if locale_tup[0] is not None:
+                    locale_name = locale_tup[0]
+
+        return locale_name
+
+    #end _get_locale_name
+
+    def _get_error_code_locale_file_name(self, errcodes_file, locale_name):
+        errcodes_file_name = errcodes_file
+        try:
+            if errcodes_file is not None and locale_name is not None:
+                errcodes_file_name = errcodes_file.format(locale=locale_name)
+        except Exception as e:
+            err_msg = cfgm_common.utils.detailed_traceback()
+            self.config_log("Exception in creating error code filename with locale: %s" % (err_msg),
+                            level=SandeshLevel.SYS_ERR)
+
+        return errcodes_file_name
+    #end _get_error_code_locale_file_name
 
     def handle_error_code(self, exception):
         if exception is not None and self.error_codes:
