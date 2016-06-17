@@ -43,6 +43,7 @@ SCHEMA_OBJ_MODEL = "yin_schema"
 OPERATION = "operation"
 META_DATA = "meta-data"
 DEVICE = "device"
+OC_DEVICE = 'oc-device'
 DEVICE_ID = "device-id"
 XMLNS_TAG = "@xmlns"
 
@@ -59,12 +60,17 @@ _WITH_CHILDS = 'children'
 _VERTEX_DEPENDENCY = 'vertex_extn'
 _DRAFT_DEPENDENCY = 'draft_uuid'
 _DB_OBJ_DICT = 'db_obj_dict'
+_DB_OBJ_XML = 'db_obj_xml'
+_CUR_OBJ_XML = 'cur_obj_xml'
 _QUERY_PARAMS = 'query_params'
+_SUBTREE = 'subtree'
 
 # Register RabbitMQ Configuration
 route_key = 'dynamic_route'
 route_exchange = Exchange('dynamic_route_exchange', type='direct')
 route_queue = Queue('dynamic_route_queue', route_exchange, routing_key=route_key)
+
+_FQ_NAME, _UUID, _PARENT_UUID, _TOTAL = 'fq_name', 'uuid', 'parent_uuid', 'total'
 
 
 class VncApiDynamicServerBase(VncApiServerBase):
@@ -281,48 +287,6 @@ class VncApiDynamicServerBase(VncApiServerBase):
             if removable_property in obj:
                 obj.__delitem__(removable_property)
 
-    def read_db_obj(self, db_obj, yang_schema=None, parent_xpath=None):
-        try:
-            if db_obj is None or not isinstance(db_obj, dict):
-                return
-
-            new_obj = dict()
-            for k, v in db_obj.iteritems():
-                if isinstance(v, list) and str(k).endswith('s'):
-                    # Assume given is a list
-                    res_type = str(k)[:str(k).__len__() - 1].replace('_', '-')
-                    cls = self.get_resource_class(res_type)
-
-                    ary = list()
-                    if cls is not None:
-                        for elt in v:
-                            if 'uuid' in elt:
-                                child_db_obj = self.http_resource_read(str(elt['to'][-1]), elt['uuid'])
-                                if child_db_obj is not None and res_type in child_db_obj:
-                                    child_db_obj = child_db_obj[res_type]
-                                    self._remove_auto_gen_prop(child_db_obj)
-
-                                    inner_objs = self.read_db_obj(child_db_obj, yang_schema,
-                                                                  parent_xpath + '\\' + res_type)
-                                    child_db_obj.update(inner_objs)
-
-                                    ary.append(child_db_obj)
-                    xpath = parent_xpath + '\\' + res_type
-                    yang_elt = YangSchemaMgr.get_yang_schema_element(xpath, yang_schema)
-
-                    if yang_elt.get_yang_type() == YangSchemaMgr.YANG_CONTAINER:
-                        new_obj[res_type] = ary[0]
-                    else:
-                        new_obj[res_type] = ary  # pragma: no cover
-
-            for k, v in new_obj.iteritems():
-                db_obj.__delitem__((str(k) + 's').replace('-', '_'))
-
-            return new_obj
-        except Exception as e:  # pragma: no cover
-            logger.error('Exception while forming db_obj ', e)
-            return
-
     def pre_process_dynamic_service_dependency(func):
         def wrapper(server_obj, resource_type, *args, **kwargs):
             try:
@@ -348,18 +312,20 @@ class VncApiDynamicServerBase(VncApiServerBase):
                         if db_obj_dict is not None:
                             server_obj._remove_auto_gen_prop(db_obj_dict[resource_type])
                             xpath = yang_schema.get_xpath() + '\\' + resource_type
-                            new_child_objs = server_obj.read_db_obj(db_obj_dict[resource_type], yang_schema, xpath)
+                            new_child_objs = server_obj._read_child_resources(db_obj_dict[resource_type], yang_schema, xpath)
                             db_obj_dict[resource_type].update(new_child_objs)
 
                     server_obj._invoke_dynamic_extension("process_vertex_dependency", obj_type, obj_dict,
-                                                         db_obj_dict=db_obj_dict)
+                                                         db_obj_dict=db_obj_dict, generate_xml=True)
 
                 if _DRAFT_DEPENDENCY in qry_dict:
-                    server_obj._invoke_dynamic_extension("process_draft_dependency", obj_type, obj_dict)
+                    server_obj._invoke_dynamic_extension("process_draft_dependency", obj_type, obj_dict, generate_xml=True)
                 else:
                     return func(server_obj, resource_type, *args, **kwargs)
             except Exception as e:
-                logger.error('Exception while processing dynamic services dependency ', e)
+                logger.error('Exception while processing dynamic services dependency')
+                err_msg = cfgm_common.utils.detailed_traceback()
+                logger.error(err_msg)
                 raise
 
         return wrapper
@@ -407,12 +373,20 @@ class VncApiDynamicServerBase(VncApiServerBase):
         if self.get_resource_class(obj_type) is None:
             yang_schema = self.get_yang_schema(obj_type)
             self.set_dynamic_resource_classes(yang_schema)
+        else:
+            yang_schema = self.get_yang_schema(obj_type)
+        qry_dict = self.get_req_query_obj()
 
         res_obj_dict = self.http_resource_read(resource_type, id)
         # If children = true in query parameter, then read all the children
         if self.apply_to_children():
             # Recursively read all the children
-            res_obj_dict = self._read_child_resources(res_obj_dict, obj_type)
+            xpath = yang_schema.get_xpath() + '\\' + resource_type
+            new_child_objs = self._read_child_resources(res_obj_dict[resource_type], yang_schema, xpath)
+            res_obj_dict[resource_type].update(new_child_objs)
+        elif _SUBTREE in qry_dict:
+            res_obj_dict = self._read_subtree_resources(resource_type, res_obj_dict, qry_dict)
+
         self._invoke_dynamic_extension("post_dynamic_resource_read", obj_type, res_obj_dict)
         return res_obj_dict
 
@@ -488,11 +462,9 @@ class VncApiDynamicServerBase(VncApiServerBase):
         if self.get_resource_class(obj_type) is None:
             yang_schema = self.get_yang_schema(obj_type)
             self.set_dynamic_resource_classes(yang_schema)
-        # If children = true in query parameter, then delete all the children
-        if self.apply_to_children():
-            res_obj_dict = self.http_resource_read(resource_type, id)
-            # Recursively delete all the children first
-            self._delete_child_resources(res_obj_dict, obj_type)
+        res_obj_dict = self.http_resource_read(resource_type, id)
+        # Recursively delete all the children first
+        self._delete_child_resources(res_obj_dict, obj_type)
         # Now delete the parent
         self.http_resource_delete(resource_type, id)
         self._invoke_dynamic_extension("post_dynamic_resource_delete", obj_type, id)
@@ -605,12 +577,22 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
     # end _load_dynamic_extensions
 
-    def _invoke_dynamic_extension(self, method_name, obj_type, obj_dict, db_obj_dict=None):
+    def _invoke_dynamic_extension(self, method_name, obj_type, obj_dict, db_obj_dict=None, generate_xml=False):
         try:
             params = dict()
             params[_QUERY_PARAMS] = self.get_req_query_obj()
             params[_DB_OBJ_DICT] = db_obj_dict
-            self._extension_mgrs['dynamicResourceApi'].map_method(method_name, obj_dict, **params)
+
+            if generate_xml:
+                xml_data = self._json_to_xml(obj_dict)
+                params[_CUR_OBJ_XML] = xml_data
+
+                if db_obj_dict is not None:
+                    # Convert json to xml
+                    xml_data = self._json_to_xml(db_obj_dict)
+                    params[_DB_OBJ_XML] = xml_data
+
+            self._extension_mgrs['dynamicResourceApi'].map_method(method_name, obj_type, obj_dict, **params)
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
@@ -719,38 +701,51 @@ class VncApiDynamicServerBase(VncApiServerBase):
         element.uri = obj_dict["uri"]
 
     def _get_id_from_fq_name(self, resource_type, fq_name):
-        self.get_req_json_obj()['type'] = resource_type
-        self.get_req_json_obj()['fq_name'] = fq_name
+        req_json_obj = self.get_req_json_obj()
+        req_json_obj['type'] = resource_type
+        req_json_obj['fq_name'] = fq_name
+        uuid = None
         try:
-            uuid = self.fq_name_to_id_http_post()
-            return uuid['uuid']
+            uuid_obj = self.fq_name_to_id_http_post()
+            uuid = uuid_obj['uuid']
         except cfgm_common.exceptions.HttpError as he:
             logger.error("No uuid was found for given fq_name :" + ':'.join(fq_name))
-            return None
+        req_json_obj.__delitem__('type')
+        req_json_obj.__delitem__('fq_name')
+        return uuid
 
-    def _read_child_resources(self, res_dict, obj_type):
-        r_class = self.get_resource_class(obj_type)
-        child_fields = r_class.children_fields
-        for child_field in child_fields:
-            child_obj_type = child_field
-            if child_obj_type in res_dict[obj_type]:
-                res_child_objs = res_dict[obj_type][child_obj_type]
-                for res_child_obj in res_child_objs:
-                    child_uuid = res_child_obj["uuid"]
-                    # Removing the last "s" from the child object types
-                    child_obj_type = child_obj_type[:-1]
-                    child_obj_db = self.http_resource_read(child_obj_type, child_uuid)
-                    # Remove the below keys as they are not relevant as of now
-                    if child_obj_db is not None:
-                        child_obj_db_dict = child_obj_db[child_obj_type]
-                        child_obj_db_dict.__delitem__("uri")
-                        child_obj_db_dict.__delitem__("parent_uri")
-                        res_child_obj[child_obj_type] = child_obj_db_dict
-                        res_child_obj.__delitem__("uri")
-                        res_child_obj.__delitem__("to")
-                        res_child_obj.__delitem__("uuid")
-                        self._read_child_resources(child_obj_db, child_obj_type)
-        return res_dict
+    def _read_child_resources(self, db_obj, yang_schema=None, parent_xpath=None, remove_auto_gen_properties=True):
+        new_obj = dict()
+        for k, v in db_obj.iteritems():
+            if isinstance(v, list) and str(k).endswith('s'):
+                # Assume given is a list. Remove the last "s" from the child object types
+                res_type = str(k)[:str(k).__len__() - 1].replace('_', '-')
+                cls = self.get_resource_class(res_type)
+                ary = list()
+                if cls is not None:
+                    for elt in v:
+                        if _UUID in elt:
+                            child_db_obj = self.http_resource_read(res_type, elt[_UUID])
+                            if child_db_obj is not None and res_type in child_db_obj:
+                                child_db_obj = child_db_obj[res_type]
+                                if remove_auto_gen_properties:
+                                    self._remove_auto_gen_prop(child_db_obj)
+                                inner_objs = self._read_child_resources(child_db_obj, yang_schema, parent_xpath + '\\' + res_type,
+                                                                        remove_auto_gen_properties=remove_auto_gen_properties)
+                                child_db_obj.update(inner_objs)
+                                ary.append(child_db_obj)
+
+                xpath = parent_xpath + '\\' + res_type
+                yang_elt = YangSchemaMgr.get_yang_schema_element(xpath, yang_schema)
+                if yang_elt.get_yang_type() == YangSchemaMgr.YANG_CONTAINER:
+                    new_obj[res_type] = ary[0]
+                else:
+                    new_obj[res_type] = ary  # pragma: no cover
+
+        for k, v in new_obj.iteritems():
+            db_obj.__delitem__((str(k) + 's').replace('-', '_'))
+
+        return new_obj
 
     def _delete_child_resources(self, res_dict, obj_type):
         r_class = self.get_resource_class(obj_type)
@@ -759,14 +754,14 @@ class VncApiDynamicServerBase(VncApiServerBase):
             child_obj_type = child_field
             if child_obj_type in res_dict[obj_type]:
                 res_child_objs = res_dict[obj_type][child_obj_type]
+                # Removing the last "s" from the child object types
+                child_obj_type = child_obj_type[:-1]
                 for res_child_obj in res_child_objs:
                     child_uuid = res_child_obj["uuid"]
-                    # Removing the last "s" from the child object types
-                    child_obj_type = child_obj_type[:-1]
                     child_obj_db = self.http_resource_read(child_obj_type, child_uuid)
                     if child_obj_db is not None:
                         self._delete_child_resources(child_obj_db, child_obj_type)
-                        self.http_resource_delete(child_obj_type, res_child_obj["uuid"])
+                        self.http_resource_delete(child_obj_type, child_uuid)
 
     def _validate_props_in_request(self, resource_class, obj_dict):
         if resource_class.__name__.endswith("DynamicServer"):
@@ -783,7 +778,6 @@ class VncApiDynamicServerBase(VncApiServerBase):
             return super(VncApiDynamicServerBase, self)._validate_refs_in_request(r_class, obj_dict)
 
     def get_yang_schema(self, obj_type):
-        # TODO Get all the module names once augmentation is supported
         yin_schema = self._get_yang_schema(obj_type)
         schema_mgr = YangSchemaMgr()
         yang_schema = schema_mgr.get_yang_schema(str(yin_schema))
@@ -795,9 +789,8 @@ class VncApiDynamicServerBase(VncApiServerBase):
             json_data_dict = json_data
         else:
             json_data_dict = json.loads(str(json_data))
-        name_space_dict = self._get_name_space(json_data_dict)
-        xml_data = self._json_to_xml(json_data_dict)
-        xml_data = self._update_name_space(xml_data, name_space_dict)
+        temp_dict = copy.deepcopy(json_data_dict)
+        xml_data = self._json_to_xml(temp_dict)
         xml_tree = etree.parse(BytesIO(xml_data), etree.XMLParser())
         module_name = yang_schema.get_element_name()
         yang_element = YangElement(name=module_name)
@@ -859,37 +852,12 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
     def _get_yang_element_schema(self, yang_element, yang_schema):
         xpath = yang_element.get_xpath()
-        yang_element_schema = YangSchemaMgr.get_yang_schema_element(xpath, yang_schema)
+        yang_element_schema = YangSchemaMgr.get_yang_schema_by_element(yang_element, yang_schema)
         if yang_element_schema is not None:
             return yang_element_schema
         else:
             raise AttributeError(
                 'Schema element not found for ' + yang_element.get_element_name() + ' of ' + xpath)
-
-    def _get_name_space(self, json_data_dict, name_space_dict=None):
-        if name_space_dict is None:
-            name_space_dict = dict()
-        for key in json_data_dict.keys():
-            if type(json_data_dict[key]) is dict:
-                self._get_name_space(json_data_dict[key], name_space_dict)
-            else:
-                if key.startswith(XMLNS_TAG):
-                    name_space_dict[key] = json_data_dict[key]
-                    json_data_dict.__delitem__(key)
-        return name_space_dict
-
-    def _update_name_space(self, json_data_xml, name_space_dict):
-        # TODO Find a better way to implement this
-        ns_list = list()
-        for key in name_space_dict.keys():
-            value = name_space_dict[key]
-            key = key.replace("@", '')
-            ns_list.append(key + "=" + "\"" + value + "\"")
-        if len(ns_list) > 0:
-            ns = ' '.join(ns_list)
-            ns = ' ' + ns + ">"
-            json_data_xml = json_data_xml.replace(">", ns, 1)
-        return str(json_data_xml)
 
     def _get_tag_name(self, element):
         # This is to handle name space
@@ -899,33 +867,153 @@ class VncApiDynamicServerBase(VncApiServerBase):
             e_name = element.tag
         return e_name
 
-    def _json_to_xml(self, json_obj, line_padding=""):
-        result_list = list()
-        json_obj_type = type(json_obj)
+    def _json_to_xml(self, tree):
+        if not tree:
+            return ''
+        if not isinstance(tree, dict) and not isinstance(tree, list):
+            return ''
+        result = ''
+        for key in tree:
+            if key.startswith('@'):
+                continue
+            value = tree[key]
+            if isinstance(value, dict):
+                result = self.get_xml_tree(key, value, result)
+            elif isinstance(value, list):
+                for item in value:
+                    result = self.get_xml_tree(key, item, result)
+            else:
+                s = '<' + key + '>' + value + '</' + key + '>'
+                result += s
+        return result
 
-        if json_obj_type is list:
-            for sub_elem in json_obj:
-                result_list.append(self._json_to_xml(sub_elem, line_padding))
+    def get_xml_tree(self, element_name, tree, result):
+        if not tree:
+            return
+        if not isinstance(tree, dict) and not isinstance(tree, list):
+            s = '<' + element_name + '>' + tree + '</' + element_name + '>'
+            result += s
+            return
+        name_attr = ''
+        for key in tree:
+            if key.startswith('@'):
+                name_attr += ' ' + key[1:] + '="' + tree[key] + '"'
+        s = '<' + element_name + name_attr + '>'
+        result += s
+        for key in tree:
+            if key.startswith('@'):
+                continue
+            value = tree[key]
+            if isinstance(value, dict):
+                result = self.get_xml_tree(key, value, result)
+            elif isinstance(value, list):
+                for item in value:
+                    result = self.get_xml_tree(key, item, result)
+            else:
+                s = '<' + key + '>' + value + '</' + key + '>'
+                result += s
+        s = '</' + element_name + '>'
+        result += s
+        return result
 
-            return "".join(result_list)
+    def _get_subtree_objects(self, obj_type, parent_fq_name, parent_res_type):
+        # Get Parent Object
+        obj_type = obj_type.replace('-', '_')
+        all_objs = self.http_resource_list(obj_type)
 
-        if json_obj_type is dict:
-            for tag_name in json_obj:
-                sub_obj = json_obj[tag_name]
-                tag_name = tag_name.replace("@", "")
-                result_list.append("%s<%s>" % (line_padding, tag_name))
-                result_list.append(self._json_to_xml(sub_obj, "" + line_padding))
-                result_list.append("%s</%s>" % (line_padding, tag_name))
+        if all_objs is None or obj_type not in all_objs:
+            return None
 
-            return "".join(result_list)
+        parent_exists = True
+        try:
+            id = self._db_conn.fq_name_to_uuid(parent_res_type, parent_fq_name)
+            parent_obj = self.http_resource_read(parent_res_type, id)
+        except Exception as e:
+            raise cfgm_common.exceptions.HttpError(404, 'Name ' + str(parent_fq_name) + ' not found')
 
-        return "%s%s" % (line_padding, json_obj)
+        response = []
+        # total = 0
+        for obj in all_objs[obj_type]:
+            child_db_obj = self.http_resource_read(obj_type, obj[_UUID])
+
+            if parent_exists and parent_obj[parent_res_type][_UUID] == child_db_obj[obj_type][_PARENT_UUID]:
+                response.append(child_db_obj[obj_type])
+                # total += 1
+
+        all_objs[obj_type] = response
+        # all_objs['total'] = total
+
+        if _TOTAL in all_objs:
+            all_objs.__delitem__(_TOTAL)
+
+        return all_objs
+
+    def _get_resource_type_and_key(self, path):
+        # Assume input = endpointA or qinq-tags[name=one]
+        # If path contains [ then key and resource type both are present else only resource type
+        if '[' in path:
+            idx = path.index('[')
+            resource_type = path[0:idx]
+            key = path[idx:len(path) - 1]
+            key = key.split('=')[-1]
+            return resource_type, key
+        else:
+            return path, path
+
+    def _read_subtree_resources(self, resource_type, resource_obj_dict, qry_dict):
+        subtree_params = qry_dict[_SUBTREE]
+
+        res_type = parent_res_type = resource_type
+        parent_fq_name = resource_obj_dict[resource_type][_FQ_NAME]
+
+        def _is_last_elt(len, idx):
+            return idx == len - 1
+
+        for xpath in subtree_params:
+            xpath = str(xpath)
+
+            # xpath = [/path1, /path2]
+            xpath = xpath[1:len(xpath) - 1]
+
+            paths = xpath.split(',')
+            for path in paths:
+                fq_name = resource_obj_dict[resource_type][_FQ_NAME]
+
+                elts = path.split('/')
+                if elts is not None:
+                    l = len(elts)
+                    for i in range(l):
+                        elt = elts[i]
+
+                        if _is_last_elt(l, i):
+                            # Check if this is a get with id or get all
+                            # If path contains [ then key and resource type both are present
+                            # so only fetch the given resource matching the key else fetch all the resources of that type
+                            if '[' in elt:
+                                res_type, key = self._get_resource_type_and_key(elt)
+                                fq_name.append(key)
+                                parent_fq_name, parent_res_type = fq_name, res_type
+                            else:
+                                return self._get_subtree_objects(elt, parent_fq_name, parent_res_type)
+                        else:
+                            res_type, key = self._get_resource_type_and_key(elt)
+                            fq_name.append(key)
+                            parent_fq_name, parent_res_type = fq_name, res_type
+
+                res_type = res_type.replace('-', '_')
+                try:
+                    id = self._db_conn.fq_name_to_uuid(res_type, fq_name)
+                    child_db_obj = self.http_resource_read(res_type, id)
+                    return child_db_obj
+                except Exception as e:
+                    raise cfgm_common.exceptions.HttpError(
+                        404, 'Name ' + fq_name + ' not found', "40002")
 
 
 # end class VncApiServer
 
 class DynamicResourceApiGen(object):
-    def process_draft_dependency(self, resource_dict, **kwargs):
+    def process_draft_dependency(self, resource_type, resource_dict, **kwargs):
         """
         Method called to process dynamic resource draft
         """
@@ -933,7 +1021,7 @@ class DynamicResourceApiGen(object):
 
     # end process_draft_dependency
 
-    def process_vertex_dependency(self, resource_dict, **kwargs):
+    def process_vertex_dependency(self, resource_type, resource_dict, **kwargs):
         """
         Method called to process dynamic resource vertex depencies
         """
@@ -942,7 +1030,7 @@ class DynamicResourceApiGen(object):
     # end process_vertex_dependency
 
 
-    def pre_dynamic_resource_create(self, resource_dict, **kwargs):
+    def pre_dynamic_resource_create(self, resource_type, resource_dict, **kwargs):
         """
         Method called before dynamic resource is created
         """
@@ -950,14 +1038,14 @@ class DynamicResourceApiGen(object):
 
     # end pre_dynamic_resource_create
 
-    def post_dynamic_resource_create(self, resource_dict, **kwargs):
+    def post_dynamic_resource_create(self, resource_type, resource_dict, **kwargs):
         """
         Method called after dynamic resource is created
         """
         pass
         # end post_dynamic_resource_create
 
-    def pre_dynamic_resource_update(self, resource_dict, **kwargs):
+    def pre_dynamic_resource_update(self, resource_type, resource_dict, **kwargs):
         """
         Method called before dynamic resource is updated
         """
@@ -965,14 +1053,14 @@ class DynamicResourceApiGen(object):
 
     # end pre_dynamic_resource_update
 
-    def post_dynamic_resource_update(self, resource_dict, **kwargs):
+    def post_dynamic_resource_update(self, resource_type, resource_dict, **kwargs):
         """
         Method called after dynamic resource is updated
         """
         pass
         # end post_dynamic_resource_update
 
-    def pre_dynamic_resource_read(self, resource_dict, **kwargs):
+    def pre_dynamic_resource_read(self, resource_type, resource_dict, **kwargs):
         """
         Method called before dynamic resource is read
         """
@@ -980,14 +1068,14 @@ class DynamicResourceApiGen(object):
 
     # end pre_dynamic_resource_read
 
-    def post_dynamic_resource_read(self, resource_dict, **kwargs):
+    def post_dynamic_resource_read(self, resource_type, resource_dict, **kwargs):
         """
         Method called after dynamic resource is read
         """
         pass
         # end post_dynamic_resource_read
 
-    def pre_dynamic_resource_delete(self, resource_dict, **kwargs):
+    def pre_dynamic_resource_delete(self, resource_type, resource_dict, **kwargs):
         """
         Method called before dynamic resource is delete
         """
@@ -995,7 +1083,7 @@ class DynamicResourceApiGen(object):
 
     # end pre_dynamic_resource_delete
 
-    def post_dynamic_resource_delete(self, resource_dict, **kwargs):
+    def post_dynamic_resource_delete(self, resource_type, resource_dict, **kwargs):
         """
         Method called after dynamic resource is delete
         """
@@ -1628,6 +1716,9 @@ class YangElement(object):
 
     # end add_parent_element
 
+    def is_choice(self):
+        return self.get_yang_type() == YangSchemaMgr.YANG_CHOICE
+
     def is_leaf(self):
         return self.get_yang_type() == YangSchemaMgr.YANG_LEAF
 
@@ -1653,8 +1744,6 @@ class YangElement(object):
             else:
                 json_data["display_name"] = self.get_display_name()
             json_data["uuid"] = self.get_uuid()
-
-            self._set_json_data(json_data, include_leaf_ref)
 
             for child in self.get_child_elements():
                 if child.is_leaf() is True:
@@ -1706,6 +1795,9 @@ class YangElement(object):
         for child in self.get_child_elements():
             if child.is_leaf():
                 self.prop_fields.add(unicode(child.get_element_name()))
+            elif child.is_choice():
+                for sub_child in child.get_child_elements():
+                    self.prop_fields.add(unicode(sub_child.get_element_name()))
             elif child.is_vertex():
                 child_type = (unicode(child.get_element_name()))
                 child_type = child_type.replace('-', '_')
@@ -1756,7 +1848,7 @@ class YangElement(object):
 
 class YangSchemaMgr:
     ROUTE_KEYS = ["list", "container"]
-    RESOURCE_QUALIFIERS = ["module", "list", "container", "leaf", "leaf-list"]
+    # RESOURCE_QUALIFIERS = ["module", "list", "container", "leaf", "leaf-list"]
     REPLACE_TYPES = ["uses", "type"]
     NAME_ATTRIB = "name"
     VALUE_ATTRIB = "value"
@@ -1770,6 +1862,7 @@ class YangSchemaMgr:
     YANG_USES = "uses"
     YANG_LIST = "list"
     YANG_LEAF = "leaf"
+    YANG_CHOICE = "choice"
     YANG_CONTAINER = "container"
     YANG_KEY = "key"
     YANG_TYPEDEF = "typedef"
@@ -1789,7 +1882,9 @@ class YangSchemaMgr:
         # Remove the replaced elements
         self._remove_replaced_elements(schema_element, default_ns)
         yang_schema = self._get_yang_schema(schema_element, default_ns)
-        self.process_leaf_ref(yang_schema)
+        # TODO Need to support leaf ref for oc devices
+        if schema_element.attrib[self.NAME_ATTRIB] != OC_DEVICE:
+            self.process_leaf_ref(yang_schema)
         return yang_schema
 
     def get_ref_obj(self, yang_schema, level, ref_parent_element_name=None):
@@ -1895,41 +1990,56 @@ class YangSchemaMgr:
         yang_type = schema_element.tag.replace(default_ns, "")
         yang_element.set_yang_type(yang_type)
 
-        if yang_type in self.RESOURCE_QUALIFIERS:
-            if schema_element.get(self.NAME_ATTRIB) is not None:
-                element_name = schema_element.get(self.NAME_ATTRIB)
+        if schema_element.get(self.NAME_ATTRIB) is not None:
+            element_name = schema_element.get(self.NAME_ATTRIB)
 
-                if yang_type == self.YANG_LEAF:
-                    data_type_elt = schema_element.find(default_ns + self.YANG_TYPE)
-                    yang_element.set_data_type(data_type_elt.get(self.NAME_ATTRIB))
+            if yang_type == self.YANG_LEAF:
+                data_type_elt = schema_element.find(default_ns + self.YANG_TYPE)
+                yang_element.set_data_type(data_type_elt.get(self.NAME_ATTRIB))
 
-                if yang_element.is_leaf_ref():
-                    path = schema_element.find(default_ns + self.YANG_TYPE).find(default_ns + self.PATH).get(
-                        self.VALUE_ATTRIB)
-                    yang_element.set_leaf_ref_path(path)
+            if yang_element.is_leaf_ref():
+                path = schema_element.find(default_ns + self.YANG_TYPE).find(default_ns + self.PATH).get(
+                    self.VALUE_ATTRIB)
+                yang_element.set_leaf_ref_path(path)
 
-                yang_element.set_element_name(element_name)
-                yang_element.set_xpath(element_name)
-                yang_element.set_key_names(element_name)
-                # print "Yang Type :", yang_type
-                # print "Element Name :", yang_element.get_element_name()
-                if parent_element is not None:
-                    yang_element.add_parent_element(parent_element)
-                    parent_element.add_child_element(yang_element)
-                    xpath = parent_element.get_xpath() + "\\" + yang_element.get_element_name()
-                    yang_element.set_xpath(xpath)
+            yang_element.set_element_name(element_name)
+            yang_element.set_xpath(element_name)
+            yang_element.set_key_names(element_name)
 
-                # List has keys
-                if yang_type == self.YANG_LIST:
-                    key = default_ns + self.YANG_KEY
-                    key_element = schema_element.find(key)
-                    key_names = key_element.get(self.VALUE_ATTRIB)
-                    yang_element.set_key_names(key_names)
+            if parent_element is not None:
+                yang_element.add_parent_element(parent_element)
+                parent_element.add_child_element(yang_element)
+                xpath = parent_element.get_xpath() + "\\" + yang_element.get_element_name()
+                yang_element.set_xpath(xpath)
 
-                for child_schema in schema_element.getchildren():
-                    self._get_yang_schema(child_schema, default_ns, yang_element)
+            # List has keys
+            if yang_type == self.YANG_LIST:
+                key = default_ns + self.YANG_KEY
+                key_element = schema_element.find(key)
+                key_names = key_element.get(self.VALUE_ATTRIB)
+                yang_element.set_key_names(key_names)
+
+            for child_schema in schema_element.getchildren():
+                self._get_yang_schema(child_schema, default_ns, yang_element)
 
         return yang_element
+
+    @staticmethod
+    def get_yang_schema_by_element(yang_element, yang_schema):
+        xpath = yang_element.get_xpath()
+        yang_dict = YangSchemaMgr.get_yang_schema_elements([xpath], yang_schema)
+        if xpath in yang_dict:
+            return yang_dict[xpath]
+        else:
+            # Can be in choice
+            for parent in yang_element.get_parent_elements():
+                xpath = parent.get_xpath()
+                yang_dict = YangSchemaMgr.get_yang_schema_elements([xpath], yang_schema)
+                if xpath in yang_dict:
+                    choice_map = YangSchemaMgr._get_all_choice_elements(yang_dict[xpath])
+                    if yang_element.get_element_name() in choice_map:
+                        return choice_map[yang_element.get_element_name()]
+        return None
 
     @staticmethod
     def get_yang_schema_element(xpath, yang_schema):
@@ -1943,13 +2053,27 @@ class YangSchemaMgr:
     def get_yang_schema_elements(xpaths, yang_schema, yang_dict=None):
         if yang_dict is None:
             yang_dict = dict()
-        # Schema xpath starts  with the module name but the data xpath don't have module name
         if yang_schema.get_xpath() in xpaths:
             clone_obj = copy.copy(yang_schema)
             yang_dict[yang_schema.get_xpath()] = clone_obj
         for child_schema in yang_schema.get_child_elements():
             YangSchemaMgr.get_yang_schema_elements(xpaths, child_schema, yang_dict)
         return yang_dict
+
+    @staticmethod
+    def _get_all_choice_elements(yang_element):
+        choices = set()
+        for child in yang_element.get_child_elements():
+            if child.get_yang_type() == 'choice':
+                for sub_child in child.get_child_elements():
+                    if sub_child.get_yang_type() == 'case':
+                        choices = choices.union(sub_child.get_child_elements())
+                    else:
+                        choices.add(sub_child)
+        choice_map = {}
+        for choice in choices:
+            choice_map[choice.get_element_name()] = choice
+        return choice_map
 
 
 class DynamicRouteNotificationHandler(object):
