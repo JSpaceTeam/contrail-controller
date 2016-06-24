@@ -64,6 +64,24 @@ class ErrorCodes(object):
         return None
 
 
+    def get_error_code_data(self, error_code, *args, **kwargs):
+        '''
+        This method returns a dictionary object with the error code details nested one level inside a dict object,
+        the key value being "error_data"
+        :param error_code: The error_code whose details should be returned
+        :return: dict with one member: key value being "error_data" and the value being the error_code details.
+        :rtype: dict
+        '''
+        error_code_details = self.get_error_code_details(error_code, *args, **kwargs)
+        if error_code_details is None:
+            return None
+        error_code_data = dict()
+        error_code_data['error_data'] = error_code_details
+
+        return error_code_data
+
+
+
     def __format_error_message(self, error_details_dict, args, kwargs):
         if error_details_dict is None:
             return
