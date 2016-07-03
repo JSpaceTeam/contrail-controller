@@ -361,7 +361,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             except Exception as e:
                 err_msg = 'Exception while processing dynamic services dependency ' + cfgm_common.utils.detailed_traceback()
                 logger.error(err_msg)
-                raise
+                raise cfgm_common.exceptions.HttpError(500, err_msg)
 
         return wrapper
 
@@ -384,7 +384,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             # Create the resources recursively
             self._dynamic_resource_create(yang_element)
             # Update Leaf Ref - Objects
-            self.update_leaf_ref(yang_element)
+            self.update_leaf_ref(yang_element, _CREATE_OPERATION)
             res_obj_dict['uuid'] = yang_element.uuid
             res_obj_dict["uri"] = yang_element.uri
             res_obj_dict["fq_name"] = yang_element.fq_name
@@ -429,7 +429,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             # Update all the resources recursively
             self._dynamic_resource_update(yang_element)
             # Update Leaf Ref - Objects
-            self.update_leaf_ref(yang_element)
+            self.update_leaf_ref(yang_element, _UPDATE_OPERATION)
             res_obj_dict['uuid'] = yang_element.uuid
             res_obj_dict["uri"] = yang_element.uri
             res_obj_dict["fq_name"] = yang_element.fq_name
@@ -475,8 +475,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             res_obj_dict["uri"] = yang_element.uri
             res_obj_dict["fq_name"] = yang_element.fq_name
             # Unlock the transaction after updating/patching
-            # self._unlock_transaction(_PATCH_OPERATION, path_nodes)
-            self._rollback_transaction(_PATCH_OPERATION, path_nodes)
+            self._unlock_transaction(_PATCH_OPERATION, path_nodes)
             logger.debug('**** End **** http_dynamic_resource_patch method ' + resource_type)
         except ZNodeLockError as ex:
             self.config_log(ex.get_message(), level=SandeshLevel.SYS_ERR)
@@ -732,13 +731,13 @@ class VncApiDynamicServerBase(VncApiServerBase):
             self._dynamic_resource_create(yang_element, parent)
 
             # Update leaf ref if any
-            self.update_leaf_ref(yang_element)
+            self.update_leaf_ref(yang_element, operation)
 
         if operation == _UPDATE_OPERATION:
             self._resource_update(yang_element, parent)
 
             # Update leaf ref if any
-            self.update_leaf_ref(yang_element, deep_fetch=False)
+            self.update_leaf_ref(yang_element, operation, deep_fetch=False)
 
             for child in yang_element.get_child_elements():
                 self._dynamic_resource_patch(child, child.operation_type, yang_element)
@@ -756,24 +755,24 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
     # End _dynamic_resource_patch
 
-    def update_leaf_ref(self, yang_element, deep_fetch=True):
+    def update_leaf_ref(self, yang_element, operation, deep_fetch=True):
         try:
             if yang_element.is_leaf_ref():
-                self._update_leaf_ref(yang_element)
+                self._update_leaf_ref(yang_element, operation)
 
             if deep_fetch:
                 for child in yang_element.get_child_elements():
-                    self.update_leaf_ref(child)
+                    self.update_leaf_ref(child, operation)
             else:
                 # PATCH USE CASE - DO FOR ONE LEVEL LOOKUP ONLY - Update happens for every level
                 for child in yang_element.get_child_elements():
                     if child.is_leaf_ref():
-                        self._update_leaf_ref(child)
+                        self._update_leaf_ref(child, operation)
 
         except Exception as e:
             logger.error('Exception while updating leaf ref ', e)
 
-    def _update_leaf_ref(self, yang_element):
+    def _update_leaf_ref(self, yang_element, operation):
         for elt in yang_element.get_parent_elements():
             ref_obj = elt
             break
@@ -782,7 +781,23 @@ class VncApiDynamicServerBase(VncApiServerBase):
             parent = elt
             break
 
-        self._resource_update(ref_obj, parent, True)
+        self._update_resource_with_leaf_ref(ref_obj, parent)
+
+    def _update_resource_with_leaf_ref(self, element, parent, operation):
+        resource_type = element.element_name
+        fqn_name = element.get_fq_name_list()
+        uuid = self._get_id_from_fq_name(resource_type, fqn_name)
+        element.set_uuid(uuid)
+        if parent is not None:
+            element.parent_uuid = parent.get_uuid()
+        json_data = element.get_json(include_leaf_ref=True)
+        self.get_req_json_obj()[resource_type] = json_data
+        # Setting the transaction state data in Zookeeper.
+        self._set_transaction_node(operation, resource_type, {resource_type: uuid})
+        content = self.http_resource_update(resource_type, uuid)
+        obj_dict = content[resource_type]
+        element.uuid = obj_dict['uuid']
+        element.uri = obj_dict["uri"]
 
     def _resource_create(self, element, parent):
         if parent:
@@ -800,14 +815,14 @@ class VncApiDynamicServerBase(VncApiServerBase):
         # Setting the transaction state data in Zookeeper
         self._set_transaction_node(_CREATE_OPERATION, resource_type, {resource_type: element})
 
-    def _resource_update(self, element, parent, include_ref_edge=False):
+    def _resource_update(self, element, parent):
         resource_type = element.element_name
         fqn_name = element.get_fq_name_list()
         uuid = self._get_id_from_fq_name(resource_type, fqn_name)
         element.set_uuid(uuid)
         if parent is not None:
             element.parent_uuid = parent.get_uuid()
-        json_data = element.get_json(include_leaf_ref=include_ref_edge)
+        json_data = element.get_json()
         self.get_req_json_obj()[resource_type] = json_data
         # Setting the transaction state data in Zookeeper
         self._set_transaction_node(_UPDATE_OPERATION, resource_type, {resource_type: uuid})
