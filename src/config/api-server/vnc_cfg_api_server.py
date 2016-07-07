@@ -2746,7 +2746,6 @@ class VncApiServer(object):
 
         rule_list.extend(rbac_rules)
         updated_rbac_rule = self._merge_rbac_rule(rule_list)
-
         obj_dict['api_access_list_entries'] = {'rbac_rule' : updated_rbac_rule}
         self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
     # end _create_default_rbac_rule
