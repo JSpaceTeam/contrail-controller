@@ -228,12 +228,12 @@ class VncApiServerBase(VncApiServer):
         self._rbac = vnc_rbac.VncRbac(self, self._db_conn)
         self._permissions = vnc_perms.VncPermissions(self, self._args)
         if self._args.multi_tenancy_with_rbac:
-            self._create_default_rbac_rule()
             policy = None
             try:
                 policy = Policy("policy/policy.json")
             except Exception:
                 logger.warn("Cannot load policy file, apply default policy")
+                self._create_default_rbac_rule()
             if policy:
                 self._update_default_rbac_rule(policy.get_default_rbac_rule())
                 self._update_multi_tenancy_rule(policy.get_multi_tenancy_rule())
@@ -295,10 +295,19 @@ class VncApiServerBase(VncApiServer):
 
     def _update_default_rbac_rule(self, rbac_rule):
         obj_type = 'api-access-list'
+        rule_list = []
         fq_name = ['default-domain', 'default-api-access-list']
         id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
         (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid': id})
-        obj_dict['api_access_list_entries'] = {'rbac_rule': rbac_rule}
+        if 'api_access_list_entries' in obj_dict:
+           api_access_list_entries = obj_dict['api_access_list_entries']
+           if 'rbac_rule' in api_access_list_entries:
+              if (api_access_list_entries['rbac_rule'])[0]:
+                 rule_list.extend(api_access_list_entries['rbac_rule'])
+
+        rule_list.extend(rbac_rule)
+        updated_rbac_rule = self._merge_rbac_rule(rule_list)
+        obj_dict['api_access_list_entries'] = {'rbac_rule': updated_rbac_rule}
         self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
         logger.info("Updated default rbac rule")
 
@@ -312,6 +321,35 @@ class VncApiServerBase(VncApiServer):
         logger.info("Updated multi-tenancy rule")
 
     # end _update_multi_tenancy_rule
+
+    def _merge_rbac_rule(self, rbac_rule):
+        rule_dict = {}
+        for rule in rbac_rule[:]:
+            o = rule['rule_object']
+            f = rule['rule_field']
+            p = rule['rule_perms']
+            o_f = "%s.%s" % (o,f) if f else o
+            if o_f not in rule_dict:
+                rule_dict[o_f] = rule
+            else:
+                role_to_crud_dict = {rp['role_name']:rp['role_crud'] for rp in rule_dict[o_f]['rule_perms']}
+                for role in rule['rule_perms']:
+                    role_name = role['role_name']
+                    role_crud = role['role_crud']
+                    if role_name in role_to_crud_dict:
+                        x = set(list(role_to_crud_dict[role_name])) | set(list(role_crud))
+                        role_to_crud_dict[role_name] = ''.join(x)
+                    else:
+                        role_to_crud_dict[role_name] = role_crud
+                # update perms in existing rule
+                rule_dict[o_f]['rule_perms'] = [{'role_crud': rc, 'role_name':rn} for rn,rc in role_to_crud_dict.items()]
+                # remove duplicate rule from list
+                rbac_rule.remove(rule)
+
+        return rbac_rule
+
+    # end _merge_rbac_rule
+
 
     # Override trace since we are using logger middleware
     def _generate_rest_api_request_trace(self):

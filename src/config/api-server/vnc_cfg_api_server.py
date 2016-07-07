@@ -2707,9 +2707,10 @@ class VncApiServer(object):
             self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
     # end _db_init_entries
 
-    # generate default rbac group rule
+    # generate default rbac group rule, merge it with the already existing ones
     def _create_default_rbac_rule(self):
         obj_type = 'api-access-list'
+        rule_list = []
         fq_name = ['default-domain', 'default-api-access-list']
         try:
             id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
@@ -2718,6 +2719,11 @@ class VncApiServer(object):
             id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
 
         (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid': id})
+        if 'api_access_list_entries' in obj_dict:
+           api_access_list_entries = obj_dict['api_access_list_entries']
+           if 'rbac_rule' in api_access_list_entries:
+              if (api_access_list_entries['rbac_rule'])[0]:
+                 rule_list.extend(api_access_list_entries['rbac_rule'])
 
         # allow full access to cloud admin
         rbac_rules = [
@@ -2738,7 +2744,10 @@ class VncApiServer(object):
             },
         ]
 
-        obj_dict['api_access_list_entries'] = {'rbac_rule' : rbac_rules}
+        rule_list.extend(rbac_rules)
+        updated_rbac_rule = self._merge_rbac_rule(rule_list)
+
+        obj_dict['api_access_list_entries'] = {'rbac_rule' : updated_rbac_rule}
         self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
     # end _create_default_rbac_rule
 
