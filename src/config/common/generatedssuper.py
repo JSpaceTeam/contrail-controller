@@ -272,3 +272,7 @@ class GeneratedsSuper(object):
     @staticmethod
     def populate_ipv4_address(*args, **kwargs):
         return '1.1.1.1'
+    
+    @staticmethod
+    def populate_uuid(*args, **kwargs):
+        return '6050fd1e-4916-4d75-b922-270cdc95f8b8'
