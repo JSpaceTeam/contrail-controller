@@ -1184,14 +1184,14 @@ class VncServerKombuClient(VncKombuClient):
     # end dbe_update_publish
 
     def _dbe_update_notification(self, obj_info):
-        try:
-            (ok, result) = self._db_client_mgr.dbe_read(obj_info['type'], obj_info)
-        except NoIdError as e:
-            # No error, we will hear a delete shortly
-            return
-
-        new_obj_dict = result
+        new_obj_dict = None
         if not self._ifmap_disable:
+            try:
+                (ok, result) = self._db_client_mgr.dbe_read(obj_info['type'], obj_info)
+            except NoIdError as e:
+                # No error, we will hear a delete shortly
+                return
+            new_obj_dict = result
             self.dbe_uve_trace("UPDATE", obj_info['type'], obj_info['uuid'], new_obj_dict)
 
         try:
