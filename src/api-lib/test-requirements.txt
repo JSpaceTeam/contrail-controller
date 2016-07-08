@@ -1,7 +1,7 @@
 python-subunit
 testrepository
 flexmock
-coverage
+coverage==4.1
 pyaml
 httpretty==0.8.10
 
