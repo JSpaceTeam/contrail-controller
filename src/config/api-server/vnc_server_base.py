@@ -228,12 +228,12 @@ class VncApiServerBase(VncApiServer):
         self._rbac = vnc_rbac.VncRbac(self, self._db_conn)
         self._permissions = vnc_perms.VncPermissions(self, self._args)
         if self._args.multi_tenancy_with_rbac:
-            self._create_default_rbac_rule()
             policy = None
             try:
                 policy = Policy("policy/policy.json")
             except Exception:
                 logger.warn("Cannot load policy file, apply default policy")
+                self._create_default_rbac_rule()
             if policy:
                 self._update_default_rbac_rule(policy.get_default_rbac_rule())
                 self._update_multi_tenancy_rule(policy.get_multi_tenancy_rule())
@@ -295,10 +295,19 @@ class VncApiServerBase(VncApiServer):
 
     def _update_default_rbac_rule(self, rbac_rule):
         obj_type = 'api-access-list'
+        rule_list = []
         fq_name = ['default-domain', 'default-api-access-list']
         id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
         (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid': id})
-        obj_dict['api_access_list_entries'] = {'rbac_rule': rbac_rule}
+        if 'api_access_list_entries' in obj_dict:
+           api_access_list_entries = obj_dict['api_access_list_entries']
+           if 'rbac_rule' in api_access_list_entries:
+              if (api_access_list_entries['rbac_rule'])[0]:
+                 rule_list.extend(api_access_list_entries['rbac_rule'])
+
+        rule_list.extend(rbac_rule)
+        updated_rbac_rule = self._merge_rbac_rule(rule_list)
+        obj_dict['api_access_list_entries'] = {'rbac_rule': updated_rbac_rule}
         self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
         logger.info("Updated default rbac rule")
 
