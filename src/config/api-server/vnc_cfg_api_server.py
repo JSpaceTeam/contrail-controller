@@ -2750,6 +2750,33 @@ class VncApiServer(object):
         self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
     # end _create_default_rbac_rule
 
+    def _merge_rbac_rule(self, rbac_rule):
+        rule_dict = {}
+        for rule in rbac_rule[:]:
+            o = rule['rule_object']
+            f = rule['rule_field']
+            p = rule['rule_perms']
+            o_f = "%s.%s" % (o,f) if f else o
+            if o_f not in rule_dict:
+                rule_dict[o_f] = rule
+            else:
+                role_to_crud_dict = {rp['role_name']:rp['role_crud'] for rp in rule_dict[o_f]['rule_perms']}
+                for role in rule['rule_perms']:
+                    role_name = role['role_name']
+                    role_crud = role['role_crud']
+                    if role_name in role_to_crud_dict:
+                        x = set(list(role_to_crud_dict[role_name])) | set(list(role_crud))
+                        role_to_crud_dict[role_name] = ''.join(x)
+                    else:
+                        role_to_crud_dict[role_name] = role_crud
+                # update perms in existing rule
+                rule_dict[o_f]['rule_perms'] = [{'role_crud': rc, 'role_name':rn} for rn,rc in role_to_crud_dict.items()]
+                # remove duplicate rule from list
+                rbac_rule.remove(rule)
+
+        return rbac_rule
+    # end _merge_rbac_rule
+    
     def _resync_domains_projects(self, ext):
         if hasattr(ext.obj, 'resync_domains_projects'):
             ext.obj.resync_domains_projects()
