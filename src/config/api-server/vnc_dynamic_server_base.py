@@ -82,6 +82,8 @@ _FQ_NAME, _UUID, _PARENT_UUID, _TOTAL = 'fq_name', 'uuid', 'parent_uuid', 'total
 # For caching yang schemas elements
 
 YANG_SCHEMAS_OBJS = {}
+_XML_PREFIX = ':'
+_CSP_PREFIX = '$'
 
 
 class VncApiDynamicServerBase(VncApiServerBase):
@@ -331,31 +333,33 @@ class VncApiDynamicServerBase(VncApiServerBase):
                 obj_type = resource_type
                 obj_dict = server_obj.get_req_json_obj()
                 qry_dict = server_obj.get_req_query_obj()
+                uuid = kwargs['id'] if 'id' in kwargs else None
+
+                if _VERTEX_DEPENDENCY not in qry_dict and _DRAFT_DEPENDENCY not in qry_dict:
+                    return func(server_obj, resource_type, *args, **kwargs)
+
+                db_obj_dict = None
+
+                if uuid is not None:
+                    db_obj_dict = server_obj.http_resource_read(resource_type, uuid)
+
+                    if db_obj_dict is not None:
+                        r_class = server_obj.get_resource_class(resource_type)
+                        server_obj._remove_auto_gen_prop(db_obj_dict[resource_type], r_class)
+                        module_name = obj_type
+                        xpath = module_name + '\\' + resource_type
+                        new_child_objs = server_obj._read_child_resources(db_obj_dict[resource_type], xpath)
+                        # TODO Need to remove this later
+                        new_child_objs = json.loads(json.dumps(new_child_objs).replace(_CSP_PREFIX, _XML_PREFIX))
+                        db_obj_dict[resource_type].update(new_child_objs)
 
                 if _VERTEX_DEPENDENCY in qry_dict:
-
-                    yang_element = server_obj.get_yang_element(obj_type, obj_dict)
-
-                    fq_name = yang_element.get_fq_name_list()
-                    uuid = server_obj._get_id_from_fq_name(resource_type, fq_name)
-
-                    db_obj_dict = None
-
-                    if uuid is not None:
-                        db_obj_dict = server_obj.http_resource_read(resource_type, uuid)
-
-                        if db_obj_dict is not None:
-                            server_obj._remove_auto_gen_prop(db_obj_dict[resource_type])
-                            module_name = obj_type
-                            xpath = module_name + '\\' + resource_type
-                            new_child_objs = server_obj._read_child_resources(db_obj_dict[resource_type], xpath)
-                            db_obj_dict[resource_type].update(new_child_objs)
-
                     server_obj._invoke_dynamic_extension("process_vertex_dependency", obj_type, obj_dict,
                                                          db_obj_dict=db_obj_dict, generate_xml=True)
 
                 if _DRAFT_DEPENDENCY in qry_dict:
-                    server_obj._invoke_dynamic_extension("process_draft_dependency", obj_type, obj_dict, generate_xml=True)
+                    server_obj._invoke_dynamic_extension("process_draft_dependency", obj_type, obj_dict, db_obj_dict=db_obj_dict,
+                                                         generate_xml=True)
                 else:
                     return func(server_obj, resource_type, *args, **kwargs)
             except Exception as e:
@@ -560,6 +564,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
             self._invoke_dynamic_extension("post_dynamic_resource_read", obj_type, res_obj_dict)
             logger.debug('**** End **** http_dynamic_resource_read method ' + resource_type)
+            res_obj_dict = json.loads(json.dumps(res_obj_dict).replace(_CSP_PREFIX, _XML_PREFIX))
             return res_obj_dict
         except cfgm_common.exceptions.HttpError as he:
             raise he
@@ -749,7 +754,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             yang_element.set_uuid(uuid)
             res_obj_dict = self.http_resource_read(resource_type, uuid)
             # Recursively delete all the children first
-            self._delete_child_resources(res_obj_dict, resource_type)
+            self._delete_child_resources(res_obj_dict, resource_type, False)
             # Now delete the parent
             self.http_resource_delete(resource_type, uuid)
 
@@ -995,6 +1000,8 @@ class VncApiDynamicServerBase(VncApiServerBase):
             e_name = element.tag.split("}", 1)[1]
         else:
             e_name = element.tag
+        if element.prefix:
+            e_name = element.prefix + _CSP_PREFIX + e_name
         return e_name
 
     def _json_to_xml(self, tree):
@@ -1056,6 +1063,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             xpath = xpath[1:len(xpath) - 1]
             paths = xpath.split(',')
             for path in paths:
+                path = path.replace(_XML_PREFIX, _CSP_PREFIX)
                 res_type_list = [resource_type]
                 fqn_name_list = [parent_fq_name]
                 path_elem_list = path.split('/')
@@ -1482,7 +1490,10 @@ class YangElement(object):
             parent.get_fq_name_list(fq_name_list)
         if self.get_yang_type() == YangSchemaMgr.YANG_LIST:
             for child in self.get_child_elements():
-                if child.get_element_name() == self.get_key_names():
+                element_name = child.get_element_name()
+                if _CSP_PREFIX in element_name:
+                    element_name = element_name.split(_CSP_PREFIX)[1]
+                if element_name == self.get_key_names():
                     fq_name_list.append(child.get_element_value())
         else:
             fq_name_list.append(self.get_element_name())
@@ -1600,7 +1611,8 @@ class YangElement(object):
     # end set_element_name
 
     def get_element_name(self):
-        return self.element_name
+        return self.element_name.replace(_XML_PREFIX, _CSP_PREFIX)
+        # return self.element_name
 
     # end get_element_name
 
@@ -2299,8 +2311,11 @@ class YangSchemaMgr:
             if yang_type == self.YANG_LIST:
                 key = default_ns + self.YANG_KEY
                 key_element = schema_element.find(key)
-                key_names = key_element.get(self.VALUE_ATTRIB)
-                yang_element.set_key_names(key_names)
+                if key_element is None:
+                    logger.error('This list element does not have key ****: ' + element_name + ' **** xpath ' + xpath)
+                else:
+                    key_names = key_element.get(self.VALUE_ATTRIB)
+                    yang_element.set_key_names(key_names)
 
             # For caching
             YANG_SCHEMAS_OBJS[yang_element.get_xpath()] = yang_element._clone()
