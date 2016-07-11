@@ -96,7 +96,9 @@ def parse_args(args_str):
     # cassandra options
     cassandraopts = {
         'cassandra_user': None,
-        'cassandra_password': None
+        'cassandra_password': None,
+        'cassandra_pool_size': 20,
+        'cassandra_max_overflow':3 * 20
     }
 
     config = None
@@ -296,6 +298,10 @@ def parse_args(args_str):
                         help="Cassandra user name")
     parser.add_argument("--cassandra_password",
                         help="Cassandra password")
+    parser.add_argument("--cassandra_pool_size", type=int,
+                        help="Cassandra connection pool size")
+    parser.add_argument("--cassandra_max_overflow", type=int,
+                        help="Cassandra pool max overflow")
     parser.add_argument("--sandesh_send_rate_limit", type=int,
                         help="Sandesh send rate limit in messages/sec.")
     parser.add_argument("--ifmap_health_check_interval",
