@@ -34,6 +34,7 @@ def parse_args(args_str):
         'wipe_config': False,
         'listen_ip_addr': _WEB_HOST,
         'listen_port': _WEB_PORT,
+        'backdoor_port': 5001,
         'admin_port': _ADMIN_PORT,
         'ifmap_server_ip': '127.0.0.1',
         'ifmap_server_port': "8443",
@@ -211,6 +212,10 @@ def parse_args(args_str):
     parser.add_argument(
         "--listen_port",
         help="Port to provide service on, default %s" % (_WEB_PORT))
+    parser.add_argument(
+        "--backdoor_port", type=int,
+        help="Gevent backdoor port for debugging"
+    )
     parser.add_argument(
         "--admin_port",
         help="Port with local auth for admin access, default %s"

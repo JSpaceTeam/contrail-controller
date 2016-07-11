@@ -624,9 +624,16 @@ class VncApiServerBase(VncApiServer):
             pipe_start_app = self.get_pipe_start_app()
             server_ip = self.get_listen_ip()
             server_port = self.get_server_port()
+            print "Start Backdoor on port %s " % self._args.backdoor_port
+            from gevent.backdoor import BackdoorServer
+            server = BackdoorServer(('127.0.0.1', self._args.backdoor_port),
+                        banner="Welcome to the api server backdoor!",
+                        locals={'server': self})
+            gevent.spawn(server.serve_forever)
             print ("BOTTLE RUN {} {} ".format(server_ip, server_port))
             bottle.run(app=pipe_start_app, host=server_ip, port=server_port,
                        server=get_bottle_server(self._args.max_requests))
+
         except KeyboardInterrupt:
             # quietly handle Ctrl-C
             pass
