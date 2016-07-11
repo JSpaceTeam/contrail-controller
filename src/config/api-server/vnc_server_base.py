@@ -1,4 +1,5 @@
 from gevent import monkey
+from oslo_reports.guru_meditation_report import TextGuruMeditation
 
 monkey.patch_all()
 import abc
@@ -249,6 +250,10 @@ class VncApiServerBase(VncApiServer):
             listener.start()
         except Exception:
             logging.error("Failed starting up logger config socket")
+
+        #Init user signal for dumps
+        TextGuruMeditation.setup_autorun(object, log_dir='/opt/csp-service')
+
 
     # end __init__
 
