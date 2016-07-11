@@ -773,7 +773,7 @@ class VncServerCassandraClient(VncCassandraClient):
     # end get_db_info
 
     def __init__(self, db_client_mgr, cass_srv_list, reset_config, db_prefix,
-                 cassandra_credential):
+                 cassandra_credential, cassandra_pool):
         self._db_client_mgr = db_client_mgr
         keyspaces = self._UUID_KEYSPACE.copy()
         keyspaces[self._USERAGENT_KEYSPACE_NAME] = [
@@ -781,7 +781,7 @@ class VncServerCassandraClient(VncCassandraClient):
         super(VncServerCassandraClient, self).__init__(
             cass_srv_list, db_prefix, keyspaces, None, self.config_log,
             generate_url=db_client_mgr.generate_uri,
-            reset_config=reset_config, credential=cassandra_credential)
+            reset_config=reset_config, credential=cassandra_credential, pool_config_dict=cassandra_pool)
         self._useragent_kv_cf = self._cf_dict[self._USERAGENT_KV_CF_NAME]
 
     # end __init__
@@ -1428,7 +1428,8 @@ class VncDbClient(object):
                  passwd, cass_srv_list,
                  rabbit_servers, rabbit_port, rabbit_user, rabbit_password,
                  rabbit_vhost, rabbit_ha_mode, reset_config=False,
-                 zk_server_ip=None, db_prefix='', cassandra_credential=None, ifmap_disable=False):
+                 zk_server_ip=None, db_prefix='', cassandra_credential=None, ifmap_disable=False,
+                 cassandra_pool = None):
 
         self._api_svr_mgr = api_svr_mgr
         self._sandesh = api_svr_mgr._sandesh
@@ -1483,7 +1484,7 @@ class VncDbClient(object):
             self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
 
             self._cassandra_db = VncServerCassandraClient(
-                self, cass_srv_list, reset_config, db_prefix, cassandra_credential)
+                self, cass_srv_list, reset_config, db_prefix, cassandra_credential,cassandra_pool)
 
         self._zk_db.master_election(cassandra_client_init)
 

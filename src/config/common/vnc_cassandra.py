@@ -55,7 +55,7 @@ class VncCassandraClient(object):
     # end get_db_info
 
     def __init__(self, server_list, db_prefix, rw_keyspaces, ro_keyspaces,
-            logger, generate_url=None, reset_config=False, credential=None):
+            logger, generate_url=None, reset_config=False, credential=None, pool_config_dict={}):
         self._re_match_parent = re.compile('parent:')
         self._re_match_prop = re.compile('prop:')
         self._re_match_prop_list = re.compile('propl:')
@@ -63,7 +63,8 @@ class VncCassandraClient(object):
         self._re_match_ref = re.compile('ref:')
         self._re_match_backref = re.compile('backref:')
         self._re_match_children = re.compile('children:')
-
+        self._pool_size = pool_config_dict.get('pool_size', 20)
+        self._pool_max_overflow = pool_config_dict.get('max_overflow', 3 * self._pool_size)
         self._reset_config = reset_config
         self._cache_uuid_to_fq_name = {}
         if db_prefix:
@@ -384,8 +385,8 @@ class VncCassandraClient(object):
                                           self._ro_keyspaces.items()):
             keyspace = '%s%s' %(self._db_prefix, ks)
             pool = pycassa.ConnectionPool(
-                keyspace, self._server_list, max_overflow=-1, use_threadlocal=True,
-                prefill=True, pool_size=20, pool_timeout=120,
+                keyspace, self._server_list, max_overflow=self._pool_max_overflow, use_threadlocal=True,
+                prefill=True, pool_size=self._pool_size, pool_timeout=120,
                 max_retries=-1, timeout=5, credentials=self._credential)
 
             rd_consistency = pycassa.cassandra.ttypes.ConsistencyLevel.QUORUM

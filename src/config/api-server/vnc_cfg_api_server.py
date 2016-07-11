@@ -2560,12 +2560,17 @@ class VncApiServer(object):
         cred = None
         if cassandra_user is not None and cassandra_password is not None:
             cred = {'username':cassandra_user,'password':cassandra_password}
+        cassandra_pool = {
+                'max_overflow': self._args.cassandra_max_overflow,
+                'pool_size': self._args.cassandra_pool_size
+                }
         db_conn = VncDbClient(self, ifmap_ip, ifmap_port, user, passwd,
                               cass_server_list, rabbit_servers, rabbit_port,
                               rabbit_user, rabbit_password, rabbit_vhost,
                               rabbit_ha_mode, reset_config,
                               zk_server, self._args.cluster_id,
-                              cassandra_credential=cred, ifmap_disable=self._args.disable_ifmap)
+                              cassandra_credential=cred, ifmap_disable=self._args.disable_ifmap,
+                              cassandra_pool=cassandra_pool)
         self._db_conn = db_conn
     # end _db_connect
 
