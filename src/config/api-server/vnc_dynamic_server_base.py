@@ -754,7 +754,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
             yang_element.set_uuid(uuid)
             res_obj_dict = self.http_resource_read(resource_type, uuid)
             # Recursively delete all the children first
-            self._delete_child_resources(res_obj_dict, resource_type)
+            self._delete_child_resources(res_obj_dict, resource_type, False)
             # Now delete the parent
             self.http_resource_delete(resource_type, uuid)
 
