@@ -1,3 +1,5 @@
+import gc
+
 from gevent import monkey
 from oslo_reports.guru_meditation_report import TextGuruMeditation
 
@@ -608,7 +610,8 @@ class VncApiServerBase(VncApiServer):
     #end handle_error_code
 
 
-
+    def _find_objects(self, t):
+        return [o for o in gc.get_objects() if isinstance(o, t)]
 
     def start_server(self):
         import cgitb
@@ -624,11 +627,12 @@ class VncApiServerBase(VncApiServer):
             pipe_start_app = self.get_pipe_start_app()
             server_ip = self.get_listen_ip()
             server_port = self.get_server_port()
-            print "Start Backdoor on port %s " % self._args.backdoor_port
+            print "Start Backdoor on port %s " % self._args.api_backdoor_port
             from gevent.backdoor import BackdoorServer
-            server = BackdoorServer(('127.0.0.1', self._args.backdoor_port),
+            server = BackdoorServer(('127.0.0.1', self._args.api_backdoor_port),
                         banner="Welcome to the api server backdoor!",
-                        locals={'server': self})
+                        locals={'server': self,
+                                'fo': self._find_objects})
             gevent.spawn(server.serve_forever)
             print ("BOTTLE RUN {} {} ".format(server_ip, server_port))
             bottle.run(app=pipe_start_app, host=server_ip, port=server_port,
@@ -643,3 +647,4 @@ class VncApiServerBase(VncApiServer):
         finally:
             # always cleanup gracefully
             self.cleanup()
+
