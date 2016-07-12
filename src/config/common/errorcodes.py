@@ -1,6 +1,7 @@
 from cfgm_common import jsonutils as json
 import logging
 import copy
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,11 @@ class ErrorCodes(object):
     def __init__(self, common_errors_filePath, ms_errors_filePath=None):
         self.__error_codes = self.__read_from_file(common_errors_filePath)
 
-        if ms_errors_filePath is not None:
+        if ms_errors_filePath is not None and os.path.exists(ms_errors_filePath):
             self.__append_to_error_codes(ms_errors_filePath)
         else:
-            logger.warning('ms_errors_filePath is None')
+            logmsg = 'ms_errors_filePath is None' if ms_errors_filePath is None else 'ms_errors_filePath does not exist'
+            logger.warning(logmsg)
 
 
 
@@ -195,9 +197,9 @@ class ErrorCodes(object):
                 content = getattr(exceptionObj, ErrorCodes.CONTENT)
                 error_json[ErrorCodes.ERROR_APP_MESSAGE] = content
 
-            #still no error_app_message, then get exception toString
+            #still no error_app_message, then set it to empty string
             if not error_json.has_key(ErrorCodes.ERROR_APP_MESSAGE):
-                error_json[ErrorCodes.ERROR_APP_MESSAGE] = str(exceptionObj)
+                error_json[ErrorCodes.ERROR_APP_MESSAGE] = ''
 
             if hasattr(exceptionObj, ErrorCodes.CAUSE):
                 cause = getattr(exceptionObj, ErrorCodes.CAUSE)
