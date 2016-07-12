@@ -1019,19 +1019,26 @@ class VncApiServer(object):
         parent_uuids = None
         back_ref_uuids = None
         obj_uuids = None
-        if (('parent_fq_name_str' in get_request().query) and
-            ('parent_type' in get_request().query)):
-            parent_fq_name = get_request().query.parent_fq_name_str.split(':')
-            parent_type = get_request().query.parent_type
-            parent_uuids = [self._db_conn.fq_name_to_uuid(parent_type, parent_fq_name)]
-        elif 'parent_id' in get_request().query:
-            parent_ids = get_request().query.parent_id.split(',')
-            parent_uuids = [str(uuid.UUID(p_uuid)) for p_uuid in parent_ids]
-        if 'back_ref_id' in get_request().query:
-            back_ref_ids = get_request().query.back_ref_id.split(',')
-            back_ref_uuids = [str(uuid.UUID(b_uuid)) for b_uuid in back_ref_ids]
-        if 'obj_uuids' in get_request().query:
-            obj_uuids = get_request().query.obj_uuids.split(',')
+        if 'fq_name_str' in get_request().query:
+            obj_fq_name = get_request().query.fq_name_str.split(':')
+            try:
+                obj_uuids = [self._db_conn.fq_name_to_uuid(resource_type, obj_fq_name)]
+            except NoIdError:
+                raise cfgm_common.exceptions.HttpError(
+                    404, 'Name ' + pformat(obj_fq_name) + ' not found', "40002")
+        else:
+            if ('parent_fq_name_str' in get_request().query) and ('parent_type' in get_request().query):
+                parent_fq_name = get_request().query.parent_fq_name_str.split(':')
+                parent_type = get_request().query.parent_type
+                parent_uuids = [self._db_conn.fq_name_to_uuid(parent_type, parent_fq_name)]
+            elif 'parent_id' in get_request().query:
+                parent_ids = get_request().query.parent_id.split(',')
+                parent_uuids = [str(uuid.UUID(p_uuid)) for p_uuid in parent_ids]
+            if 'back_ref_id' in get_request().query:
+                back_ref_ids = get_request().query.back_ref_id.split(',')
+                back_ref_uuids = [str(uuid.UUID(b_uuid)) for b_uuid in back_ref_ids]
+            if 'obj_uuids' in get_request().query:
+                obj_uuids = get_request().query.obj_uuids.split(',')
 
         # common handling for all resource get
         (ok, result) = self._get_common(get_request(), parent_uuids)

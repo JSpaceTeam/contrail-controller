@@ -1161,7 +1161,49 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         self.assertTill(self.ifmap_has_ident, obj=rt_obj)
         self._vnc_lib.route_target_delete(id=rt_obj.uuid)
     # end test_name_with_reserved_xml_char
+    
+    def test_list_fqname_fetch(self):
+        obj_count = self._vnc_lib.POST_FOR_LIST_THRESHOLD + 1
+        vn_uuids = []
+        ri_uuids = []
+        vmi_uuids = []
+        logger.info("Creating %s VNs, RIs, VMIs.", obj_count)
+        vn_objs, ri_objs, vmi_objs = self._create_vn_ri_vmi(obj_count)
 
+        vn_fqnames = [o.fq_name for o in vn_objs]
+        vn_ids = [o.uuid for o in vn_objs]
+        logger.info("Querying VNs by obj_uuids.")
+        status, content = self._http_get('/virtual-network',
+                query_params={'fq_name_str':'%s' % ':'.join(vn_fqnames[0])})
+        self.assertThat(status, Equals(200))
+        objs_dict = json.loads(content)['virtual-network']
+        self.assertThat(len(objs_dict), Equals(1))
+        self.assertThat(objs_dict[0]['fq_name'][-1],
+                        Equals(vn_fqnames[0][-1]))
+
+        status, content = self._http_get('/virtual-network',
+                                query_params={'fq_name_str':'xyz-unknown'})
+        self.assertThat(status, Equals(404))
+        status, content = self._http_get('/virtual-network',
+                                query_params={'obj_uuids':'%s' % (vn_ids[0])})
+        self.assertThat(status, Equals(200))
+        status, content = self._http_get('/virtual-network',
+                                query_params={'obj_uuids':'%s' % (vn_ids[0]), 
+                                    'fq_name_str': 'unknown'})
+        self.assertThat(status, Equals(404))
+        status, content = self._http_get('/virtual-network',
+                                query_params={'obj_uuids':'%s' % (vn_ids[1]), 
+                                    'fq_name_str': '%s' % ':'.join(vn_fqnames[0])})
+        self.assertThat(status, Equals(200))
+        objs_dict = json.loads(content)['virtual-network']
+        self.assertThat(len(objs_dict), Equals(1))
+        self.assertThat(objs_dict[0]['fq_name'][-1],
+                        Equals(vn_fqnames[0][-1]))
+
+        self.assertThat(objs_dict[0]['uuid'],
+                        Not(Equals(vn_ids[1])))
+    # end test_list_fqname_fetch    
+    
     def test_list_bulk_collection(self):
         obj_count = self._vnc_lib.POST_FOR_LIST_THRESHOLD + 1
         vn_uuids = []
