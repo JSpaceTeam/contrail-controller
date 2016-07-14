@@ -254,7 +254,7 @@ class VncApiServerBase(VncApiServer):
             logging.error("Failed starting up logger config socket")
 
         #Init user signal for dumps
-        TextGuruMeditation.setup_autorun(object, log_dir='/opt/csp-service')
+        TextGuruMeditation.setup_autorun(object, log_dir='/tmp')
 
 
     # end __init__
