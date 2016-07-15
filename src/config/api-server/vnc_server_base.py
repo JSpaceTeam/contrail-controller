@@ -32,6 +32,7 @@ from pysandesh.sandesh_base_logger import SandeshBaseLogger
 from csp_services_common import cfg
 from cfgm_common.errorcode_utils import ErrorCodeRepo
 from gen.vnc_api_client_gen import *
+from csp_services_common.utils.debug_tools import setup_debug_tools
 
 # Parse config for olso configs. Try to move all config parsing to oslo cfg
 elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
@@ -246,16 +247,7 @@ class VncApiServerBase(VncApiServer):
             bottle.request.environ['PATH_INFO'] = bottle.request. \
                 environ['PATH_INFO'].rstrip('/')
 
-        # Start logger port
-        try:
-            listener = logging.config.listen(9999)
-            listener.start()
-        except Exception:
-            logging.error("Failed starting up logger config socket")
-
-        #Init user signal for dumps
-        TextGuruMeditation.setup_autorun(object, log_dir='/tmp')
-
+        setup_debug_tools()
 
     # end __init__
 
