@@ -2513,8 +2513,9 @@ class VncSearchDbClient(VncSearchItf):
     # initialize_index_schema
 
     def _init_index(self, index, mapping, reset_config, index_setting=None):
-        if reset_config and self._index_client.exists(index):
-            self._index_client.delete(index)
+        if reset_config:# #Keeping reset config semantics in line with cassandra DB at the
+            #  and self._index_client.exists(index):
+            self._index_client.delete("_all")
 
         if index_setting:
             mapping.update(index_setting)
