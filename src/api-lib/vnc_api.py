@@ -32,6 +32,7 @@ from gen.vnc_api_client_gen import SERVICE_PATH
 from pprint import pformat
 from threading import current_thread
 from cachetools.lru import LRUCache
+from requests.packages.urllib3.util.retry import Retry
 
 ASC = 'asc'
 DESC = 'desc'
@@ -139,7 +140,7 @@ class VncApi(object):
                  auth_token=None, auth_host=None, auth_port=None,
                  auth_protocol = None, auth_url=None, auth_type=None,
                  wait_for_connect=False, api_server_use_ssl=False,
-                 domain_name=None):
+                 domain_name=None, max_retry_on_connection_error=5):
         # TODO allow for username/password to be present in creds file
 
         self._obj_serializer = self._obj_serializer_diff
@@ -317,6 +318,9 @@ class VncApi(object):
             self._auth_token = auth_token
             self._auth_token_input = True
             self._headers['X-AUTH-TOKEN'] = self._auth_token
+
+        # No of reconnection attempts to server when there is a connection error, including socket error, dns errors etc.
+        self._max_retry_on_connection_error = max_retry_on_connection_error
 
         # user information for quantum
         if self._user_info:
@@ -592,11 +596,15 @@ class VncApi(object):
 
     def _create_api_server_session(self):
         self._api_server_session = requests.Session()
+        if self._max_retry_on_connection_error > 0:
+            retry = Retry(self._max_retry_on_connection_error, redirect=True, backoff_factor=1)
+        else:
+            retry = 0
 
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=self._max_conns_per_pool,
-            pool_maxsize=self._max_pools)
-        ssladapter = ssl_adapter.SSLAdapter(ssl.PROTOCOL_SSLv23)
+            pool_maxsize=self._max_pools, max_retries=retry)
+        ssladapter = ssl_adapter.SSLAdapter(ssl.PROTOCOL_SSLv23, max_retries=retry)
         ssladapter.init_poolmanager(
             connections=self._max_conns_per_pool,
             maxsize=self._max_pools)
@@ -803,7 +811,9 @@ class VncApi(object):
             except ConnectionError:
                 if not retry_on_error:
                     raise ConnectionError
-
+                retried += 1
+                if retried >= retry_count:
+                    raise ConnectionError
                 time.sleep(1)
                 self._create_api_server_session()
                 continue
@@ -1237,20 +1247,21 @@ class VncApi(object):
     #end set_user_roles
 
     @classmethod
-    def instantiate(cls, csp_lookup, service_prefix='local', context=None):
+    def instantiate(cls, csp_lookup, service_prefix='local', context=None, **kwargs):
         auth_token = context.get('auth_token',None) if context else None
         scheme, ip, port = csp_lookup.lookup('%s.%s' % (service_prefix, SERVICE_LOOKUP_NAME))
         logging.debug("Lookup for %s.%s returned %s://%s:%s",service_prefix,
                       SERVICE_LOOKUP_NAME, scheme, ip, port)
-        return cls._instantiate_client(scheme,ip,port, auth_token)
+        return cls._instantiate_client(scheme,ip,port, auth_token, **kwargs)
 
     @classmethod
     @cached(cache=cache, lock=lock)
-    def _instantiate_client(cls, scheme, ip, host, auth_token):
+    def _instantiate_client(cls, scheme, ip, host, auth_token, **kwargs):
         return VncApi(api_server_host=ip,
                       api_server_port=host,
                       auth_token=auth_token,
-                      api_server_use_ssl=True if scheme == 'https' else False)
+                      api_server_use_ssl=True if scheme == 'https' else False,
+                      **kwargs)
 
 
 
