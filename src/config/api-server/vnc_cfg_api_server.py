@@ -7,6 +7,7 @@ between http/rest, address management, authentication and database interfaces.
 """
 from decimal import Decimal, InvalidOperation
 
+from cfgm_common.errorcodes import CommonException
 from gevent import monkey
 monkey.patch_all()
 from gevent import hub
@@ -1711,7 +1712,7 @@ class VncApiServer(object):
 
                 # don't log details of cfgm_common.exceptions.HttpError i.e handled error cases
                 if isinstance(e, cfgm_common.exceptions.HttpError) \
-                        or (isinstance(e, VncError) and hasattr(e, 'status_code') and hasattr(e, 'content')):
+                        or ((isinstance(e, VncError) or isinstance(e, CommonException)) and hasattr(e, 'status_code') and hasattr(e, 'content')):
                     bottle.abort(e.status_code, e.content)
                 else:
                     string_buf = StringIO()
