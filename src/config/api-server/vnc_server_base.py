@@ -1,9 +1,7 @@
-import gc
-
 from gevent import monkey
-from oslo_reports.guru_meditation_report import TextGuruMeditation
-
 monkey.patch_all()
+from oslo_config.cfg import ArgsAlreadyParsedError
+import gc
 import abc
 
 """
@@ -36,34 +34,32 @@ from csp_services_common.utils.debug_tools import setup_debug_tools
 
 # Parse config for olso configs. Try to move all config parsing to oslo cfg
 elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
-cfg.CONF.register_cli_opt(cfg.BoolOpt(name='search_enabled', default=False),
-                          group=elastic_search_group)
-cfg.CONF.register_cli_opt(cfg.ListOpt('server_list',
-                                      item_type=cfg.types.String(),
-                                      default='127.0.0.1:9200',
-                                      help="Multiple servers option"), group=elastic_search_group)
-cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing', default=False,
-                                      help="Enable connection sniffing for elastic search driver")
-                          , group=elastic_search_group)
+cfg.CONF.register_group(elastic_search_group)
+elastic_search_opts = [
+    cfg.BoolOpt(name='search_enabled', default=False),
+    cfg.ListOpt('server_list',
+                item_type=cfg.types.String(),
+                default='127.0.0.1:9200',
+                help="Multiple servers option"),
+    cfg.BoolOpt(name='enable_sniffing', default=False,
+                help="Enable connection sniffing for elastic search driver"),
 
-cfg.CONF.register_cli_opt(cfg.ListOpt('log_server_list',
-                          item_type=cfg.types.String(),
-                          default='127.0.0.1:9200',
-                          help="Multiple servers option for es log servers"),
-                          group=elastic_search_group)
-
-cfg.CONF.register_cli_opt(
+    cfg.ListOpt('log_server_list',
+                item_type=cfg.types.String(),
+                default='127.0.0.1:9200',
+                help="Multiple servers option for es log servers"),
     cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
-    group=elastic_search_group)
-
-cfg.CONF.register_cli_opt(
     cfg.StrOpt(name='search_client', default=None, help="VncDBSearch client implementation"),
-    group=elastic_search_group)
+    cfg.StrOpt(name='update', choices=["partial", "script"], default="script", help="update type for elastic search"),
+    cfg.IntOpt(name='number_of_shards', default=2),
+    cfg.IntOpt(name='number_of_replicas', default=1)
+]
 
-cfg.CONF.register_cli_opt(
-    cfg.StrOpt(name='update',choices=["partial", "script"], default="script",
-               help="update type for elastic search"),
-    group=elastic_search_group)
+for opt in elastic_search_opts:
+    try:
+        cfg.CONF.register_cli_opt(opt, group=elastic_search_group)
+    except ArgsAlreadyParsedError:
+        pass
 
 RBAC_RULE = 'rbac_rule'
 MULTI_TENANCY = 'multi_tenancy'
@@ -83,6 +79,7 @@ class Policy(object):
     def get_multi_tenancy_rule(self):
         return self.policy_json.get(MULTI_TENANCY)
 
+
 system_resource_types = set([
     'config-root',
     'domain',
@@ -91,7 +88,8 @@ system_resource_types = set([
     'api-access-list',
     'project',
     'access-control-list',
-    ])
+])
+
 
 class VncApiServerBase(VncApiServer):
     __metaclass__ = abc.ABCMeta
@@ -299,10 +297,10 @@ class VncApiServerBase(VncApiServer):
         id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
         (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid': id})
         if 'api_access_list_entries' in obj_dict:
-           api_access_list_entries = obj_dict['api_access_list_entries']
-           if 'rbac_rule' in api_access_list_entries:
-              if (api_access_list_entries['rbac_rule'])[0]:
-                 rule_list.extend(api_access_list_entries['rbac_rule'])
+            api_access_list_entries = obj_dict['api_access_list_entries']
+            if 'rbac_rule' in api_access_list_entries:
+                if (api_access_list_entries['rbac_rule'])[0]:
+                    rule_list.extend(api_access_list_entries['rbac_rule'])
 
         rule_list.extend(rbac_rule)
         updated_rbac_rule = self._merge_rbac_rule(rule_list)
@@ -381,7 +379,7 @@ class VncApiServerBase(VncApiServer):
         try:
             obj_dict = request.json[_key]
         except (KeyError, TypeError):
-            #Verify if input is needed
+            # Verify if input is needed
             if r_class.attr_fields:
                 raise HttpError(400, 'invalid request, key "%s" not found' % _key, "40001")
             else:
@@ -390,7 +388,6 @@ class VncApiServerBase(VncApiServer):
         obj_dict = {_key: obj_dict}
 
         prop_dict = obj_dict.get('input')
-
 
         try:
             self._validate_complex_type(r_class, prop_dict)
@@ -587,8 +584,6 @@ class VncApiServerBase(VncApiServer):
             self.config_log("Exception in error_codes loading: %s" % (err_msg),
                             level=SandeshLevel.SYS_ERR)
 
-
-
     def handle_error_code(self, exception):
         if exception is not None and self.error_codes:
             error_json = self.error_codes.get_error_json(exception)
@@ -599,7 +594,7 @@ class VncApiServerBase(VncApiServer):
                 if error_json_dict.has_key('status_code'):
                     setattr(exception, 'status_code', int(error_json_dict['status_code']))
 
-    #end handle_error_code
+    # end handle_error_code
 
 
     def _find_objects(self, t):
@@ -622,9 +617,9 @@ class VncApiServerBase(VncApiServer):
             print "Start Backdoor on port %s " % self._args.api_backdoor_port
             from gevent.backdoor import BackdoorServer
             server = BackdoorServer(('127.0.0.1', self._args.api_backdoor_port),
-                        banner="Welcome to the api server backdoor!",
-                        locals={'server': self,
-                                'fo': self._find_objects})
+                                    banner="Welcome to the api server backdoor!",
+                                    locals={'server': self,
+                                            'fo': self._find_objects})
             gevent.spawn(server.serve_forever)
             print ("BOTTLE RUN {} {} ".format(server_ip, server_port))
             bottle.run(app=pipe_start_app, host=server_ip, port=server_port,
@@ -639,4 +634,3 @@ class VncApiServerBase(VncApiServer):
         finally:
             # always cleanup gracefully
             self.cleanup()
-

@@ -2412,6 +2412,9 @@ class VncSearchDbClient(VncSearchItf):
         self._msg_bus = msg_bus
         self._consistency = "quorum"
         self._is_script_update = True if cfg.CONF.elastic_search.update == 'script' else False
+        shards = cfg.CONF.elastic_search.number_of_shards
+        replicas = cfg.CONF.elastic_search.number_of_replicas
+        index_settings = index_settings or {"settings": {"number_of_shards": shards, "number_of_replicas": replicas}}
         while True:
             try:
                 opts = {}
@@ -2430,7 +2433,7 @@ class VncSearchDbClient(VncSearchItf):
                                                 timeout=timeout, **opts)
 
                 self._index_client = IndicesClient(self._es_client)
-                self._index, self._mapped_doc_types = self.initialize_index_schema(reset_config)
+                self._index, self._mapped_doc_types = self.initialize_index_schema(reset_config, index_setting=index_settings)
                 self._mapped_doc_types = filter(lambda x: x not in {'project', 'domain'}, self._mapped_doc_types)
                 break
             except ConnectionError as ce:
