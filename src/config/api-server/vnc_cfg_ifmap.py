@@ -1510,7 +1510,7 @@ class VncDbClient(object):
         else:
             self.config_log("Elastic search not enabled", level=SandeshLevel.SYS_NOTICE)
             self._search_db = VncNoOpEsDb()
-        self._rollback_handler = VncDBRollBackHandler(self, self._msgbus, self._cassandra_db, self._search_db)
+        self._rollback_handler = VncDBRollBackHandler(self, self._msgbus, self._search_db)
 
     # end __init__
 
