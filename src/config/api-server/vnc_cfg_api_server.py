@@ -2871,12 +2871,14 @@ class VncApiServer(object):
             (ok, status) = self._permissions.check_perms_read(get_request(), uuid)
             if not ok and status[0] == 403:
                 result.remove((fq_name, uuid))
+                total -= 1
 
         # include objects shared with tenant
         for (obj_uuid, obj_perm) in shares:
             try:
                 fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
                 result.append((fq_name, obj_uuid))
+                total += 1
             except NoIdError:
                 # uuid no longer valid. Delete?
                 pass
