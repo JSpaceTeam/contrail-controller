@@ -1285,8 +1285,8 @@ class VncZkClient(object):
                 pass
 
         if reset_config:
-            self._zk_client.delete_node(self._subnet_path, True);
-            self._zk_client.delete_node(self._fq_name_to_uuid_path, True);
+            self._zk_client.delete_node(self._subnet_path, True)
+            self._zk_client.delete_node(self._zk_path_pfx + self._FQ_NAME_TO_UUID_PATH, True)
         self._subnet_allocators = {}
 
     # end __init__
