@@ -785,7 +785,9 @@ class VncApi(object):
 
 
     def _update_request_id(self, headers):
-        if not headers.get('X-Request-Id') and current_thread().__dict__.get('request_id'):
+        if headers.get('X-Request-Id'):
+            del headers['X-Request-Id']
+        if current_thread().__dict__.get('request_id'):
             headers['X-Request-Id'] = current_thread().__dict__['request_id']
 
 
