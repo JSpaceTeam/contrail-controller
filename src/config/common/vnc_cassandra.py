@@ -1,12 +1,13 @@
 #
 # Copyright (c) 2014 Juniper Networks, Inc. All rights reserved.
 #
+import logging
 
 import pycassa
 from pycassa import ColumnFamily
 from pycassa.batch import Mutator
 from pycassa.system_manager import SystemManager, SIMPLE_STRATEGY, UTF8_TYPE
-from pycassa.pool import AllServersUnavailable
+from pycassa.pool import AllServersUnavailable, MaximumRetryException
 import gevent
 
 
@@ -25,6 +26,88 @@ import datetime
 import re
 from operator import itemgetter
 import itertools
+
+class PoolListener(object):
+
+    def connection_created(self, dic):
+        """Called once for each new Cassandra connection.
+
+        Fields: `pool_id`, `level`, and `connection`.
+        """
+        logging.warn("VncCassPool: connection_created %s" % dic)
+
+    def connection_checked_out(self, dic):
+        """Called when a connection is retrieved from the Pool.
+
+        Fields: `pool_id`, `level`, and `connection`.
+        """
+        logging.warn("VncCassPool: connection_checked_out %s" % dic)
+
+
+    def connection_checked_in(self, dic):
+        """Called when a connection returns to the pool.
+
+        Fields: `pool_id`, `level`, and `connection`.
+        """
+        logging.warn("VncCassPool: connection_checked_in %s" % dic)
+
+
+    def connection_disposed(self, dic):
+        """Called when a connection is closed.
+
+        ``dic['message']``: A reason for closing the connection, if any.
+
+        Fields: `pool_id`, `level`, `connection`, and `message`.
+        """
+        logging.warn("VncCassPool: connection_checked_disposed %s" % dic)
+
+
+    def connection_recycled(self, dic):
+        """Called when a connection is recycled.
+
+        ``dic['old_conn']``: The :class:`ConnectionWrapper` that is being recycled
+
+        ``dic['new_conn']``: The :class:`ConnectionWrapper` that is replacing it
+
+        Fields: `pool_id`, `level`, `old_conn`, and `new_conn`.
+        """
+        logging.warn("VncCassPool: connection_recycled %s" % dic)
+
+    def connection_failed(self, dic):
+        """Called when a connection to a single server fails.
+
+        ``dic['server']``: The server the connection was made to.
+
+        Fields: `pool_id`, `level`, `error`, `server`, and `connection`.
+        """
+    def server_list_obtained(self, dic):
+        """Called when the pool finalizes its server list.
+
+        ``dic['server_list']``: The randomly permuted list of servers that the
+        pool will choose from.
+
+        Fields: `pool_id`, `level`, and `server_list`.
+        """
+
+    def pool_disposed(self, dic):
+        """Called when a pool is disposed.
+
+        Fields: `pool_id`, and `level`.
+        """
+
+    def pool_at_max(self, dic):
+        """
+        Called when an attempt is made to get a new connection from the
+        pool, but the pool is already at its max size.
+
+        ``dic['pool_max']``: The max number of connections the pool will
+        keep open at one time.
+
+        Fields: `pool_id`, `pool_max`, and `level`.
+        """
+        logging.warn("VncCassPool: pool_at_max %s" % dic)
+
+
 
 class VncCassandraClient(object):
     # Name to ID mapping keyspace + tables
@@ -63,7 +146,7 @@ class VncCassandraClient(object):
         self._re_match_ref = re.compile('ref:')
         self._re_match_backref = re.compile('backref:')
         self._re_match_children = re.compile('children:')
-        self._pool_size = pool_config_dict.get('pool_size', 20)
+        self._pool_size = pool_config_dict.get('pool_size', 10)
         self._pool_max_overflow = pool_config_dict.get('max_overflow', 3 * self._pool_size)
         self._reset_config = reset_config
         self._cache_uuid_to_fq_name = {}
@@ -270,7 +353,7 @@ class VncCassandraClient(object):
                     self._cassandra_init_conn_pools()
 
                 return func(*args, **kwargs)
-            except AllServersUnavailable as e:
+            except (AllServersUnavailable, MaximumRetryException) as e:
                 if self._conn_state != ConnectionStatus.DOWN:
                     self._update_sandesh_status(ConnectionStatus.DOWN)
                     msg = 'Cassandra connection down. Exception in %s' %(
@@ -387,10 +470,14 @@ class VncCassandraClient(object):
             pool = pycassa.ConnectionPool(
                 keyspace, self._server_list, max_overflow=self._pool_max_overflow, use_threadlocal=True,
                 prefill=True, pool_size=self._pool_size, pool_timeout=120,
-                max_retries=-1, timeout=5, credentials=self._credential)
-
+                max_retries=11, timeout=5, credentials=self._credential)
+            if self._pool_size > 10:
+                self._logger("A large pool size might result in pool hangs when cassandra connection needs to be restablished"
+                             , level=SandeshLevel.SYS_WARN)
             rd_consistency = pycassa.cassandra.ttypes.ConsistencyLevel.QUORUM
             wr_consistency = pycassa.cassandra.ttypes.ConsistencyLevel.QUORUM
+            #listener = PoolListener()
+            #pool.add_listener(listener)
 
             for (cf, _) in cf_list:
                 self._cf_dict[cf] = ColumnFamily(
