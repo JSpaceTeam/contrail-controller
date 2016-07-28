@@ -2721,10 +2721,11 @@ class VncApiServer(object):
     # end _db_init_entries
 
     # generate default rbac group rule, merge it with the already existing ones
-    def _create_default_rbac_rule(self):
+    def _create_default_rbac_rule(self, fq_name=None):
         obj_type = 'api-access-list'
         rule_list = []
-        fq_name = ['default-domain', 'default-api-access-list']
+        if not fq_name:
+            fq_name = ['default-domain', 'default-api-access-list']
         try:
             id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
         except NoIdError:
