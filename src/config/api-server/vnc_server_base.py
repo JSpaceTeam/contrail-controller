@@ -80,7 +80,7 @@ class Policy(object):
         default_rules = self.policy_json.get(RBAC_RULE).get('default')
         service_rules = self.policy_json.get(RBAC_RULE).get('service')
         if default_rules is None and service_rules is None:
-            return None
+            return []
         elif default_rules is not None and service_rules is not None:
             return default_rules + service_rules
         else:
