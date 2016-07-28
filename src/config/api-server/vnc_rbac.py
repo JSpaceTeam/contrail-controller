@@ -12,6 +12,12 @@ from cfgm_common.exceptions import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from gen.vnc_api_client_gen import SERVICE_PATH
 
+def get_service_api_access_list_fqname():
+    return ['default-domain', SERVICE_PATH.replace('/', '')+'-api-access-list']
+
+def get_default_api_access_list_fqname():
+    return ['default-domain', 'default-api-access-list']
+
 class VncRbac(object):
 
     op_str = {'GET': 'R', 'POST': 'C', 'PUT': 'U', 'DELETE': 'D'}
@@ -70,6 +76,15 @@ class VncRbac(object):
             rbac_rules.append(rule)
         return rbac_rules
 
+    def get_api_access_list_uuids(self, api_access_lists, target_fq_name, default_fq_name):
+        service_api_access_list_uuid, default_api_access_list_uuid = None, None
+        for api_access_list in api_access_lists:
+            if api_access_list['to'][-1] == target_fq_name[-1]:
+                service_api_access_list_uuid = api_access_list['uuid']
+            if api_access_list['to'][-1] == default_fq_name[-1]:
+                default_api_access_list_uuid = api_access_list['uuid']
+        return default_api_access_list_uuid, service_api_access_list_uuid
+
     def get_rbac_rules(self, request):
         rule_list = []
         env = request.headers.environ
@@ -108,7 +123,15 @@ class VncRbac(object):
         api_access_lists = result['api_access_lists']
 
         obj_fields = ['api_access_list_entries']
-        obj_ids = {'uuid' : api_access_lists[0]['uuid']}
+        default_api_access_list_uuid, service_api_access_list_uuid = \
+            self.get_api_access_list_uuids(api_access_lists, get_service_api_access_list_fqname(),
+                                           get_default_api_access_list_fqname())
+        if not service_api_access_list_uuid and not default_api_access_list_uuid:
+            obj_ids = {'uuid' : api_access_lists[0]['uuid']}
+        else:
+            obj_ids = {'uuid' : service_api_access_list_uuid} if service_api_access_list_uuid else \
+                {'uuid' : default_api_access_list_uuid}
+
         (ok, result) = self._db_conn.dbe_read('api-access-list', obj_ids, obj_fields)
         if not ok or 'api_access_list_entries' not in result:
             return rule_list

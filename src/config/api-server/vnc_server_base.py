@@ -76,6 +76,16 @@ class Policy(object):
     def get_default_rbac_rule(self):
         return self.policy_json.get(RBAC_RULE).get('default')
 
+    def get_service_rbac_rule(self):
+        default_rules = self.policy_json.get(RBAC_RULE).get('default')
+        service_rules = self.policy_json.get(RBAC_RULE).get('service')
+        if default_rules is None and service_rules is None:
+            return []
+        elif default_rules is not None and service_rules is not None:
+            return default_rules + service_rules
+        else:
+            return default_rules if service_rules is None else service_rules
+
     def get_multi_tenancy_rule(self):
         return self.policy_json.get(MULTI_TENANCY)
 
@@ -238,6 +248,11 @@ class VncApiServerBase(VncApiServer):
                 logger.warn("Cannot load policy file, apply default policy")
             if policy:
                 self._update_default_rbac_rule(policy.get_default_rbac_rule())
+                service_api_access_list_fq_name = vnc_rbac.get_service_api_access_list_fqname()
+                # create default-rbac rule for service
+                self._create_default_rbac_rule(fq_name=service_api_access_list_fq_name)
+                self._update_default_rbac_rule(policy.get_service_rbac_rule(),
+                                               fq_name=service_api_access_list_fq_name)
                 self._update_multi_tenancy_rule(policy.get_multi_tenancy_rule())
 
         @bottle.hook('before_request')
@@ -290,10 +305,11 @@ class VncApiServerBase(VncApiServer):
 
     # end get_rpc_input_type
 
-    def _update_default_rbac_rule(self, rbac_rule):
+    def _update_default_rbac_rule(self, rbac_rule, fq_name=None):
         obj_type = 'api-access-list'
         rule_list = []
-        fq_name = ['default-domain', 'default-api-access-list']
+        if not fq_name:
+            fq_name = ['default-domain', 'default-api-access-list']
         id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
         (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid': id})
         if 'api_access_list_entries' in obj_dict:
@@ -306,7 +322,7 @@ class VncApiServerBase(VncApiServer):
         updated_rbac_rule = self._merge_rbac_rule(rule_list)
         obj_dict['api_access_list_entries'] = {'rbac_rule': updated_rbac_rule}
         self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
-        logger.info("Updated default rbac rule")
+        logger.info("Updated default rbac rule for {}".format(fq_name))
 
     # end _update_default_rbac_rule
 
