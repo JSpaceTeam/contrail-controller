@@ -27,7 +27,7 @@ from bottle import request
 from gen.resource_xsd import *
 from cfgm_common.vnc_extensions import ExtensionManager, ApiHookManager
 from pysandesh.sandesh_base_logger import SandeshBaseLogger
-from csp_services_common import cfg
+from csp_services_common import cfg, RpcClient
 from cfgm_common.errorcode_utils import ErrorCodeRepo
 from gen.vnc_api_client_gen import *
 from csp_services_common.utils.debug_tools import setup_debug_tools
@@ -119,6 +119,7 @@ class VncApiServerBase(VncApiServer):
         self.error_codes = None
         self._resource_classes = {}
         self._rpc_input_types = {}
+        self._enable_core_check = False
         for resource_type in all_resource_types:
             camel_name = cfgm_common.utils.CamelCase(resource_type)
             r_class_name = '%sServer' % (camel_name)
@@ -201,6 +202,9 @@ class VncApiServerBase(VncApiServer):
         # Enable/Disable multi tenancy
         bottle.route('/multi-tenancy', 'GET', self.mt_http_get)
         bottle.route('/multi-tenancy', 'PUT', self.mt_http_put)
+
+        # Add liveness test
+        self.route('/ready', 'GET', self.is_ready)
 
         # Initialize discovery client
         self._disc = None
@@ -379,6 +383,10 @@ class VncApiServerBase(VncApiServer):
                   'POST',
                   obj.suggest_execute)
 
+    def enable_core_check(self):
+        self._enable_core_check = True
+
+
     @abc.abstractmethod
     def get_pipeline(self):
         pass
@@ -386,6 +394,18 @@ class VncApiServerBase(VncApiServer):
     def vnc_api_config_log(self, apiConfig):
         # we already fo API logging through the logging middleware.
         pass
+
+    def is_ready(self):
+        response = {'status': 'ready'}
+        if self._enable_core_check:
+            rpc_client = RpcClient.get_client()
+            try:
+                response = rpc_client.call(dict(), 'is_ready')
+            except Exception as e:
+                logging.error("Failed to get reply from core due to %s", e)
+                raise HttpError(503, 'Core service is not yet ready')
+        return response
+
 
     def http_rpc_post(self, resource_type):
         prop_type = self.get_rpc_input_type(resource_type)
