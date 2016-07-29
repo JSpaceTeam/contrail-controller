@@ -32,34 +32,6 @@ from cfgm_common.errorcode_utils import ErrorCodeRepo
 from gen.vnc_api_client_gen import *
 from csp_services_common.utils.debug_tools import setup_debug_tools
 
-# Parse config for olso configs. Try to move all config parsing to oslo cfg
-elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
-cfg.CONF.register_group(elastic_search_group)
-elastic_search_opts = [
-    cfg.BoolOpt(name='search_enabled', default=False),
-    cfg.ListOpt('server_list',
-                item_type=cfg.types.String(),
-                default='127.0.0.1:9200',
-                help="Multiple servers option"),
-    cfg.BoolOpt(name='enable_sniffing', default=False,
-                help="Enable connection sniffing for elastic search driver"),
-
-    cfg.ListOpt('log_server_list',
-                item_type=cfg.types.String(),
-                default='127.0.0.1:9200',
-                help="Multiple servers option for es log servers"),
-    cfg.IntOpt(name='timeout', default=5, help="Default timeout in seconds for elastic search operations"),
-    cfg.StrOpt(name='search_client', default=None, help="VncDBSearch client implementation"),
-    cfg.StrOpt(name='update', choices=["partial", "script"], default="script", help="update type for elastic search"),
-    cfg.IntOpt(name='number_of_shards', default=2),
-    cfg.IntOpt(name='number_of_replicas', default=1)
-]
-
-for opt in elastic_search_opts:
-    try:
-        cfg.CONF.register_cli_opt(opt, group=elastic_search_group)
-    except ArgsAlreadyParsedError:
-        pass
 
 RBAC_RULE = 'rbac_rule'
 MULTI_TENANCY = 'multi_tenancy'
