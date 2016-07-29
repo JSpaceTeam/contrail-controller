@@ -183,20 +183,6 @@ def error_503(err):
     return err.body
 # end error_503
 
-#Parse config for olso configs. Try to move all config parsing to oslo cfg
-elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
-cfg.CONF.register_cli_opt(cfg.BoolOpt(name='search_enabled', default=False),
-                              group=elastic_search_group)
-cfg.CONF.register_cli_opt(cfg.ListOpt('server_list',
-                                          item_type=cfg.types.String(),
-                                          default='127.0.0.1:9200',
-                                          help="Multiple servers option"), group=elastic_search_group)
-cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing',default=False,
-                                          help="Enable connection sniffing for elastic search driver")
-                              ,group=elastic_search_group)
-
-cfg.CONF.register_cli_opt(cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
-                          group=elastic_search_group)
 
 class OWERTYPE(object):
     DEFAULT = 1
