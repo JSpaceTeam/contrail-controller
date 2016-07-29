@@ -2417,18 +2417,22 @@ class VncSearchDbClient(VncSearchItf):
         index_settings = index_settings or {"settings": {"number_of_shards": shards, "number_of_replicas": replicas}}
         while True:
             try:
-                opts = {}
+                opts = {
+                    'retry_on_timeout': True,
+                    'max_retries': 3
+                }
+
                 if cfg.CONF.elastic_search.enable_sniffing:
                     # sniff_on_start=True,
                     # refresh nodes after a node fails to respond
                     # sniff_on_connection_fail=True,
                     # and also every 60 seconds
                     # sniffer_timeout=60)
-                    opts = {
+                    opts.update({
                         'sniff_on_start': True,
                         'sniff_on_connection_fail': True,
                         'sniffer_timeout': 60
-                    }
+                    })
                 self._es_client = Elasticsearch(hosts=elastic_srv_list,
                                                 timeout=timeout, **opts)
 
