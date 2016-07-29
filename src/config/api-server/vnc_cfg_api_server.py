@@ -5,9 +5,7 @@
 This is the main module in vnc_cfg_api_server package. It manages interaction
 between http/rest, address management, authentication and database interfaces.
 """
-from decimal import Decimal, InvalidOperation
 
-from cfgm_common.errorcodes import CommonException
 from gevent import monkey
 monkey.patch_all()
 from gevent import hub
@@ -34,6 +32,9 @@ from lxml import etree
 from oslo_config import cfg
 #import GreenletProfiler
 from gen.vnc_api_client_gen import SERVICE_PATH
+from decimal import Decimal, InvalidOperation
+from oslo_config.cfg import ArgsAlreadyParsedError
+from cfgm_common.errorcodes import CommonException
 logger = logging.getLogger(__name__)
 
 """
@@ -579,6 +580,8 @@ class VncApiServer(object):
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
+        except OperationRollBackException:
+            raise
         except Exception as e:
             err_msg = 'In post_%s_create an extension had error for %s' \
                       %(obj_type, obj_dict)
@@ -812,6 +815,8 @@ class VncApiServer(object):
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
+        except OperationRollBackException:
+            raise
         except Exception as e:
             err_msg = 'In post_%s_update an extension had error for %s' \
                       %(obj_type, obj_dict)
