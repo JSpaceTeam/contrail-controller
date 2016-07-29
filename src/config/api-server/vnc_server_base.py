@@ -48,7 +48,7 @@ elastic_search_opts = [
                 item_type=cfg.types.String(),
                 default='127.0.0.1:9200',
                 help="Multiple servers option for es log servers"),
-    cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
+    cfg.IntOpt(name='timeout', default=5, help="Default timeout in seconds for elastic search operations"),
     cfg.StrOpt(name='search_client', default=None, help="VncDBSearch client implementation"),
     cfg.StrOpt(name='update', choices=["partial", "script"], default="script", help="update type for elastic search"),
     cfg.IntOpt(name='number_of_shards', default=2),
