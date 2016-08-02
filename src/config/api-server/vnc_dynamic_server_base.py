@@ -31,6 +31,8 @@ from lxml import etree
 from oslo_config import cfg
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 
+from cfgm_common.exceptions import NoIdError
+
 logger = logging.getLogger(__name__)
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -61,6 +63,7 @@ _WITH_CHILDS = 'children'
 _VERTEX_DEPENDENCY = 'vertex_extn'
 _DRAFT_DEPENDENCY = 'draft_uuid'
 _DB_OBJ_DICT = 'db_obj_dict'
+_DB_OBJ_ID = 'db_obj_id'
 _DB_OBJ_XML = 'db_obj_xml'
 _CUR_OBJ_XML = 'cur_obj_xml'
 _QUERY_PARAMS = 'query_params'
@@ -75,7 +78,8 @@ route_key = 'dynamic_route'
 route_exchange = Exchange('dynamic_route_exchange', type='direct')
 route_queue = Queue('dynamic_route_queue', route_exchange, routing_key=route_key)
 
-autogen_props = {'uri', 'parent_uri', 'parent_uuid', 'parent_type', 'uuid', 'perms2', 'id_perms', 'display_name', 'fq_name'}
+autogen_props = {'uri', 'parent_uri', 'parent_uuid', 'parent_type', 'uuid', 'perms2', 'id_perms', 'display_name',
+                 'fq_name'}
 
 _FQ_NAME, _UUID, _PARENT_UUID, _TOTAL = 'fq_name', 'uuid', 'parent_uuid', 'total'
 
@@ -84,6 +88,7 @@ _FQ_NAME, _UUID, _PARENT_UUID, _TOTAL = 'fq_name', 'uuid', 'parent_uuid', 'total
 YANG_SCHEMAS_OBJS = {}
 _XML_PREFIX = ':'
 _CSP_PREFIX = '$'
+_PROPERTIES_PFX = 'prop:'
 
 
 class VncApiDynamicServerBase(VncApiServerBase):
@@ -355,11 +360,11 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
                 if _VERTEX_DEPENDENCY in qry_dict:
                     server_obj._invoke_dynamic_extension("process_vertex_dependency", obj_type, obj_dict,
-                                                         db_obj_dict=db_obj_dict, generate_xml=True)
+                                                         db_obj_dict=db_obj_dict, db_obj_id=uuid, generate_xml=True)
 
                 if _DRAFT_DEPENDENCY in qry_dict:
-                    server_obj._invoke_dynamic_extension("process_draft_dependency", obj_type, obj_dict, db_obj_dict=db_obj_dict,
-                                                         generate_xml=True)
+                    server_obj._invoke_dynamic_extension("process_draft_dependency", obj_type, obj_dict,
+                                                         db_obj_dict=db_obj_dict, db_obj_id=uuid, generate_xml=True)
                 else:
                     return func(server_obj, resource_type, *args, **kwargs)
             except Exception as e:
@@ -423,6 +428,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         obj_dict = self.get_req_json_obj()
         self._invoke_dynamic_extension("pre_dynamic_resource_update", obj_type, obj_dict)
         res_obj_dict = dict()
+        path_nodes = []
         try:
             # Get the YangElement Object
             yang_element = self.get_yang_element(obj_type, obj_dict)
@@ -466,6 +472,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
         obj_dict = self.get_req_json_obj()
         self._invoke_dynamic_extension("pre_dynamic_resource_patch", obj_type, obj_dict)
         res_obj_dict = dict()
+        path_nodes = []
         try:
             yang_element = self.get_yang_element(obj_type, obj_dict)
             yang_element.uuid = id
@@ -692,11 +699,13 @@ class VncApiDynamicServerBase(VncApiServerBase):
 
     # end _load_dynamic_extensions
 
-    def _invoke_dynamic_extension(self, method_name, obj_type, obj_dict, db_obj_dict=None, generate_xml=False):
+    def _invoke_dynamic_extension(self, method_name, obj_type, obj_dict, db_obj_dict=None, db_obj_id=None,
+                                  generate_xml=False):
         try:
             params = dict()
             params[_QUERY_PARAMS] = self.get_req_query_obj()
             params[_DB_OBJ_DICT] = db_obj_dict
+            params[_DB_OBJ_ID] = db_obj_id
             params[_REQUEST_TYPE] = self.get_req_method()
 
             if generate_xml:
@@ -732,6 +741,10 @@ class VncApiDynamicServerBase(VncApiServerBase):
     def _dynamic_resource_patch(self, yang_element, operation=None, parent=None):
         if not yang_element.is_vertex():
             return
+
+        if operation is None or operation == '':
+            operation = _UPDATE_OPERATION
+
         if operation == _CREATE_OPERATION:
             self._dynamic_resource_create(yang_element, parent)
 
@@ -835,6 +848,55 @@ class VncApiDynamicServerBase(VncApiServerBase):
         obj_dict = content[resource_type]
         element.uuid = obj_dict['uuid']
         element.uri = obj_dict["uri"]
+
+    def __get_cassandra_db_client(self):
+        return self._db_conn._cassandra_db
+
+    def __get_obj_uuid_cf(self):
+        db_client = self.__get_cassandra_db_client()
+
+        if db_client:
+            return db_client._obj_uuid_cf
+
+        return None
+
+    def object_multi_read(self, res_type, obj_uuids, properties):
+        if obj_uuids is None or properties is None:
+            return
+
+        obj_uuid_cf = self.__get_obj_uuid_cf()
+
+        if not obj_uuid_cf:
+            return False, Exception('Unable to fetch Cassandra DB Client')
+
+        column_names = []
+        for column in properties:
+            column_names.append(_PROPERTIES_PFX + column)
+
+        try:
+            obj_rows = obj_uuid_cf.multiget(obj_uuids,
+                                            columns=column_names,
+                                            column_count=len(column_names),
+                                            include_timestamp=True)
+        except Exception as e:
+            return False, NoIdError('ID does not exist: Message {}'.format(e.message))
+
+        results = []
+        for row_key in obj_rows:
+            obj_uuid = row_key
+            obj_cols = obj_rows[obj_uuid]
+            result = {}
+            result['uuid'] = obj_uuid
+
+            for col_name in obj_cols.keys():
+                (_, prop_name) = col_name.split(':')
+                result[prop_name] = json.loads(obj_cols[col_name][0])
+
+            results.append(result)
+        # end for all rows
+
+        return (True, results)
+        # end object_multi_read
 
     def _get_id_from_fq_name(self, resource_type, fq_name):
         uuid = None
@@ -1131,7 +1193,8 @@ class VncApiDynamicServerBase(VncApiServerBase):
             if self.get_vnc_zk_client().exists(path):
                 # If path exist that means something went wrong in previous transaction (due to system or connection failure)
                 # So previous transaction which is not completed / failed has to be rolled backed or cleaned up
-                logger.debug("Rollback needed for the failed transaction for operation " + operation + " and path " + path)
+                logger.debug(
+                    "Rollback needed for the failed transaction for operation " + operation + " and path " + path)
                 rollback_paths.append(path)
 
         # Check if any data has to be rolled back (system or connection failure)
