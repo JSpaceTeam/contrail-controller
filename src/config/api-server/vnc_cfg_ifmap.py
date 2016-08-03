@@ -2784,6 +2784,59 @@ class VncSearchDbClient(VncSearchItf):
 # end VncSearchDbClient
 
 
+class VncSearchDBMultiIndexClient(VncSearchDbClient):
+    """
+    Search client that supports multi index, i.e index per object
+    """
+    def __init__(self, db_client_mgr, msg_bus, elastic_srv_list,
+                 index_settings=None, reset_config=False, timeout=10):
+        VncSearchDbClient.__init__(self, db_client_mgr, msg_bus, elastic_srv_list,
+                                   index_settings=index_settings,
+                                   reset_config=reset_config, timeout=timeout)
+
+    def get_indices(self):
+        from gen.vnc_es_schema import get_es_schema
+        index, mapping = get_es_schema()
+        mappings = mapping.get('mappings')
+        new_indices = []
+        for key in mappings.keys():
+            #key = key.replace("-", "_")
+            data = mappings.get(key)
+            temp = {'mappings':
+                    {key: data
+                     }
+                    }
+
+            new_index = '%s-%s'%(index, key)
+
+            new_indices.append((index, new_index, temp))
+        return new_indices
+
+    def initialize_index_schema(self, reset_config, index_setting=None):
+        indices = self.get_indices()
+        mapped_doc_types = []
+        for d in indices:
+            base_index, index, mapping = d
+            index, docs = self._init_index(index, mapping, reset_config, index_setting)
+            mapped_doc_types.extend(docs)
+        return base_index, mapped_doc_types
+
+    def get_index(self, obj_type):
+        '''
+        return index based on object type if object_type is None its for suggest query,
+        so return all relevant indexes when
+        obj_type is None
+        Args:
+            obj_type:
+
+        Returns:
+
+        '''
+        return "%s-%s"%(self._index, obj_type)
+
+#end VncSearchDBMultiIndexClient
+
+
 class VncNoOpEsDb(VncSearchItf):
     def search_create(self, obj_type, obj_ids, obj_dict):
         pass
