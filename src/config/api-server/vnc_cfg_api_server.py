@@ -2864,11 +2864,16 @@ class VncApiServer(object):
         tenant_name = env.get(hdr_server_tenant(), 'default-project')
         tenant_fq_name = ['default-domain', tenant_name]
         tenant = None
+        shared_uuids = []
         try:
             tenant_uuid = self._db_conn.fq_name_to_uuid('project', tenant_fq_name)
             if self.is_multi_tenancy_set() and not self.is_admin_request():
                 tenant = tenant_uuid.replace('-','')
             shares = self._db_conn.get_shared_objects(obj_type, tenant_uuid)
+            if not obj_uuids:
+                # Add shared objects only if there is no id filtering.
+                shared_uuids = [uuid for uuid,_ in shares]
+
         except NoIdError:
             shares = []
         if cfg.CONF.elastic_search.search_enabled:
@@ -2876,7 +2881,7 @@ class VncApiServer(object):
             self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_INFO)
 
         (ok, result, total) = self._db_conn.dbe_list(obj_type,
-                             parent_uuids, back_ref_uuids, obj_uuids, is_count,
+                             parent_uuids, back_ref_uuids, obj_uuids, is_count, shared_uuids=shared_uuids,
                              filters=filters, body=body, params=params)
         if not ok:
             self.config_object_error(None, None, '%ss' %(obj_type),
@@ -2895,14 +2900,14 @@ class VncApiServer(object):
                 total -= 1
 
         # include objects shared with tenant
-        for (obj_uuid, obj_perm) in shares:
-            try:
-                fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
-                result.append((fq_name, obj_uuid))
-                total += 1
-            except NoIdError:
-                # uuid no longer valid. Delete?
-                pass
+        # for (obj_uuid, obj_perm) in shares:
+        #     try:
+        #         fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
+        #         result.append((fq_name, obj_uuid))
+        #         total += 1
+        #     except NoIdError:
+        #         # uuid no longer valid. Delete?
+        #         pass
         fq_names_uuids = result
         obj_dicts = []
         if not is_detail:
