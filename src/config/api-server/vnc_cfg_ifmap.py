@@ -2508,7 +2508,7 @@ class VncSearchDbClient(VncSearchItf):
     # dbe_trace
 
     def trace_message(self, message, error_msg=""):
-        self.logger.warn(self.SEARCH_DB_MESSAGE.format(message, error_msg))
+        self.logger.debug(self.SEARCH_DB_MESSAGE.format(message, error_msg))
 
     # trace_message
 
