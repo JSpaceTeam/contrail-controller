@@ -197,9 +197,13 @@ class ErrorCodes(object):
                 content = getattr(exceptionObj, ErrorCodes.CONTENT)
                 error_json[ErrorCodes.ERROR_APP_MESSAGE] = content
 
-            #still no error_app_message, then set it to empty string
+            #still no error_app_message, then set it to exception string
             if not error_json.has_key(ErrorCodes.ERROR_APP_MESSAGE):
-                error_json[ErrorCodes.ERROR_APP_MESSAGE] = ''
+                ex_msg = str(exceptionObj)
+                #truncate very long strings
+                if len(ex_msg) > 1000:
+                    ex_msg = ex_msg[0:1000]
+                error_json[ErrorCodes.ERROR_APP_MESSAGE] = ex_msg
 
             if hasattr(exceptionObj, ErrorCodes.CAUSE):
                 cause = getattr(exceptionObj, ErrorCodes.CAUSE)
