@@ -884,7 +884,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
                             input_properties = qry_dict['properties']
                             input_property = input_properties[0].split(",")
                             for property in input_property:
-                                properties.append(path_resource_type + _HIERARCHY_KEY + property)
+                                properties.append(obj_type + _HIERARCHY_KEY + property)
                         else:
                            properties = self.get_fields(path_resource_type, obj_type)
                         ok, res_list = self.object_multi_read(res_uuids, properties)
