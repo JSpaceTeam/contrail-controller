@@ -69,6 +69,7 @@ _SUBTREE = 'subtree'
 
 _PARENT_TYPE = 'parent_type'
 _PARENT_ID = 'parent_id'
+_INCLUDE_AUTOGEN_PROPS = 'autogen-prop'
 
 # Register RabbitMQ Configuration
 route_key = 'dynamic_route'
@@ -86,7 +87,7 @@ COLLAPSED_XPATHS = {}
 _XML_PREFIX = ':'
 _CSP_PREFIX = '$'
 _PROPERTIES_PFX = 'prop:'
-_HIERARCHY_KEY = "@"
+_HIERARCHY_KEY = "@" #This will be unique parameter
 FORWARD_PREFIX = '\\'
 
 
@@ -259,16 +260,16 @@ class VncApiDynamicServerBase(VncApiServerBase):
             if yin_schema is None:
                 yang_content = req['yang-content']
                 module_name = req['module-name']
-            if not os.path.exists(TEMP_DIR):  # pragma: no cover
-                os.makedirs(TEMP_DIR)
-            file_name = TEMP_DIR + "/" + module_name
-            file_obj = open(file_name, 'w')
-            file_obj.write(yang_content)
-            file_obj.close()
-            # Run the pyang command to generate the yin(xml) format
-            pyang_cmd_prefix = "pyang -p " + TEMP_DIR + " -f yin "
-            pyang_cmd = pyang_cmd_prefix + file_name
-            yin_schema = commands.getoutput(pyang_cmd)
+                if not os.path.exists(TEMP_DIR):  # pragma: no cover
+                    os.makedirs(TEMP_DIR)
+                file_name = TEMP_DIR + "/" + module_name
+                file_obj = open(file_name, 'w')
+                file_obj.write(yang_content)
+                file_obj.close()
+                # Run the pyang command to generate the yin(xml) format
+                pyang_cmd_prefix = "pyang -p " + TEMP_DIR + " -f yin "
+                pyang_cmd = pyang_cmd_prefix + file_name
+                yin_schema = commands.getoutput(pyang_cmd)
             xml_tree = etree.parse(BytesIO(yin_schema), etree.XMLParser())
             module_element = xml_tree.getroot()
             default_ns = "{" + module_element.nsmap[None] + "}"
@@ -772,6 +773,11 @@ class VncApiDynamicServerBase(VncApiServerBase):
             logger.debug('**** End **** http_dynamic_resource_read method ' + resource_type)
             res_obj_dict = json.loads(json.dumps(res_obj_dict).replace(_CSP_PREFIX, _XML_PREFIX))
             res_obj_dict = self._expand_yang_element(res_obj_dict)
+
+            if _INCLUDE_AUTOGEN_PROPS in qry_dict:
+                cls = self.get_resource_class(obj_type)
+                self._remove_auto_gen_prop(res_obj_dict[obj_type], cls)
+
             return res_obj_dict
         except cfgm_common.exceptions.HttpError as he:
             raise he
@@ -878,7 +884,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
                             input_properties = qry_dict['properties']
                             input_property = input_properties[0].split(",")
                             for property in input_property:
-                                properties.append(path_resource_type + '@' + property)
+                                properties.append(path_resource_type + _HIERARCHY_KEY + property)
                         else:
                            properties = self.get_fields(path_resource_type, obj_type)
                         ok, res_list = self.object_multi_read(res_uuids, properties)
@@ -948,9 +954,9 @@ class VncApiDynamicServerBase(VncApiServerBase):
                         if field.startswith(obj_type):
                             properties.append(field)
                     return properties
-                elif '@' not in obj_type:
+                elif _HIERARCHY_KEY not in obj_type:
                     for field in all_fields:
-                        tkn = field.split('@')
+                        tkn = field.split(_HIERARCHY_KEY)
                         if len(tkn) == 2 and field.startswith(obj_type):
                             properties.append(field)
                     return properties
@@ -971,7 +977,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
                     fqs = db_data['fq_name']
                     if len(fqs) > 1:
                         fqs = fqs[:-1]
-                    fq_name_str = '@'.join(fqs)
+                    fq_name_str = _HIERARCHY_KEY.join(fqs)
                     parent = None
                     if fq_name_str in resource_type_cache:
                         parent = resource_type_cache[fq_name_str]
@@ -982,7 +988,7 @@ class VncApiDynamicServerBase(VncApiServerBase):
                             parent[resource_type].append(db_data)
                     else:
                         response_obj_dict[resource_type] = db_data
-                    resource_type_cache['@'.join(db_data['fq_name'])] = db_data
+                    resource_type_cache[_HIERARCHY_KEY.join(db_data['fq_name'])] = db_data
         response_obj_dict = self._expand_yang_element(response_obj_dict)
         return response_obj_dict
 
