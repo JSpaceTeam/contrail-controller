@@ -824,8 +824,8 @@ class VncApiDynamicServerBase(VncApiServerBase):
             yangSchemaMgr = YangSchemaMgr()
             final_response_obj_list = list()
             subtree_params = req_dict['filters']
+            response_objs = list()
             for path in subtree_params:
-                response_objs = list()
                 path_objects = []
                 fqn_name_list = []
                 path_elem_list = path.split('/')
@@ -865,15 +865,27 @@ class VncApiDynamicServerBase(VncApiServerBase):
                             else:
                                 query_string = ''
                     else:
-                        if index != 0:
-                            if len(res_list) > 0:
-                                fqs = []
-                                for res in res_list:
-                                    query = "%s = %s" % ("fq_name_string", ":".join(res['fq_name']))
-                                    fqs.append(query)
-                                query_string = " or ".join(fqs)
-                            else:
-                                query_string = ''
+                        rclass = self.get_resource_class(obj_type)
+                        if rclass is None:
+                            if index != 0:
+                                if len(res_list) > 0:
+                                    fqs = []
+                                    for res in res_list:
+                                        query = "%s = %s" % ("fq_name_string", ":".join(res['fq_name']))
+                                        fqs.append(query)
+                                    query_string = " or ".join(fqs)
+                                else:
+                                    query_string = ''
+                        else:
+                            if index != 0:
+                                if len(res_list) > 0:
+                                    fqs = []
+                                    for res in res_list:
+                                        query = "%s like %s" % ("fq_name_string", ":".join(res['fq_name']) + ":")
+                                        fqs.append(query)
+                                    query_string = " or ".join(fqs)
+                                else:
+                                    query_string = ''
 
                     if query_string is None or len(query_string) > 0:
                         qry_dict = self.get_req_query_obj()
@@ -902,9 +914,8 @@ class VncApiDynamicServerBase(VncApiServerBase):
                            properties = self.get_fields(path_resource_type, obj_type)
                         ok, res_list = self.object_multi_read(res_uuids, properties)
                         response_objs.append({obj_type: res_list})
-                response_obj_dict = self.update_db_response_expand_dict(response_objs)
-                final_response_obj_list.append(response_obj_dict)
-            return {resource_type : final_response_obj_list}
+            response_obj_dict = self.update_db_response_expand_dict(response_objs)
+            return response_obj_dict
         return None
 
     def __get_cassandra_db_client(self):
@@ -996,12 +1007,19 @@ class VncApiDynamicServerBase(VncApiServerBase):
                         parent = resource_type_cache[fq_name_str]
                     if parent:
                         if resource_type not in parent:
-                            parent[resource_type] = [db_data]
+                            if _HIERARCHY_KEY.join(db_data['fq_name']) == _HIERARCHY_KEY.join(parent['fq_name']):
+                                parent.update(db_data)
+                            else:
+                                parent[resource_type] = [db_data]
                         else:
-                            parent[resource_type].append(db_data)
+                            if _HIERARCHY_KEY.join(db_data['fq_name']) == _HIERARCHY_KEY.join(parent['fq_name']):
+                                parent[resource_type].update(db_data)
+                            else:
+                                parent[resource_type].append(db_data)
                     else:
                         response_obj_dict[resource_type] = db_data
-                    resource_type_cache[_HIERARCHY_KEY.join(db_data['fq_name'])] = db_data
+                    if _HIERARCHY_KEY.join(db_data['fq_name']) not in resource_type_cache:
+                        resource_type_cache[_HIERARCHY_KEY.join(db_data['fq_name'])] = db_data
         response_obj_dict = self._expand_yang_element(response_obj_dict)
         return response_obj_dict
 
