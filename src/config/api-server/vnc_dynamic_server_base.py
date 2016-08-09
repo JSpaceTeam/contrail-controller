@@ -347,7 +347,10 @@ class VncApiDynamicServerBase(VncApiServerBase):
                     node_name = yang_element.get_element_name()
                     _node_name = node_name.replace('-', '_')
                     node = mappings_node[_node_name] = {}
-                    node_prop = node['properties'] = {}
+                    fq_name_string_index = {'type': 'string', 'index': 'analyzed',
+                                            'fields': {'_raw': {'type': 'string', 'index': 'not_analyzed'},
+                                                       '_%s_suggest' % module_name: {'type': 'completion'}}}
+                    node_prop = node['properties'] = {'fq_name_string': fq_name_string_index}
                     self.generate_es_schema(yang_element, node_prop, mapping_list, module_name)
         for mapping_data in mapping_list:
             mapping[module_name]['mappings'].update(mapping_data)
@@ -859,6 +862,16 @@ class VncApiDynamicServerBase(VncApiServerBase):
                                     query = "%s like %s" % ("fq_name_string", ":".join(res['fq_name']) + ":")
                                     fqs.append(query)
                                 query_string = query_string + " and " + " or ".join(fqs)
+                            else:
+                                query_string = ''
+                    else:
+                        if index != 0:
+                            if len(res_list) > 0:
+                                fqs = []
+                                for res in res_list:
+                                    query = "%s = %s" % ("fq_name_string", ":".join(res['fq_name']))
+                                    fqs.append(query)
+                                query_string = " or ".join(fqs)
                             else:
                                 query_string = ''
 
