@@ -1017,7 +1017,14 @@ class VncApiDynamicServerBase(VncApiServerBase):
                             else:
                                 parent[resource_type].append(db_data)
                     else:
-                        response_obj_dict[resource_type] = db_data
+                        if resource_type in response_obj_dict:
+                            data = response_obj_dict[resource_type]
+                            if isinstance(data, dict):
+                                data = [data]
+                            data.append(db_data)
+                            response_obj_dict[resource_type] = data
+                        else:
+                            response_obj_dict[resource_type] = db_data
                     if _HIERARCHY_KEY.join(db_data['fq_name']) not in resource_type_cache:
                         resource_type_cache[_HIERARCHY_KEY.join(db_data['fq_name'])] = db_data
         response_obj_dict = self._expand_yang_element(response_obj_dict)
