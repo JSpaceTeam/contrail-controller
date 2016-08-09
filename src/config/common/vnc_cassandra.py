@@ -1219,6 +1219,7 @@ class VncCassandraClient(object):
     def get_shared(self, obj_type, share_id = '', share_type = 'global'):
         result = []
         method_name = obj_type.replace('-', '_')
+        method_name = self._get_obj_type_to_db_type(method_name)
         col_start = '%s:%s:' % (share_type, share_id)
         col_fin = '%s:%s;' % (share_type, share_id)
         try:
@@ -1244,12 +1245,14 @@ class VncCassandraClient(object):
     def set_shared(self, obj_type, obj_id, share_id = '', share_type = 'global', rwx = 7):
         col_name = '%s:%s:%s' % (share_type, share_id, obj_id)
         method_name = obj_type.replace('-', '_')
+        method_name = self._get_obj_type_to_db_type(method_name)
         self._obj_shared_cf.insert(method_name, {col_name : json.dumps(rwx)})
 
     # delete share of 'obj_id' object with <share_type:share_id>
     def del_shared(self, obj_type, obj_id, share_id = '', share_type = 'global'):
         col_name = '%s:%s:%s' % (share_type, share_id, obj_id)
         method_name = obj_type.replace('-', '_')
+        method_name = self._get_obj_type_to_db_type(method_name)
         self._obj_shared_cf.remove(method_name, columns=[col_name])
 
     def _read_child(self, result, obj_uuid, child_type,
