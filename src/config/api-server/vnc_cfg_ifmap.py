@@ -2087,8 +2087,6 @@ class VncDbClient(object):
                  paginate_start=None, paginate_count=None, body=None, params=None):
         if count:
             if obj_uuids or parent_uuids or back_ref_uuids or filters or not self._search_db.enabled(obj_type):
-                if shared_uuids: # if shared uuids there is no obj uuid
-                    obj_uuids = shared_uuids
                 (ok, total) = self._cassandra_db.object_list(obj_type, parent_uuids=parent_uuids,
                                                              back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
                                                              count=count, filters=filters)
@@ -2098,8 +2096,6 @@ class VncDbClient(object):
                 return (ok, None, result)
         else:
             if obj_uuids or parent_uuids or back_ref_uuids or filters or not self._search_db.enabled(obj_type):
-                if shared_uuids: # if shared uuids there is no obj uuid
-                    obj_uuids = shared_uuids
                 (ok, cassandra_result) = self._cassandra_db.object_list(
                     obj_type, parent_uuids=parent_uuids,
                     back_ref_uuids=back_ref_uuids, obj_uuids=obj_uuids,
