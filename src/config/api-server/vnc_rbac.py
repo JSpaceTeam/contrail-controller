@@ -284,7 +284,7 @@ class VncRbac(object):
             ok = x[0][1][1]
             idx= x[0][1][0]
 
-            if ok and (len(rule_obj) > 0) and (len(role_obj) > 0):
+            if ok and rule_obj and role_obj:
                 msg = 'Matched rule %2d) %s %s' %(idx, rule_obj[idx - 1], role_obj[idx - 1])
                 self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
 
