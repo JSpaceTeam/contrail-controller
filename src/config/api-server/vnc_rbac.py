@@ -245,6 +245,8 @@ class VncRbac(object):
         # match all rules - longest prefix match wins
         result = {}
         idx = 1
+        rule_obj = []
+        role_obj = []
         for rule in rule_list:
             o = rule['rule_object']
             f = rule['rule_field']
@@ -253,6 +255,8 @@ class VncRbac(object):
             for perm in p:
                 ps += perm['role_name'] + ':' + perm['role_crud'] + ','
             o_f = "%s.%s" % (o,f) if f else o
+            rule_obj.append(o_f)
+            role_obj.append(ps)
             # check CRUD perms if object and field matches
             length = -1; match = False
             if o == '*' or \
@@ -271,16 +275,21 @@ class VncRbac(object):
                 match = True if True in role_match else False
                 result[length] = (idx, match)
             msg = 'Rule %2d) %32s   %32s (%d,%s)' % (idx, o_f, ps, length, match)
-            self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
+            #self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
             idx += 1
 
         ok = False
         if len(result) > 0:
             x = sorted(result.items(), reverse = True)
             ok = x[0][1][1]
+            idx= x[0][1][0]
 
         # temporarily allow all access to admin till we figure out default creation of rbac group in domain
         ok = ok or is_admin
+
+        if ok:
+           msg = 'Matched rule %2d) %s %s' %(idx, rule_obj[idx - 1], role_obj[idx - 1])
+           self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
 
         msg = "%s admin=%s, u=%s, r='%s'" \
             % ('+++' if ok else '\n---',
