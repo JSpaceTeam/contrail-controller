@@ -2893,11 +2893,14 @@ class VncApiServer(object):
             return {'%s' %(resource_type): {'count': total}}
 
         # filter out items not authorized
+        pending_result = []
         for fq_name, uuid in result:
             (ok, status) = self._permissions.check_perms_read(get_request(), uuid)
             if not ok and status[0] == 403:
-                result.remove((fq_name, uuid))
                 total -= 1
+            else:
+                pending_result.append((fq_name, uuid))
+        result = pending_result
 
         #include objects shared with tenant
         for (obj_uuid, obj_perm) in shares:
