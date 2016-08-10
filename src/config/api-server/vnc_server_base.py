@@ -1,8 +1,8 @@
 from gevent import monkey
-
 monkey.patch_all()
+from oslo_config.cfg import ArgsAlreadyParsedError
+import gc
 import abc
-import locale
 
 """
 Overriding the base api_stats logger to do nothing
@@ -27,40 +27,11 @@ from bottle import request
 from gen.resource_xsd import *
 from cfgm_common.vnc_extensions import ExtensionManager, ApiHookManager
 from pysandesh.sandesh_base_logger import SandeshBaseLogger
-from csp_services_common import cfg
-from cfgm_common.errorcodes import ErrorCodes
+from csp_services_common import cfg, RpcClient
+from cfgm_common.errorcode_utils import ErrorCodeRepo
 from gen.vnc_api_client_gen import *
+from csp_services_common.utils.debug_tools import setup_debug_tools
 
-# Parse config for olso configs. Try to move all config parsing to oslo cfg
-elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
-cfg.CONF.register_cli_opt(cfg.BoolOpt(name='search_enabled', default=False),
-                          group=elastic_search_group)
-cfg.CONF.register_cli_opt(cfg.ListOpt('server_list',
-                                      item_type=cfg.types.String(),
-                                      default='127.0.0.1:9200',
-                                      help="Multiple servers option"), group=elastic_search_group)
-cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing', default=False,
-                                      help="Enable connection sniffing for elastic search driver")
-                          , group=elastic_search_group)
-
-cfg.CONF.register_cli_opt(cfg.ListOpt('log_server_list',
-                          item_type=cfg.types.String(),
-                          default='127.0.0.1:9200',
-                          help="Multiple servers option for es log servers"),
-                          group=elastic_search_group)
-
-cfg.CONF.register_cli_opt(
-    cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
-    group=elastic_search_group)
-
-cfg.CONF.register_cli_opt(
-    cfg.StrOpt(name='search_client', default=None, help="VncDBSearch client implementation"),
-    group=elastic_search_group)
-
-cfg.CONF.register_cli_opt(
-    cfg.StrOpt(name='update',choices=["partial", "script"], default="script",
-               help="update type for elastic search"),
-    group=elastic_search_group)
 
 RBAC_RULE = 'rbac_rule'
 MULTI_TENANCY = 'multi_tenancy'
@@ -77,8 +48,19 @@ class Policy(object):
     def get_default_rbac_rule(self):
         return self.policy_json.get(RBAC_RULE).get('default')
 
+    def get_service_rbac_rule(self):
+        default_rules = self.policy_json.get(RBAC_RULE).get('default')
+        service_rules = self.policy_json.get(RBAC_RULE).get('service')
+        if default_rules is None and service_rules is None:
+            return []
+        elif default_rules is not None and service_rules is not None:
+            return default_rules + service_rules
+        else:
+            return default_rules if service_rules is None else service_rules
+
     def get_multi_tenancy_rule(self):
         return self.policy_json.get(MULTI_TENANCY)
+
 
 system_resource_types = set([
     'config-root',
@@ -88,7 +70,8 @@ system_resource_types = set([
     'api-access-list',
     'project',
     'access-control-list',
-    ])
+])
+
 
 class VncApiServerBase(VncApiServer):
     __metaclass__ = abc.ABCMeta
@@ -108,6 +91,7 @@ class VncApiServerBase(VncApiServer):
         self.error_codes = None
         self._resource_classes = {}
         self._rpc_input_types = {}
+        self._enable_core_check = False
         for resource_type in all_resource_types:
             camel_name = cfgm_common.utils.CamelCase(resource_type)
             r_class_name = '%sServer' % (camel_name)
@@ -191,6 +175,9 @@ class VncApiServerBase(VncApiServer):
         bottle.route('/multi-tenancy', 'GET', self.mt_http_get)
         bottle.route('/multi-tenancy', 'PUT', self.mt_http_put)
 
+        # Add liveness test
+        self.route('/ready', 'GET', self.is_ready)
+
         # Initialize discovery client
         self._disc = None
         # Load extensions
@@ -237,6 +224,11 @@ class VncApiServerBase(VncApiServer):
                 logger.warn("Cannot load policy file, apply default policy")
             if policy:
                 self._update_default_rbac_rule(policy.get_default_rbac_rule())
+                service_api_access_list_fq_name = vnc_rbac.get_service_api_access_list_fqname()
+                # create default-rbac rule for service
+                self._create_default_rbac_rule(fq_name=service_api_access_list_fq_name)
+                self._update_default_rbac_rule(policy.get_service_rbac_rule(),
+                                               fq_name=service_api_access_list_fq_name)
                 self._update_multi_tenancy_rule(policy.get_multi_tenancy_rule())
 
         @bottle.hook('before_request')
@@ -244,12 +236,7 @@ class VncApiServerBase(VncApiServer):
             bottle.request.environ['PATH_INFO'] = bottle.request. \
                 environ['PATH_INFO'].rstrip('/')
 
-        # Start logger port
-        try:
-            listener = logging.config.listen(9999)
-            listener.start()
-        except Exception:
-            logging.error("Failed starting up logger config socket")
+        setup_debug_tools()
 
     # end __init__
 
@@ -294,14 +281,24 @@ class VncApiServerBase(VncApiServer):
 
     # end get_rpc_input_type
 
-    def _update_default_rbac_rule(self, rbac_rule):
+    def _update_default_rbac_rule(self, rbac_rule, fq_name=None):
         obj_type = 'api-access-list'
-        fq_name = ['default-domain', 'default-api-access-list']
+        rule_list = []
+        if not fq_name:
+            fq_name = ['default-domain', 'default-api-access-list']
         id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
         (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid': id})
-        obj_dict['api_access_list_entries'] = {'rbac_rule': rbac_rule}
+        if 'api_access_list_entries' in obj_dict:
+            api_access_list_entries = obj_dict['api_access_list_entries']
+            if 'rbac_rule' in api_access_list_entries:
+                if (api_access_list_entries['rbac_rule'])[0]:
+                    rule_list.extend(api_access_list_entries['rbac_rule'])
+
+        rule_list.extend(rbac_rule)
+        updated_rbac_rule = self._merge_rbac_rule(rule_list)
+        obj_dict['api_access_list_entries'] = {'rbac_rule': updated_rbac_rule}
         self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
-        logger.info("Updated default rbac rule")
+        logger.info("Updated default rbac rule for {}".format(fq_name))
 
     # end _update_default_rbac_rule
 
@@ -358,6 +355,10 @@ class VncApiServerBase(VncApiServer):
                   'POST',
                   obj.suggest_execute)
 
+    def enable_core_check(self):
+        self._enable_core_check = True
+
+
     @abc.abstractmethod
     def get_pipeline(self):
         pass
@@ -365,6 +366,18 @@ class VncApiServerBase(VncApiServer):
     def vnc_api_config_log(self, apiConfig):
         # we already fo API logging through the logging middleware.
         pass
+
+    def is_ready(self):
+        response = {'status': 'ready'}
+        if self._enable_core_check:
+            rpc_client = RpcClient.get_client()
+            try:
+                response = rpc_client.call(dict(), 'is_ready')
+            except Exception as e:
+                logging.error("Failed to get reply from core due to %s", e)
+                raise HttpError(503, 'Core service is not yet ready')
+        return response
+
 
     def http_rpc_post(self, resource_type):
         prop_type = self.get_rpc_input_type(resource_type)
@@ -374,7 +387,7 @@ class VncApiServerBase(VncApiServer):
         try:
             obj_dict = request.json[_key]
         except (KeyError, TypeError):
-            #Verify if input is needed
+            # Verify if input is needed
             if r_class.attr_fields:
                 raise HttpError(400, 'invalid request, key "%s" not found' % _key, "40001")
             else:
@@ -383,7 +396,6 @@ class VncApiServerBase(VncApiServer):
         obj_dict = {_key: obj_dict}
 
         prop_dict = obj_dict.get('input')
-
 
         try:
             if not self._args.disable_validation:
@@ -431,7 +443,7 @@ class VncApiServerBase(VncApiServer):
                 raise result
             if hasattr(result, 'status_code') and hasattr(result, 'content'):
                 raise HttpError(getattr(result, 'status_code'), getattr(result, 'content'), "40011")
-            raise result
+            raise
 
         return rsp_body
 
@@ -571,74 +583,31 @@ class VncApiServerBase(VncApiServer):
 
     # end _load_extensions
 
+
     def _load_error_codes(self):
         try:
-            common_errcodes_dir = cfg.CONF.ERROR_CODES.common_error_codes_dir
-            ms_errcodes_dir = cfg.CONF.ERROR_CODES.ms_error_codes_dir
-            if not common_errcodes_dir.endswith("/"):
-                common_errcodes_dir = common_errcodes_dir + "/"
-            if not ms_errcodes_dir.endswith("/"):
-                ms_errcodes_dir = ms_errcodes_dir + "/"
-
-            common_errcodes_file = cfg.CONF.ERROR_CODES.common_error_codes_file
-            ms_errcodes_file = cfg.CONF.ERROR_CODES.ms_error_codes_file
-            locale_name = self._get_locale_name()
-
-            common_errcodes_file_name = self._get_error_code_locale_file_name(common_errcodes_file, locale_name)
-            ms_errcodes_file_name = self._get_error_code_locale_file_name(ms_errcodes_file, locale_name)
-
-            err_codes = ErrorCodes(common_errcodes_dir + common_errcodes_file_name, ms_errcodes_dir + ms_errcodes_file_name)
-            self.error_codes = err_codes
-
+            error_code_repo = ErrorCodeRepo(cfg.CONF)
+            self.error_codes = error_code_repo.getErrorCodes()
         except Exception as e:
             err_msg = cfgm_common.utils.detailed_traceback()
             self.config_log("Exception in error_codes loading: %s" % (err_msg),
                             level=SandeshLevel.SYS_ERR)
 
-    #end _load_error_codes
-
-    def _get_locale_name(self):
-        use_localization = cfg.CONF.use_locales
-        locale_name = cfg.CONF.default_locale
-        if use_localization:
-            locale_tup = locale.getlocale(locale.LC_ALL)
-            if locale_tup is not None and locale_tup[0] is not None:
-                locale_name = locale_tup[0]
-            else:
-                locale_tup = locale.getdefaultlocale()
-                if locale_tup[0] is not None:
-                    locale_name = locale_tup[0]
-
-        return locale_name
-
-    #end _get_locale_name
-
-    def _get_error_code_locale_file_name(self, errcodes_file, locale_name):
-        errcodes_file_name = errcodes_file
-        try:
-            if errcodes_file is not None and locale_name is not None:
-                errcodes_file_name = errcodes_file.format(locale=locale_name)
-        except Exception as e:
-            err_msg = cfgm_common.utils.detailed_traceback()
-            self.config_log("Exception in creating error code filename with locale: %s" % (err_msg),
-                            level=SandeshLevel.SYS_ERR)
-
-        return errcodes_file_name
-    #end _get_error_code_locale_file_name
-
     def handle_error_code(self, exception):
         if exception is not None and self.error_codes:
             error_json = self.error_codes.get_error_json(exception)
-            setattr(exception, 'content', error_json)
+            if error_json and len(error_json) > 2:
+                setattr(exception, 'content', error_json)
             if not hasattr(exception, 'status_code'):
                 error_json_dict = json.loads(error_json)
                 if error_json_dict.has_key('status_code'):
                     setattr(exception, 'status_code', int(error_json_dict['status_code']))
 
-    #end handle_error_code
+    # end handle_error_code
 
 
-
+    def _find_objects(self, t):
+        return [o for o in gc.get_objects() if isinstance(o, t)]
 
     def start_server(self):
         import cgitb
@@ -654,9 +623,17 @@ class VncApiServerBase(VncApiServer):
             pipe_start_app = self.get_pipe_start_app()
             server_ip = self.get_listen_ip()
             server_port = self.get_server_port()
+            print "Start Backdoor on port %s " % self._args.api_backdoor_port
+            from gevent.backdoor import BackdoorServer
+            server = BackdoorServer(('127.0.0.1', self._args.api_backdoor_port),
+                                    banner="Welcome to the api server backdoor!",
+                                    locals={'server': self,
+                                            'fo': self._find_objects})
+            gevent.spawn(server.serve_forever)
             print ("BOTTLE RUN {} {} ".format(server_ip, server_port))
             bottle.run(app=pipe_start_app, host=server_ip, port=server_port,
                        server=get_bottle_server(self._args.max_requests))
+
         except KeyboardInterrupt:
             # quietly handle Ctrl-C
             pass

@@ -13,7 +13,7 @@ class VncDBRollBackHandler(object):
     This class handles roll back logic for DB changes
     """
 
-    def __init__(self, application_mgr, msg_bus, db_mgr, search_mgr):
+    def __init__(self, application_mgr, msg_bus, search_mgr):
         self._application_mgr = application_mgr
         self._msg_bus = msg_bus
         self._search_mgr = search_mgr

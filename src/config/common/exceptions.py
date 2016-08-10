@@ -182,3 +182,10 @@ class SearchServiceError(VncError):
         return 'Search Service unavailable : %s' % (str(self._message))
     # end __str__
 # end class SearchServiceError
+
+class OperationRollBackException(HttpError):
+    """
+    This exception can be raised by create/update post handlers if they have successfully been able
+    to rollback the operation in which case the API server will report the correct error back to API client
+    """
+    pass

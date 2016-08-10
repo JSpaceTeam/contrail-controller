@@ -1,6 +1,7 @@
 from cfgm_common import jsonutils as json
 import logging
 import copy
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,11 @@ class ErrorCodes(object):
     def __init__(self, common_errors_filePath, ms_errors_filePath=None):
         self.__error_codes = self.__read_from_file(common_errors_filePath)
 
-        if ms_errors_filePath is not None:
+        if ms_errors_filePath is not None and os.path.exists(ms_errors_filePath):
             self.__append_to_error_codes(ms_errors_filePath)
         else:
-            logger.warning('ms_errors_filePath is None')
+            logmsg = 'ms_errors_filePath is None' if ms_errors_filePath is None else 'ms_errors_filePath does not exist'
+            logger.warning(logmsg)
 
 
 
@@ -62,6 +64,24 @@ class ErrorCodes(object):
                     return error_code_details
 
         return None
+
+
+    def get_error_code_data(self, error_code, *args, **kwargs):
+        '''
+        This method returns a dictionary object with the error code details nested one level inside a dict object,
+        the key value being "error_data"
+        :param error_code: The error_code whose details should be returned
+        :return: dict with one member: key value being "error_data" and the value being the error_code details.
+        :rtype: dict
+        '''
+        error_code_details = self.get_error_code_details(error_code, *args, **kwargs)
+        if error_code_details is None:
+            return None
+        error_code_data = dict()
+        error_code_data['error_data'] = error_code_details
+
+        return error_code_data
+
 
 
     def __format_error_message(self, error_details_dict, args, kwargs):
@@ -150,7 +170,7 @@ class ErrorCodes(object):
                 error_code = getattr(exceptionObj, ErrorCodes.ERROR_CODE)
                 error_json[ErrorCodes.ERROR_CODE] = error_code
 
-                error_code_details = self.__get_error_code_details_formatted(exceptionObj, error_code)
+                error_code_details = self.__get_error_code_details_formatted(exceptionObj, str(error_code))
 
                 #add defaults from the error definition
                 if error_code_details is not None:
@@ -158,7 +178,7 @@ class ErrorCodes(object):
                         if error_code_details.has_key(attribute):
                             error_json[attribute] = error_code_details.get(attribute)
                 else:
-                    logger.warning('No details found for error_code ['+ error_code + ']. Possibly invalid error_code in exception.')
+                    logger.warning('No details found for error_code ['+ str(error_code) + ']. Possibly invalid error_code in exception.')
                     #return empty dict in this case
                     return dict()
 
@@ -177,9 +197,13 @@ class ErrorCodes(object):
                 content = getattr(exceptionObj, ErrorCodes.CONTENT)
                 error_json[ErrorCodes.ERROR_APP_MESSAGE] = content
 
-            #still no error_app_message, then get exception toString
+            #still no error_app_message, then set it to exception string
             if not error_json.has_key(ErrorCodes.ERROR_APP_MESSAGE):
-                error_json[ErrorCodes.ERROR_APP_MESSAGE] = str(exceptionObj)
+                ex_msg = str(exceptionObj)
+                #truncate very long strings
+                if len(ex_msg) > 1000:
+                    ex_msg = ex_msg[0:1000]
+                error_json[ErrorCodes.ERROR_APP_MESSAGE] = ex_msg
 
             if hasattr(exceptionObj, ErrorCodes.CAUSE):
                 cause = getattr(exceptionObj, ErrorCodes.CAUSE)

@@ -32,6 +32,7 @@ from gen.vnc_api_client_gen import SERVICE_PATH
 from pprint import pformat
 from threading import current_thread
 from cachetools.lru import LRUCache
+from requests.packages.urllib3.util.retry import Retry
 
 ASC = 'asc'
 DESC = 'desc'
@@ -139,14 +140,14 @@ class VncApi(object):
                  auth_token=None, auth_host=None, auth_port=None,
                  auth_protocol = None, auth_url=None, auth_type=None,
                  wait_for_connect=False, api_server_use_ssl=False,
-                 domain_name=None):
+                 domain_name=None, max_retry_on_connection_error=5):
         # TODO allow for username/password to be present in creds file
 
         self._obj_serializer = self._obj_serializer_diff
         for resource_type in gen.vnc_api_client_gen.all_resource_types:
             obj_type = resource_type.replace('-', '_')
             for oper_str in ('_create', '_read', '_update', '_delete',
-                         's_list', '_get_default_id'):
+                         's_list', '_get_default_id', '_search'):
                 method = getattr(self, '_object%s' %(oper_str))
                 bound_method = functools.partial(method, resource_type)
                 functools.update_wrapper(bound_method, method)
@@ -317,6 +318,9 @@ class VncApi(object):
             self._auth_token = auth_token
             self._auth_token_input = True
             self._headers['X-AUTH-TOKEN'] = self._auth_token
+
+        # No of reconnection attempts to server when there is a connection error, including socket error, dns errors etc.
+        self._max_retry_on_connection_error = max_retry_on_connection_error
 
         # user information for quantum
         if self._user_info:
@@ -506,13 +510,14 @@ class VncApi(object):
     # end _object_update
 
     @check_homepage
-    def _objects_list(self, res_type, parent_id=None, parent_fq_name=None,
-                     obj_uuids=None, back_ref_id=None, fields=None,
-                     detail=False, count=False, filters=None, paging_context=None, search_body=None):
+    def _objects_list(self, res_type, parent_id=None, parent_fq_name=None, parent_type=None,
+                      obj_uuids=None, back_ref_id=None, fields=None,
+                      detail=False, count=False, filters=None, paging_context=None, search_body=None):
         return self.resource_list(res_type, parent_id=parent_id,
-            parent_fq_name=parent_fq_name, back_ref_id=back_ref_id,
-            obj_uuids=obj_uuids, fields=fields, detail=detail, count=count,
-            filters=filters, paging_ctx=paging_context, search_body=search_body)
+                                  parent_fq_name=parent_fq_name, parent_type=parent_type, back_ref_id=back_ref_id,
+                                  obj_uuids=obj_uuids, fields=fields, detail=detail, count=count,
+                                  filters=filters, paging_ctx=paging_context, search_body=search_body)
+
     # end _objects_list
 
     @check_homepage
@@ -530,6 +535,16 @@ class VncApi(object):
 
         content = self._request_server(rest.OP_DELETE, uri)
     # end _object_delete
+
+    @check_homepage
+    def _object_search(self, res_type, search_body):
+        obj_cls = get_object_class(res_type)
+        uri = obj_cls.resource_uri_base[res_type] + '/_search'
+        content = self._request_server(rest.OP_POST,
+                                       uri, search_body)
+        return json.loads(content)
+
+    # end _object_search
 
     @check_homepage
     def _rpc_execute(self, res_type, obj=None):
@@ -582,11 +597,15 @@ class VncApi(object):
 
     def _create_api_server_session(self):
         self._api_server_session = requests.Session()
+        if self._max_retry_on_connection_error > 0:
+            retry = Retry(self._max_retry_on_connection_error, redirect=True, backoff_factor=1)
+        else:
+            retry = 0
 
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=self._max_conns_per_pool,
-            pool_maxsize=self._max_pools)
-        ssladapter = ssl_adapter.SSLAdapter(ssl.PROTOCOL_SSLv23)
+            pool_maxsize=self._max_pools, max_retries=retry)
+        ssladapter = ssl_adapter.SSLAdapter(ssl.PROTOCOL_SSLv23, max_retries=retry)
         ssladapter.init_poolmanager(
             connections=self._max_conns_per_pool,
             maxsize=self._max_pools)
@@ -766,7 +785,9 @@ class VncApi(object):
 
 
     def _update_request_id(self, headers):
-        if not headers.get('X-Request-Id') and current_thread().__dict__.get('request_id'):
+        if headers.get('X-Request-Id'):
+            del headers['X-Request-Id']
+        if current_thread().__dict__.get('request_id'):
             headers['X-Request-Id'] = current_thread().__dict__['request_id']
 
 
@@ -793,7 +814,9 @@ class VncApi(object):
             except ConnectionError:
                 if not retry_on_error:
                     raise ConnectionError
-
+                retried += 1
+                if retried >= retry_count:
+                    raise ConnectionError
                 time.sleep(1)
                 self._create_api_server_session()
                 continue
@@ -1123,9 +1146,9 @@ class VncApi(object):
     #end get_auth_token
 
     @check_homepage
-    def resource_list(self, obj_type, parent_id=None, parent_fq_name=None,
+    def resource_list(self, obj_type, parent_id=None, parent_fq_name=None, parent_type=None,
                       back_ref_id=None, obj_uuids=None, fields=None,
-                      detail=False, count=False, filters=None, paging_ctx = None, search_body =None):
+                      detail=False, count=False, filters=None, paging_ctx=None, search_body=None):
         if not obj_type:
             raise ResourceTypeUnknownError(obj_type)
 
@@ -1136,9 +1159,10 @@ class VncApi(object):
         query_params = {}
         do_post_for_list = False
 
-        if parent_fq_name:
+        if parent_fq_name and parent_type:
             parent_fq_name_str = ':'.join(parent_fq_name)
             query_params['parent_fq_name_str'] = parent_fq_name_str
+            query_params['parent_type'] = parent_type
         elif parent_id:
             if isinstance(parent_id, list):
                 query_params['parent_id'] = ','.join(parent_id)
@@ -1227,20 +1251,21 @@ class VncApi(object):
     #end set_user_roles
 
     @classmethod
-    def instantiate(cls, csp_lookup, service_prefix='local', context=None):
+    def instantiate(cls, csp_lookup, service_prefix='local', context=None, **kwargs):
         auth_token = context.get('auth_token',None) if context else None
         scheme, ip, port = csp_lookup.lookup('%s.%s' % (service_prefix, SERVICE_LOOKUP_NAME))
         logging.debug("Lookup for %s.%s returned %s://%s:%s",service_prefix,
                       SERVICE_LOOKUP_NAME, scheme, ip, port)
-        return cls._instantiate_client(scheme,ip,port, auth_token)
+        return cls._instantiate_client(scheme,ip,port, auth_token, **kwargs)
 
     @classmethod
     @cached(cache=cache, lock=lock)
-    def _instantiate_client(cls, scheme, ip, host, auth_token):
+    def _instantiate_client(cls, scheme, ip, host, auth_token, **kwargs):
         return VncApi(api_server_host=ip,
                       api_server_port=host,
                       auth_token=auth_token,
-                      api_server_use_ssl=True if scheme == 'https' else False)
+                      api_server_use_ssl=True if scheme == 'https' else False,
+                      **kwargs)
 
 
 
@@ -1347,16 +1372,16 @@ def add_error_tags_dict_to_exception(exception, error_json_dict):
         return exception
 
     for attribute in ['status_code', 'error_tag', 'error_app_message', 'error_message', 'error_diag', 'error_code']:
-        if not hasattr(exception, attribute):
-            if error_json_dict.has_key(attribute):
-                val = error_json_dict[attribute]
-                if attribute == 'status_code':
-                    val = int(val)
-                setattr(exception, attribute, val)
+        if error_json_dict.has_key(attribute):
+            val = error_json_dict[attribute]
+            if attribute == 'status_code':
+                val = int(val)
+            setattr(exception, attribute, val)
 
     #replace contents with error_app_message if there is one
     if hasattr(exception, 'content') and hasattr(exception, 'error_app_message'):
-        setattr(exception, 'content', getattr(exception, 'error_app_message'))
+        if getattr(exception, 'error_app_message'):
+            setattr(exception, 'content', getattr(exception, 'error_app_message'))
 
     #recursively add the cause exception if there is one
     if error_json_dict.has_key('cause'):

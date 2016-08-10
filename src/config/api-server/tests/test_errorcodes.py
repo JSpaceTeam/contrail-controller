@@ -514,3 +514,100 @@ class ErrorCodesTest(unittest.TestCase):
         }
         self.assertDictEqual(expected_formatted_val_dict, self.get_dict_from_json(error_json_str))
 
+
+    def test_get_error_json_from_CommonException_with_None_error_code(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        commonException = CommonException(None)
+        error_json_str = error_codes.get_error_json(commonException)
+        empty = dict()
+        self.assertDictEqual(empty, self.get_dict_from_json(error_json_str), 'must return empty json')
+
+
+    def test_get_error_json_from_CommonException_with_GarbageObj_error_code(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        commonException = CommonException(None)
+        commonException.error_code = Exception()
+        error_json_str = error_codes.get_error_json(commonException)
+        empty = dict()
+        self.assertDictEqual(empty, self.get_dict_from_json(error_json_str), 'must return empty json')
+
+
+    def test_get_error_code_data_formatted_with_kwargs(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        error_code_details = error_codes.get_error_code_data('70001', resourceType="Device", resourceID="Dev001")
+        expected_formatted_val_dict = {
+            "error_data" : {
+                "status_code" : "404",
+                "error_tag" : "Not Found",
+                "error_message" : "The requested Device with id Dev001 was not found. ",
+                "error_diag" : "This error occurs when a resource is not found. "
+            }
+        }
+        self.assertDictEqual(error_code_details, expected_formatted_val_dict)
+
+
+    def test_get_Valid_error_code_data(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        error_code_details = error_codes.get_error_code_data('70004')
+        self.assertIsNotNone(error_code_details, 'error_code_details should not be None')
+        self.assertIsInstance(error_code_details, dict)
+
+
+    def test_get_Correct_error_code_data(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        error_code_details = error_codes.get_error_code_data('70004')
+        expected_val_dict = {
+            "error_data" : {
+                "status_code" : "500",
+                "error_tag" : "Internal Server Error",
+                "error_message" : "This is a hard coded error message without any placeholders",
+                "error_diag" : "This error occurs when a resource is not found. "
+            }
+        }
+        self.assertDictEqual(error_code_details, expected_val_dict)
+
+
+    def test_get_None_error_code_data(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        error_code_details = error_codes.get_error_code_data(None)
+        self.assertIsNone(error_code_details, 'error_code_details should be None for None argument')
+
+
+    def test_get_Blank_error_code_data(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        error_code_details = error_codes.get_error_code_data('')
+        self.assertIsNone(error_code_details, 'error_code_details should be None for blank argument')
+
+
+    def test_get_Blank2_error_code_data(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        error_code_details = error_codes.get_error_code_data('   ')
+        self.assertIsNone(error_code_details, 'error_code_details should be None for blank space argument')
+
+
+    def test_get_Non_Existent_error_code_data(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        error_code_details = error_codes.get_error_code_data('90000')
+        self.assertIsNone(error_code_details, 'error_code_details should be None for non existent error_code')
+
+
+    def test_get_Garbage_error_code_data(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        error_code_details = error_codes.get_error_code_data(' ye707*% (09 ')
+        self.assertIsNone(error_code_details, 'error_code_details should be None for garbage error_code')
+
+
+    def test_get_error_code_data_formatted_valid_with_both_args_and_kwargs(self):
+        error_codes = ErrorCodes(self.common_error_codes_json_file_path, self.ms_error_codes_json_file_path)
+        error_code_details = error_codes.get_error_code_data('70003', 'Device', 'Dev001', resourceType="Device")
+        expected_formatted_val_dict = {
+            "error_data" : {
+                "status_code" : "400",
+                "error_tag" : "Bad Request",
+                "error_message" : "The requested Device with id Dev001 was not found. Please provide a valid Device id",
+                "error_diag" : "This error occurs when a resource is not found. "
+            }
+        }
+        self.assertDictEqual(error_code_details, expected_formatted_val_dict)
+
+

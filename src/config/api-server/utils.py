@@ -34,6 +34,7 @@ def parse_args(args_str):
         'wipe_config': False,
         'listen_ip_addr': _WEB_HOST,
         'listen_port': _WEB_PORT,
+        'api_backdoor_port': 7015,
         'admin_port': _ADMIN_PORT,
         'ifmap_server_ip': '127.0.0.1',
         'ifmap_server_port': "8443",
@@ -97,7 +98,9 @@ def parse_args(args_str):
     # cassandra options
     cassandraopts = {
         'cassandra_user': None,
-        'cassandra_password': None
+        'cassandra_password': None,
+        'cassandra_pool_size': 20,
+        'cassandra_max_overflow': 3 * 20
     }
 
     config = None
@@ -211,6 +214,10 @@ def parse_args(args_str):
         "--listen_port",
         help="Port to provide service on, default %s" % (_WEB_PORT))
     parser.add_argument(
+        "--api_backdoor_port", type=int,
+        help="Gevent api server backdoor port for debugging"
+    )
+    parser.add_argument(
         "--admin_port",
         help="Port with local auth for admin access, default %s"
              % (_ADMIN_PORT))
@@ -297,6 +304,10 @@ def parse_args(args_str):
                         help="Cassandra user name")
     parser.add_argument("--cassandra_password",
                         help="Cassandra password")
+    parser.add_argument("--cassandra_pool_size", type=int,
+                        help="Cassandra connection pool size")
+    parser.add_argument("--cassandra_max_overflow", type=int,
+                        help="Cassandra pool max overflow")
     parser.add_argument("--sandesh_send_rate_limit", type=int,
                         help="Sandesh send rate limit in messages/sec.")
     parser.add_argument("--ifmap_health_check_interval",

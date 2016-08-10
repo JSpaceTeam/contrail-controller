@@ -832,7 +832,7 @@ class FakeKombu(object):
             self.exchange = kwargs['exchange']
         # end __init__
 
-        def publish(self, payload):
+        def publish(self, payload, **kwargs):
             for q in FakeKombu._queues.values():
                 msg_obj = FakeKombu.Queue.Message(payload)
                 q.put(msg_obj, None)

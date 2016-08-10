@@ -5,8 +5,11 @@
 This is the main module in vnc_cfg_api_server package. It manages interaction
 between http/rest, address management, authentication and database interfaces.
 """
+<<<<<<< HEAD
 import re
 from decimal import Decimal, InvalidOperation
+=======
+>>>>>>> 6a4c95a6932ab07ea204ce10cea589eaa23174cc
 
 from gevent import monkey
 from memoized import memoized
@@ -37,6 +40,9 @@ from xml.sax.saxutils import escape
 from oslo_config import cfg
 #import GreenletProfiler
 from gen.vnc_api_client_gen import SERVICE_PATH
+from decimal import Decimal, InvalidOperation
+from oslo_config.cfg import ArgsAlreadyParsedError
+from cfgm_common.errorcodes import CommonException
 logger = logging.getLogger(__name__)
 
 """
@@ -170,6 +176,10 @@ def error_409(err):
     return err.body
 # end error_409
 
+@bottle.error(412)
+def error_412(err):
+    return err.body
+# end error_503
 
 @bottle.error(500)
 def error_500(err):
@@ -182,20 +192,6 @@ def error_503(err):
     return err.body
 # end error_503
 
-#Parse config for olso configs. Try to move all config parsing to oslo cfg
-elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
-cfg.CONF.register_cli_opt(cfg.BoolOpt(name='search_enabled', default=False),
-                              group=elastic_search_group)
-cfg.CONF.register_cli_opt(cfg.ListOpt('server_list',
-                                          item_type=cfg.types.String(),
-                                          default='127.0.0.1:9200',
-                                          help="Multiple servers option"), group=elastic_search_group)
-cfg.CONF.register_cli_opt(cfg.BoolOpt(name='enable_sniffing',default=False,
-                                          help="Enable connection sniffing for elastic search driver")
-                              ,group=elastic_search_group)
-
-cfg.CONF.register_cli_opt(cfg.IntOpt(name='timeout', default=2, help="Default timeout in seconds for elastic search operations"),
-                          group=elastic_search_group)
 
 class OWERTYPE(object):
     DEFAULT = 1
@@ -209,6 +205,35 @@ class SHARETYPE(object):
     @classmethod
     def allowed(cls):
         return [1, 2]
+
+# Parse config for olso configs. Try to move all config parsing to oslo cfg
+elastic_search_group = cfg.OptGroup(name='elastic_search', title='ELastic Search Options')
+cfg.CONF.register_group(elastic_search_group)
+elastic_search_opts = [
+    cfg.BoolOpt(name='search_enabled', default=False),
+    cfg.ListOpt('server_list',
+                item_type=cfg.types.String(),
+                default='127.0.0.1:9200',
+                help="Multiple servers option"),
+    cfg.BoolOpt(name='enable_sniffing', default=False,
+                help="Enable connection sniffing for elastic search driver"),
+
+    cfg.ListOpt('log_server_list',
+                item_type=cfg.types.String(),
+                default='127.0.0.1:9200',
+                help="Multiple servers option for es log servers"),
+    cfg.IntOpt(name='timeout', default=5, help="Default timeout in seconds for elastic search operations"),
+    cfg.StrOpt(name='search_client', default=None, help="VncDBSearch client implementation"),
+    cfg.StrOpt(name='update', choices=["partial", "script"], default="script", help="update type for elastic search"),
+    cfg.IntOpt(name='number_of_shards', default=2),
+    cfg.IntOpt(name='number_of_replicas', default=1)
+]
+
+for opt in elastic_search_opts:
+    try:
+        cfg.CONF.register_cli_opt(opt, group=elastic_search_group)
+    except ArgsAlreadyParsedError:
+        pass
 
 
 class VncApiServer(object):
@@ -698,6 +723,8 @@ class VncApiServer(object):
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
+        except OperationRollBackException:
+            raise
         except Exception as e:
             err_msg = 'In post_%s_create an extension had error for %s' \
                       %(obj_type, obj_dict)
@@ -931,6 +958,8 @@ class VncApiServer(object):
         except RuntimeError:
             # lack of registered extension leads to RuntimeError
             pass
+        except OperationRollBackException:
+            raise
         except Exception as e:
             err_msg = 'In post_%s_update an extension had error for %s' \
                       %(obj_type, obj_dict)
@@ -1154,19 +1183,26 @@ class VncApiServer(object):
         parent_uuids = None
         back_ref_uuids = None
         obj_uuids = None
-        if (('parent_fq_name_str' in get_request().query) and
-            ('parent_type' in get_request().query)):
-            parent_fq_name = get_request().query.parent_fq_name_str.split(':')
-            parent_type = get_request().query.parent_type
-            parent_uuids = [self._db_conn.fq_name_to_uuid(parent_type, parent_fq_name)]
-        elif 'parent_id' in get_request().query:
-            parent_ids = get_request().query.parent_id.split(',')
-            parent_uuids = [str(uuid.UUID(p_uuid)) for p_uuid in parent_ids]
-        if 'back_ref_id' in get_request().query:
-            back_ref_ids = get_request().query.back_ref_id.split(',')
-            back_ref_uuids = [str(uuid.UUID(b_uuid)) for b_uuid in back_ref_ids]
-        if 'obj_uuids' in get_request().query:
-            obj_uuids = get_request().query.obj_uuids.split(',')
+        if 'fq_name_str' in get_request().query:
+            obj_fq_name = get_request().query.fq_name_str.split(':')
+            try:
+                obj_uuids = [self._db_conn.fq_name_to_uuid(resource_type, obj_fq_name)]
+            except NoIdError:
+                raise cfgm_common.exceptions.HttpError(
+                    404, 'Name ' + pformat(obj_fq_name) + ' not found', "40002")
+        else:
+            if ('parent_fq_name_str' in get_request().query) and ('parent_type' in get_request().query):
+                parent_fq_name = get_request().query.parent_fq_name_str.split(':')
+                parent_type = get_request().query.parent_type
+                parent_uuids = [self._db_conn.fq_name_to_uuid(parent_type, parent_fq_name)]
+            elif 'parent_id' in get_request().query:
+                parent_ids = get_request().query.parent_id.split(',')
+                parent_uuids = [str(uuid.UUID(p_uuid)) for p_uuid in parent_ids]
+            if 'back_ref_id' in get_request().query:
+                back_ref_ids = get_request().query.back_ref_id.split(',')
+                back_ref_uuids = [str(uuid.UUID(b_uuid)) for b_uuid in back_ref_ids]
+            if 'obj_uuids' in get_request().query:
+                obj_uuids = get_request().query.obj_uuids.split(',')
 
         # common handling for all resource get
         (ok, result) = self._get_common(get_request(), parent_uuids)
@@ -1803,7 +1839,7 @@ class VncApiServer(object):
 
     # Public Methods
     def route(self, uri, method, handler):
-	#print("ADD ROUTE {}".format(uri))
+        #print("ADD ROUTE {}".format(uri))
         def handler_trap_exception(*args, **kwargs):
             set_context(ApiContext(external_req=bottle.request))
             trace = None
@@ -1838,7 +1874,8 @@ class VncApiServer(object):
                     self.handle_error_code(e)
 
                 # don't log details of cfgm_common.exceptions.HttpError i.e handled error cases
-                if isinstance(e, cfgm_common.exceptions.HttpError):
+                if isinstance(e, cfgm_common.exceptions.HttpError) \
+                        or ((isinstance(e, VncError) or isinstance(e, CommonException)) and hasattr(e, 'status_code') and hasattr(e, 'content')):
                     bottle.abort(e.status_code, e.content)
                 else:
                     string_buf = StringIO()
@@ -2694,12 +2731,17 @@ class VncApiServer(object):
         cred = None
         if cassandra_user is not None and cassandra_password is not None:
             cred = {'username':cassandra_user,'password':cassandra_password}
+        cassandra_pool = {
+                'max_overflow': self._args.cassandra_max_overflow,
+                'pool_size': self._args.cassandra_pool_size
+                }
         db_conn = VncDbClient(self, ifmap_ip, ifmap_port, user, passwd,
                               cass_server_list, rabbit_servers, rabbit_port,
                               rabbit_user, rabbit_password, rabbit_vhost,
                               rabbit_ha_mode, reset_config,
                               zk_server, self._args.cluster_id,
-                              cassandra_credential=cred, ifmap_disable=self._args.disable_ifmap)
+                              cassandra_credential=cred, ifmap_disable=self._args.disable_ifmap,
+                              cassandra_pool=cassandra_pool)
         self._db_conn = db_conn
     # end _db_connect
 
@@ -2841,10 +2883,12 @@ class VncApiServer(object):
             self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
     # end _db_init_entries
 
-    # generate default rbac group rule
-    def _create_default_rbac_rule(self):
+    # generate default rbac group rule, merge it with the already existing ones
+    def _create_default_rbac_rule(self, fq_name=None):
         obj_type = 'api-access-list'
-        fq_name = ['default-domain', 'default-api-access-list']
+        rule_list = []
+        if not fq_name:
+            fq_name = ['default-domain', 'default-api-access-list']
         try:
             id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
         except NoIdError:
@@ -2852,6 +2896,11 @@ class VncApiServer(object):
             id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
 
         (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid': id})
+        if 'api_access_list_entries' in obj_dict:
+           api_access_list_entries = obj_dict['api_access_list_entries']
+           if 'rbac_rule' in api_access_list_entries:
+              if (api_access_list_entries['rbac_rule'])[0]:
+                 rule_list.extend(api_access_list_entries['rbac_rule'])
 
         # allow full access to cloud admin
         rbac_rules = [
@@ -2872,10 +2921,39 @@ class VncApiServer(object):
             },
         ]
 
-        obj_dict['api_access_list_entries'] = {'rbac_rule' : rbac_rules}
+        rule_list.extend(rbac_rules)
+        updated_rbac_rule = self._merge_rbac_rule(rule_list)
+        obj_dict['api_access_list_entries'] = {'rbac_rule' : updated_rbac_rule}
         self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
     # end _create_default_rbac_rule
 
+    def _merge_rbac_rule(self, rbac_rule):
+        rule_dict = {}
+        for rule in rbac_rule[:]:
+            o = rule['rule_object']
+            f = rule['rule_field']
+            p = rule['rule_perms']
+            o_f = "%s.%s" % (o,f) if f else o
+            if o_f not in rule_dict:
+                rule_dict[o_f] = rule
+            else:
+                role_to_crud_dict = {rp['role_name']:rp['role_crud'] for rp in rule_dict[o_f]['rule_perms']}
+                for role in rule['rule_perms']:
+                    role_name = role['role_name']
+                    role_crud = role['role_crud']
+                    if role_name in role_to_crud_dict:
+                        x = set(list(role_to_crud_dict[role_name])) | set(list(role_crud))
+                        role_to_crud_dict[role_name] = ''.join(x)
+                    else:
+                        role_to_crud_dict[role_name] = role_crud
+                # update perms in existing rule
+                rule_dict[o_f]['rule_perms'] = [{'role_crud': rc, 'role_name':rn} for rn,rc in role_to_crud_dict.items()]
+                # remove duplicate rule from list
+                rbac_rule.remove(rule)
+
+        return rbac_rule
+    # end _merge_rbac_rule
+    
     def _resync_domains_projects(self, ext):
         if hasattr(ext.obj, 'resync_domains_projects'):
             ext.obj.resync_domains_projects()
@@ -2929,6 +3007,7 @@ class VncApiServer(object):
         tenant_name = env.get(hdr_server_tenant(), 'default-project')
         tenant_fq_name = ['default-domain', tenant_name]
         tenant = None
+        shared_uuids = []
         try:
             tenant_uuid = self._db_conn.fq_name_to_uuid('project', tenant_fq_name)
             if self.is_multi_tenancy_set() and not self.is_admin_request():
@@ -2936,12 +3015,16 @@ class VncApiServer(object):
             shares = self._db_conn.get_shared_objects(obj_type, tenant_uuid)
         except NoIdError:
             shares = []
+        if obj_uuids or back_ref_uuids or parent_uuids:
+            #Disable shares when using id filters TODO: Later need to handle query filters as well
+            shares = []
+
         if cfg.CONF.elastic_search.search_enabled:
             body = SearchUtil.convert_to_es_query_dsl(body, params, tenant)
             self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_INFO)
 
         (ok, result, total) = self._db_conn.dbe_list(obj_type,
-                             parent_uuids, back_ref_uuids, obj_uuids, is_count,
+                             parent_uuids, back_ref_uuids, obj_uuids, is_count, shared_uuids=shared_uuids,
                              filters=filters, body=body, params=params)
         if not ok:
             self.config_object_error(None, None, '%ss' %(obj_type),
@@ -2953,16 +3036,21 @@ class VncApiServer(object):
             return {'%s' %(resource_type): {'count': total}}
 
         # filter out items not authorized
+        pending_result = []
         for fq_name, uuid in result:
             (ok, status) = self._permissions.check_perms_read(get_request(), uuid)
             if not ok and status[0] == 403:
-                result.remove((fq_name, uuid))
+                total -= 1
+            else:
+                pending_result.append((fq_name, uuid))
+        result = pending_result
 
-        # include objects shared with tenant
+        #include objects shared with tenant
         for (obj_uuid, obj_perm) in shares:
             try:
                 fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
                 result.append((fq_name, obj_uuid))
+                total += 1
             except NoIdError:
                 # uuid no longer valid. Delete?
                 pass

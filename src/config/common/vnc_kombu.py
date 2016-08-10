@@ -51,7 +51,7 @@ class VncKombuClientBase(object):
         self._publish_queue = Queue()
         self._conn_lock = Semaphore()
 
-        self.obj_upd_exchange = kombu.Exchange('vnc_config.object-update', 'fanout',
+        self.obj_upd_exchange = kombu.Exchange('vnc_config.object-update', 'topic',
                                                durable=False)
         self.search_rc_exchange = kombu.Exchange('vnc_config.search_rc', 'direct', durable=True,
                                              delivery_mode='persistent')
@@ -107,7 +107,6 @@ class VncKombuClientBase(object):
                 except Exception as e:
                     msg = 'Unable to delete the old ampq queue: %s' %(str(e))
                     self._logger(msg, level=SandeshLevel.SYS_ERR)
-
             self._consumer = kombu.Consumer(self._channel,
                                            queues=self._update_queue_obj,
                                            callbacks=[self._subscribe])
@@ -166,7 +165,7 @@ class VncKombuClientBase(object):
 
                 while True:
                     try:
-                        self._producer.publish(message)
+                        self._producer.publish(message, routing_key=self._extract_routing_key(message))
                         message = None
                         break
                     except self._conn.connection_errors + self._conn.channel_errors as e:
@@ -178,6 +177,13 @@ class VncKombuClientBase(object):
                 connected = False
     # end _publisher
 
+    def _extract_routing_key(self, message):
+        if isinstance(message, dict):
+            namespace = message.get('namespace')
+            type = message.get('type')
+            if namespace and type:
+                return '%s.%s' % (namespace, type)
+        return ''
 
     def _subscribe(self, body, message):
         try:
@@ -209,19 +215,20 @@ class VncKombuClientBase(object):
 
 class VncKombuClientV1(VncKombuClientBase):
     def __init__(self, rabbit_ip, rabbit_port, rabbit_user, rabbit_password,
-                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger):
+                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger, routing_key='#'):
         super(VncKombuClientV1, self).__init__(rabbit_ip, rabbit_port,
                                                rabbit_user, rabbit_password,
                                                rabbit_vhost, rabbit_ha_mode,
                                                q_name, subscribe_cb, logger)
         self._server_addrs = ["%s:%s" % (self._rabbit_ip, self._rabbit_port)]
-
+        self._routing_key = routing_key
         self._conn = kombu.Connection(hostname=self._rabbit_ip,
                                       port=self._rabbit_port,
                                       userid=self._rabbit_user,
                                       password=self._rabbit_password,
                                       virtual_host=self._rabbit_vhost)
-        self._update_queue_obj = kombu.Queue(q_name, self.obj_upd_exchange, durable=False)
+        self._update_queue_obj = kombu.Queue(q_name, self.obj_upd_exchange, routing_key=routing_key,
+                                             durable=False)
         self._start()
     # end __init__
 
@@ -247,13 +254,13 @@ class VncKombuClientV2(VncKombuClientBase):
         return ret
 
     def __init__(self, rabbit_hosts, rabbit_port, rabbit_user, rabbit_password,
-                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger):
+                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger, routing_key='#'):
         super(VncKombuClientV2, self).__init__(rabbit_hosts, rabbit_port,
                                                rabbit_user, rabbit_password,
                                                rabbit_vhost, rabbit_ha_mode,
                                                q_name, subscribe_cb, logger)
         self._server_addrs = rabbit_hosts.split(',')
-
+        self._routing_key = routing_key
         _hosts = self._parse_rabbit_hosts(rabbit_hosts)
         self._urls = []
         for h in _hosts:
@@ -268,7 +275,7 @@ class VncKombuClientV2(VncKombuClientBase):
         self._conn = kombu.Connection(self._urls)
         queue_args = {"x-ha-policy": "all"} if rabbit_ha_mode else None
         self._update_queue_obj = kombu.Queue(q_name, self.obj_upd_exchange,
-                                             durable=False,
+                                             durable=False, routing_key=routing_key,
                                              queue_arguments=queue_args)
 
         self._start()

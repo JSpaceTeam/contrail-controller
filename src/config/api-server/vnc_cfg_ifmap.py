@@ -66,7 +66,9 @@ from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from sandesh_common.vns.constants import USERAGENT_KEYSPACE_NAME
 from sandesh.traces.ttypes import DBRequestTrace, MessageBusNotifyTrace, \
     IfmapTrace
+from vnc_perms import VncPermissions
 import logging
+
 from cfgm_common import utils
 
 logger = logging.getLogger(__name__)
@@ -771,7 +773,7 @@ class VncServerCassandraClient(VncCassandraClient):
     # end get_db_info
 
     def __init__(self, db_client_mgr, cass_srv_list, reset_config, db_prefix,
-                 cassandra_credential):
+                 cassandra_credential, cassandra_pool):
         self._db_client_mgr = db_client_mgr
         keyspaces = self._UUID_KEYSPACE.copy()
         keyspaces[self._USERAGENT_KEYSPACE_NAME] = [
@@ -779,7 +781,7 @@ class VncServerCassandraClient(VncCassandraClient):
         super(VncServerCassandraClient, self).__init__(
             cass_srv_list, db_prefix, keyspaces, None, self.config_log,
             generate_url=db_client_mgr.generate_uri,
-            reset_config=reset_config, credential=cassandra_credential)
+            reset_config=reset_config, credential=cassandra_credential, pool_config_dict=cassandra_pool)
         self._useragent_kv_cf = self._cf_dict[self._USERAGENT_KV_CF_NAME]
 
     # end __init__
@@ -1022,7 +1024,8 @@ class VncServerKombuClient(VncKombuClient):
         q_name = 'vnc_config.%s-%s' % (socket.gethostname(), listen_port)
         super(VncServerKombuClient, self).__init__(
             rabbit_ip, rabbit_port, rabbit_user, rabbit_password, rabbit_vhost,
-            rabbit_ha_mode, q_name, self._dbe_subscribe_callback, self.config_log)
+            rabbit_ha_mode, q_name, self._dbe_subscribe_callback, self.config_log,
+            '%s.#' % self._db_client_mgr.get_service_module())
         self._rc_queue = Queue()
         self._search_rc_publish_greenlet = gevent.spawn(self._search_rc_publish)
 
@@ -1134,17 +1137,20 @@ class VncServerKombuClient(VncKombuClient):
 
     # end _dbe_subscribe_callback
 
-    def dbe_create_publish(self, obj_type, obj_ids, obj_dict):
+    def dbe_create_publish(self, obj_type, obj_ids, obj_dict, tenant_id=None):
         req_id = get_trace_id()
         oper_info = {'request-id': req_id,
                      'oper': 'CREATE',
                      'type': obj_type,
                      'namespace': self._service_module,
-                     'obj_dict': obj_dict}
+                     'obj_dict': obj_dict,
+                     'tenantid': tenant_id}
         oper_info.update(obj_ids)
         self.publish(oper_info)
 
     # end dbe_create_publish
+
+
 
     def _dbe_create_notification(self, obj_info):
         obj_dict = obj_info['obj_dict']
@@ -1170,22 +1176,22 @@ class VncServerKombuClient(VncKombuClient):
 
     # end _dbe_create_notification
 
-    def dbe_update_publish(self, obj_type, obj_ids):
-        oper_info = {'oper': 'UPDATE', 'type': obj_type, 'namespace': self._service_module}
+    def dbe_update_publish(self, obj_type, obj_ids, tenantid=None):
+        oper_info = {'oper': 'UPDATE', 'type': obj_type, 'namespace': self._service_module, 'tenantid': tenantid}
         oper_info.update(obj_ids)
         self.publish(oper_info)
 
     # end dbe_update_publish
 
     def _dbe_update_notification(self, obj_info):
-        try:
-            (ok, result) = self._db_client_mgr.dbe_read(obj_info['type'], obj_info)
-        except NoIdError as e:
-            # No error, we will hear a delete shortly
-            return
-
-        new_obj_dict = result
+        new_obj_dict = None
         if not self._ifmap_disable:
+            try:
+                (ok, result) = self._db_client_mgr.dbe_read(obj_info['type'], obj_info)
+            except NoIdError as e:
+                # No error, we will hear a delete shortly
+                return
+            new_obj_dict = result
             self.dbe_uve_trace("UPDATE", obj_info['type'], obj_info['uuid'], new_obj_dict)
 
         try:
@@ -1207,9 +1213,9 @@ class VncServerKombuClient(VncKombuClient):
 
     # end _dbe_update_notification
 
-    def dbe_delete_publish(self, obj_type, obj_ids, obj_dict):
+    def dbe_delete_publish(self, obj_type, obj_ids, obj_dict, tenantid=None):
         oper_info = {'oper': 'DELETE', 'type': obj_type, 'namespace': self._service_module,
-                     'obj_dict': obj_dict}
+                     'obj_dict': obj_dict, 'tenantid': tenantid}
         oper_info.update(obj_ids)
         self.publish(oper_info)
 
@@ -1279,8 +1285,8 @@ class VncZkClient(object):
                 pass
 
         if reset_config:
-            self._zk_client.delete_node(self._subnet_path, True);
-            self._zk_client.delete_node(self._fq_name_to_uuid_path, True);
+            self._zk_client.delete_node(self._subnet_path, True)
+            self._zk_client.delete_node(self._zk_path_pfx + self._FQ_NAME_TO_UUID_PATH, True)
         self._subnet_allocators = {}
 
     # end __init__
@@ -1422,7 +1428,8 @@ class VncDbClient(object):
                  passwd, cass_srv_list,
                  rabbit_servers, rabbit_port, rabbit_user, rabbit_password,
                  rabbit_vhost, rabbit_ha_mode, reset_config=False,
-                 zk_server_ip=None, db_prefix='', cassandra_credential=None, ifmap_disable=False):
+                 zk_server_ip=None, db_prefix='', cassandra_credential=None, ifmap_disable=False,
+                 cassandra_pool = None):
 
         self._api_svr_mgr = api_svr_mgr
         self._sandesh = api_svr_mgr._sandesh
@@ -1477,7 +1484,7 @@ class VncDbClient(object):
             self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
 
             self._cassandra_db = VncServerCassandraClient(
-                self, cass_srv_list, reset_config, db_prefix, cassandra_credential)
+                self, cass_srv_list, reset_config, db_prefix, cassandra_credential,cassandra_pool)
 
         self._zk_db.master_election(cassandra_client_init)
 
@@ -1503,7 +1510,7 @@ class VncDbClient(object):
         else:
             self.config_log("Elastic search not enabled", level=SandeshLevel.SYS_NOTICE)
             self._search_db = VncNoOpEsDb()
-        self._rollback_handler = VncDBRollBackHandler(self, self._msgbus, self._cassandra_db, self._search_db)
+        self._rollback_handler = VncDBRollBackHandler(self, self._msgbus, self._search_db)
 
     # end __init__
 
@@ -1976,7 +1983,8 @@ class VncDbClient(object):
             obj_type, obj_ids['uuid'], obj_dict)
 
         # publish to ifmap via msgbus
-        self._msgbus.dbe_create_publish(obj_type, obj_ids, obj_dict)
+        self._msgbus.dbe_create_publish(obj_type, obj_ids, obj_dict,
+                                        VncPermissions.get_tenant_id(obj_dict, obj_ids, self))
 
         return (ok, result)
 
@@ -2062,7 +2070,7 @@ class VncDbClient(object):
             obj_type, obj_ids['uuid'], new_obj_dict)
 
         # publish to ifmap via message bus (rabbitmq)
-        self._msgbus.dbe_update_publish(obj_type, obj_ids)
+        self._msgbus.dbe_update_publish(obj_type, obj_ids, VncPermissions.get_tenant_id(None, obj_ids, self))
 
         return (ok, cassandra_result)
 
@@ -2075,7 +2083,7 @@ class VncDbClient(object):
     # end dbe_search_update
 
     def dbe_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
-                 obj_uuids=None, count=False, filters=None,
+                 obj_uuids=None, count=False, filters=None, shared_uuids=None,
                  paginate_start=None, paginate_count=None, body=None, params=None):
         if count:
             if obj_uuids or parent_uuids or back_ref_uuids or filters or not self._search_db.enabled(obj_type):
@@ -2123,7 +2131,8 @@ class VncDbClient(object):
 
         self._search_db.search_delete(obj_type, obj_ids, obj_dict)
         # publish to ifmap via message bus (rabbitmq)
-        self._msgbus.dbe_delete_publish(obj_type, obj_ids, obj_dict)
+        self._msgbus.dbe_delete_publish(obj_type, obj_ids, obj_dict,
+                                        VncPermissions.get_tenant_id(obj_dict, obj_ids, self))
 
         # finally remove mapping in zk
         fq_name = cfgm_common.imid.get_fq_name_from_ifmap_id(obj_ids['imid'])
@@ -2258,7 +2267,8 @@ class VncDbClient(object):
 
         self._cassandra_db.prop_collection_update(obj_type, obj_uuid, updates)
         self._msgbus.dbe_update_publish(obj_type.replace('_', '-'),
-                                        {'uuid': obj_uuid})
+                                        {'uuid': obj_uuid},
+                                        VncPermissions.get_tenant_id(None, {'uuid': obj_uuid}, self))
         return True, ''
 
     # end prop_collection_update
@@ -2268,10 +2278,12 @@ class VncDbClient(object):
         self._cassandra_db.ref_update(obj_type, obj_uuid, ref_type, ref_uuid,
                                       ref_data, operation)
         self._msgbus.dbe_update_publish(obj_type.replace('_', '-'),
-                                        {'uuid': obj_uuid})
+                                        {'uuid': obj_uuid},
+                                        VncPermissions.get_tenant_id(None, {'uuid': obj_uuid}, self))
         if obj_type != ref_type:
             self._msgbus.dbe_update_publish(ref_type.replace('_', '-'),
-                                            {'uuid': ref_uuid})
+                                            {'uuid': ref_uuid},
+                                            VncPermissions.get_tenant_id(None, {'uuid': ref_uuid}, self))
 
     # ref_update
 
@@ -2400,25 +2412,32 @@ class VncSearchDbClient(VncSearchItf):
         self._msg_bus = msg_bus
         self._consistency = "quorum"
         self._is_script_update = True if cfg.CONF.elastic_search.update == 'script' else False
+        shards = cfg.CONF.elastic_search.number_of_shards
+        replicas = cfg.CONF.elastic_search.number_of_replicas
+        index_settings = index_settings or {"settings": {"number_of_shards": shards, "number_of_replicas": replicas}}
         while True:
             try:
-                opts = {}
+                opts = {
+                    'retry_on_timeout': True,
+                    'max_retries': 3
+                }
+
                 if cfg.CONF.elastic_search.enable_sniffing:
                     # sniff_on_start=True,
                     # refresh nodes after a node fails to respond
                     # sniff_on_connection_fail=True,
                     # and also every 60 seconds
                     # sniffer_timeout=60)
-                    opts = {
+                    opts.update({
                         'sniff_on_start': True,
                         'sniff_on_connection_fail': True,
                         'sniffer_timeout': 60
-                    }
+                    })
                 self._es_client = Elasticsearch(hosts=elastic_srv_list,
                                                 timeout=timeout, **opts)
 
                 self._index_client = IndicesClient(self._es_client)
-                self._index, self._mapped_doc_types = self.initialize_index_schema(reset_config)
+                self._index, self._mapped_doc_types = self.initialize_index_schema(reset_config, index_setting=index_settings)
                 self._mapped_doc_types = filter(lambda x: x not in {'project', 'domain'}, self._mapped_doc_types)
                 break
             except ConnectionError as ce:
@@ -2501,8 +2520,9 @@ class VncSearchDbClient(VncSearchItf):
     # initialize_index_schema
 
     def _init_index(self, index, mapping, reset_config, index_setting=None):
-        if reset_config and self._index_client.exists(index):
-            self._index_client.delete(index)
+        if reset_config:# #Keeping reset config semantics in line with cassandra DB at the
+            #  and self._index_client.exists(index):
+            self._index_client.delete("_all")
 
         if index_setting:
             mapping.update(index_setting)
@@ -2762,6 +2782,59 @@ class VncSearchDbClient(VncSearchItf):
 
 
 # end VncSearchDbClient
+
+
+class VncSearchDBMultiIndexClient(VncSearchDbClient):
+    """
+    Search client that supports multi index, i.e index per object
+    """
+    def __init__(self, db_client_mgr, msg_bus, elastic_srv_list,
+                 index_settings=None, reset_config=False, timeout=10):
+        VncSearchDbClient.__init__(self, db_client_mgr, msg_bus, elastic_srv_list,
+                                   index_settings=index_settings,
+                                   reset_config=reset_config, timeout=timeout)
+
+    def get_indices(self):
+        from gen.vnc_es_schema import get_es_schema
+        index, mapping = get_es_schema()
+        mappings = mapping.get('mappings')
+        new_indices = []
+        for key in mappings.keys():
+            #key = key.replace("-", "_")
+            data = mappings.get(key)
+            temp = {'mappings':
+                    {key: data
+                     }
+                    }
+
+            new_index = '%s-%s'%(index, key)
+
+            new_indices.append((index, new_index, temp))
+        return new_indices
+
+    def initialize_index_schema(self, reset_config, index_setting=None):
+        indices = self.get_indices()
+        mapped_doc_types = []
+        for d in indices:
+            base_index, index, mapping = d
+            index, docs = self._init_index(index, mapping, reset_config, index_setting)
+            mapped_doc_types.extend(docs)
+        return base_index, mapped_doc_types
+
+    def get_index(self, obj_type):
+        '''
+        return index based on object type if object_type is None its for suggest query,
+        so return all relevant indexes when
+        obj_type is None
+        Args:
+            obj_type:
+
+        Returns:
+
+        '''
+        return "%s-%s"%(self._index, obj_type)
+
+#end VncSearchDBMultiIndexClient
 
 
 class VncNoOpEsDb(VncSearchItf):

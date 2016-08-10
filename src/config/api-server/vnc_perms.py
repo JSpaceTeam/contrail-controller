@@ -206,4 +206,14 @@ class VncPermissions(object):
         return perms if ok else ''
     # end obj_perms
 
+    @staticmethod
+    def get_tenant_id(obj_dict, obj_ids, db_conn):
+        if obj_dict:
+            perms2 = obj_dict.get('perms2')
+            return  perms2.get('owner')
+        if obj_ids:
+            uuid = obj_ids['uuid']
+            perms2 = db_conn.uuid_to_obj_perms2(uuid)
+            return perms2.get('owner') if perms2 else None
+        return None
 

@@ -31,6 +31,7 @@ local_sources = [
                   'vnc_cpu_info.py',
                   'rest.py',
                   'errorcodes.py',
+                  'errorcode_utils.py',
                   'vnc_plugin_base.py',
                   'vnc_extensions.py',
                   'importutils.py',
