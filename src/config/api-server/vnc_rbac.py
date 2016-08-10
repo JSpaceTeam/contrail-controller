@@ -284,12 +284,12 @@ class VncRbac(object):
             ok = x[0][1][1]
             idx= x[0][1][0]
 
+            if ok and (len(rule_obj) > 0) and (len(role_obj) > 0):
+                msg = 'Matched rule %2d) %s %s' %(idx, rule_obj[idx - 1], role_obj[idx - 1])
+                self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
+
         # temporarily allow all access to admin till we figure out default creation of rbac group in domain
         ok = ok or is_admin
-
-        if ok and (len(rule_obj) > 0) and (len(role_obj) > 0):
-           msg = 'Matched rule %2d) %s %s' %(idx, rule_obj[idx - 1], role_obj[idx - 1])
-           self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
 
         msg = "%s admin=%s, u=%s, r='%s'" \
             % ('+++' if ok else '\n---',
