@@ -3,7 +3,7 @@
 #
 import re
 import sys
-
+import uuid
 ExternalEncoding = sys.getdefaultencoding()
 Tag_pattern_ = re.compile(r'({.*})?(.*)')
 
@@ -274,5 +274,5 @@ class GeneratedsSuper(object):
         return '1.1.1.1'
     
     @staticmethod
-    def populate_uuid(*args, **kwargs):
-        return '6050fd1e-4916-4d75-b922-270cdc95f8b8'
+    def populate_uuid(is_optional, *args, **kwargs):
+        return "" if is_optional else str(uuid.uuid4()) 

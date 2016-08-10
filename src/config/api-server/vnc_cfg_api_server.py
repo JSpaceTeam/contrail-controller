@@ -5,15 +5,9 @@
 This is the main module in vnc_cfg_api_server package. It manages interaction
 between http/rest, address management, authentication and database interfaces.
 """
-<<<<<<< HEAD
-import re
-from decimal import Decimal, InvalidOperation
-=======
->>>>>>> 6a4c95a6932ab07ea204ce10cea589eaa23174cc
-
 from gevent import monkey
-from memoized import memoized
 monkey.patch_all()
+from memoized import memoized
 from gevent import hub
 # from neutron plugin to api server, the request URL could be large. fix the const
 # fix the const

@@ -75,7 +75,7 @@ def parse_args(args_str):
         'stale_lock_seconds': '5',  # lock but no resource past this => stale
         'disable_ifmap': False,
         'cloud_admin_role': _CLOUD_ADMIN_ROLE,
-        'disable_validation': False
+        'disable_validation': True 
     }
     # ssl options
     secopts = {
