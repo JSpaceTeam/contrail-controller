@@ -287,7 +287,7 @@ class VncRbac(object):
         # temporarily allow all access to admin till we figure out default creation of rbac group in domain
         ok = ok or is_admin
 
-        if ok:
+        if ok and (len(rule_obj) > 0) and (len(role_obj) > 0):
            msg = 'Matched rule %2d) %s %s' %(idx, rule_obj[idx - 1], role_obj[idx - 1])
            self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
 
