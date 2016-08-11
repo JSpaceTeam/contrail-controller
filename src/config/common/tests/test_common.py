@@ -388,6 +388,7 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
     _config_knobs = [
         ('DEFAULTS', '', ''),
         ('DEFAULTS', 'ifmap_health_check_interval', '3600'),
+        ('DEFAULTS', 'disable_validation', 'False'),
         ]
 
     mocks = [
