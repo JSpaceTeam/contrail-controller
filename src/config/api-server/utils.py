@@ -75,7 +75,7 @@ def parse_args(args_str):
         'stale_lock_seconds': '5',  # lock but no resource past this => stale
         'disable_ifmap': False,
         'cloud_admin_role': _CLOUD_ADMIN_ROLE,
-        'disable_validation': True 
+        'disable_validation': False 
     }
     # ssl options
     secopts = {
@@ -127,6 +127,8 @@ def parse_args(args_str):
             defaults['multi_tenancy_with_rbac'] = config.getboolean('DEFAULT', 'multi_tenancy_with_rbac')
         if 'disable_ifmap' in config.defaults():
             defaults['disable_ifmap'] = config.getboolean('DEFAULT', 'disable_ifmap')
+        if 'disable_validation' in config.defaults():
+            defaults['disable_validation'] = config.getboolean('DEFAULT', 'disable_validation')
         if 'default_encoding' in config.defaults():
             default_encoding = config.get('DEFAULT', 'default_encoding')
             gen.resource_xsd.ExternalEncoding = default_encoding
@@ -322,7 +324,7 @@ def parse_args(args_str):
         help="Service lookup yaml file", default='/opt/csp-service/lookup.yaml')
     parser.add_argument( "--cloud_admin_role",
         help="Role name of cloud administrator")
-    parser.add_argument("--disable_validation", action='store_true', help="Disable validation on requests")
+    parser.add_argument("--disable_validation", action="store_true", help="Disable validation on requests")
     args_obj, remaining_argv = parser.parse_known_args(remaining_argv)
     args_obj.config_sections = config
     if type(args_obj.cassandra_server_list) is str:
