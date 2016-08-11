@@ -275,4 +275,4 @@ class GeneratedsSuper(object):
     
     @staticmethod
     def populate_uuid(is_optional, *args, **kwargs):
-        return "" if is_optional else str(uuid.uuid4()) 
+        return None if is_optional else str(uuid.uuid4()) 
