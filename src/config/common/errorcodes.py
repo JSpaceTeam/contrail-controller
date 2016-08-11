@@ -188,9 +188,10 @@ class ErrorCodes(object):
                     val = getattr(exceptionObj, attribute)
                     if isinstance(val, int):
                         error_json[attribute] = str(val)
-                        #error_json[attribute] = val
-                    elif isinstance(val, str) and isNotBlank(val):
-                        error_json[attribute] = val
+                    else:
+                        strval = str(val)
+                        if isNotBlank(strval):
+                            error_json[attribute] = strval
 
             #override error_app_message with content
             if hasattr(exceptionObj, ErrorCodes.CONTENT):
