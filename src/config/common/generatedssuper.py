@@ -3,7 +3,7 @@
 #
 import re
 import sys
-
+import uuid
 ExternalEncoding = sys.getdefaultencoding()
 Tag_pattern_ = re.compile(r'({.*})?(.*)')
 
@@ -247,8 +247,32 @@ class GeneratedsSuper(object):
 
     @staticmethod
     def populate_byte(name):
-        return {'test': 1}
+        return 1
+
+    @staticmethod
+    def populate_any(name):
+        return {'test':1}
 
     @staticmethod
     def populate_decimal(name):
         return "+12.45"
+
+    @staticmethod
+    def populate_ipv4_prefix(*args, **kwargs):
+        return "1.12.2.3/32"
+
+    @staticmethod
+    def populate_ipv6_prefix(*args, **kwargs):
+        return "1234::12/96"
+
+    @staticmethod
+    def populate_ipv6_address(*args, **kwargs):
+        return '1234:11::'
+
+    @staticmethod
+    def populate_ipv4_address(*args, **kwargs):
+        return '1.1.1.1'
+    
+    @staticmethod
+    def populate_uuid(is_optional, *args, **kwargs):
+        return None if is_optional else str(uuid.uuid4()) 

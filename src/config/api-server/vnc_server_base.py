@@ -398,7 +398,8 @@ class VncApiServerBase(VncApiServer):
         prop_dict = obj_dict.get('input')
 
         try:
-            self._validate_complex_type(r_class, prop_dict)
+            if not self._args.disable_validation:
+                self._validate_complex_type(r_class, prop_dict)
         except Exception as e:
             err_msg = str(e.message)
             raise cfgm_common.exceptions.HttpError(400, err_msg, "40001")
