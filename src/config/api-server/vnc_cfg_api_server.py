@@ -2997,11 +2997,11 @@ class VncApiServer(object):
                          req_fields=None, body=None, params=None):
         obj_type = resource_type.replace('-', '_') # e.g. virtual_network
 
+        # include objects shared with tenant
         env = get_request().headers.environ
         tenant_name = env.get(hdr_server_tenant(), 'default-project')
         tenant_fq_name = ['default-domain', tenant_name]
         tenant = None
-        shared_uuids = []
         try:
             tenant_uuid = self._db_conn.fq_name_to_uuid('project', tenant_fq_name)
             if self.is_multi_tenancy_set() and not self.is_admin_request():
@@ -3010,7 +3010,7 @@ class VncApiServer(object):
         except NoIdError:
             shares = []
         if obj_uuids or back_ref_uuids or parent_uuids:
-            #Disable shares when using id filters TODO: Later need to handle query filters as well
+            # Disable shares when using id filters TODO: Later need to handle query filters as well
             shares = []
 
         if cfg.CONF.elastic_search.search_enabled:
@@ -3018,7 +3018,7 @@ class VncApiServer(object):
             self.config_log('search body: %s ' % (json.dumps(body)), level=SandeshLevel.SYS_INFO)
 
         (ok, result, total) = self._db_conn.dbe_list(obj_type,
-                             parent_uuids, back_ref_uuids, obj_uuids, is_count, shared_uuids=shared_uuids,
+                             parent_uuids, back_ref_uuids, obj_uuids, is_count, shared_uuids=None,
                              filters=filters, body=body, params=params)
         if not ok:
             self.config_object_error(None, None, '%ss' %(obj_type),
@@ -3039,8 +3039,13 @@ class VncApiServer(object):
                 pending_result.append((fq_name, uuid))
         result = pending_result
 
-        #include objects shared with tenant
+        owned_objs = set([obj_uuid for (fq_name, obj_uuid) in result])
+
+        # include objects shared with tenant
         for (obj_uuid, obj_perm) in shares:
+            # skip owned objects already included in results
+            if obj_uuid in owned_objs:
+                continue
             try:
                 fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
                 result.append((fq_name, obj_uuid))
