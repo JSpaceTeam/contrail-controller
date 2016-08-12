@@ -7,6 +7,8 @@ import uuid
 import string
 import re
 import ConfigParser
+
+from cfgm_common.stats_collector import collect_stats
 from provision_defaults import *
 from cfgm_common.exceptions import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
@@ -204,6 +206,7 @@ class VncRbac(object):
     # end
 
     # op is one of 'CRUD'
+    @collect_stats
     def validate_request(self, request):
         domain_id = request.headers.environ.get('HTTP_X_DOMAIN_ID', None)
         project_id = request.headers.environ.get('HTTP_X_PROJECT_ID', None)

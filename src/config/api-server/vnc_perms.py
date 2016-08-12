@@ -2,6 +2,8 @@
 # Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
 #
 import sys
+
+from cfgm_common.stats_collector import collect_stats
 from cfgm_common import jsonutils as json
 import string
 import uuid
@@ -36,12 +38,13 @@ class VncPermissions(object):
         return id_perms.get('user_visible', True) is not False or is_admin
     # end
 
-    def validate_perms(self, request, uuid, mode=PERMS_R):
+    def validate_perms(self, request, uuid, mode=PERMS_R, id_perms=None):
         # retrieve object and permissions
-        try:
-            id_perms = self._server_mgr._db_conn.uuid_to_obj_perms(uuid)
-        except NoIdError:
-            return (True, 'RWX')
+        if not id_perms:
+            try:
+                id_perms = self._server_mgr._db_conn.uuid_to_obj_perms(uuid)
+            except NoIdError:
+                return (True, 'RWX')
 
         err_msg = (403, 'Permission Denied')
 
@@ -75,14 +78,17 @@ class VncPermissions(object):
         return (True, self.mode_str[granted]) if ok else (False, err_msg)
     # end validate_perms
 
-    def validate_perms_rbac(self, request, obj_uuid, mode=PERMS_R):
+    def validate_perms_rbac(self, request, obj_uuid, mode=PERMS_R, obj_name = None, obj_type=None, perms2=None):
         err_msg = (403, 'Permission Denied')
 
         # retrieve object and permissions
         try:
-            perms2 = self._server_mgr._db_conn.uuid_to_obj_perms2(obj_uuid)
-            obj_name = self._server_mgr._db_conn.uuid_to_fq_name(obj_uuid)
-            obj_type = self._server_mgr._db_conn.uuid_to_obj_type(obj_uuid)
+            if not perms2:
+                perms2 = self._server_mgr._db_conn.uuid_to_obj_perms2(obj_uuid)
+            if not obj_name:
+                obj_name = self._server_mgr._db_conn.uuid_to_fq_name(obj_uuid)
+            if not obj_type:
+                obj_type = self._server_mgr._db_conn.uuid_to_obj_type(obj_uuid)
         except NoIdError:
             return (True, '')
 
@@ -164,15 +170,16 @@ class VncPermissions(object):
             return (True, '')
     # end check_perms_write
 
-    def check_perms_read(self, request, id):
+    @collect_stats
+    def check_perms_read(self, request, id, id_perms=None, obj_name=None, obj_type=None, perms2=None):
         app = request.environ['bottle.app']
         if app.config.local_auth or self._server_mgr.is_auth_disabled():
             return (True, '')
 
         if self._rbac:
-            return self.validate_perms_rbac(request, id, PERMS_R)
+            return self.validate_perms_rbac(request, id, PERMS_R, obj_name, obj_type, perms2)
         elif self._multi_tenancy:
-            return self.validate_perms(request, id, PERMS_R)
+            return self.validate_perms(request, id, PERMS_R, id_perms)
         else:
             return (True, '')
     # end check_perms_read
