@@ -8,6 +8,7 @@ between http/rest, address management, authentication and database interfaces.
 from gevent import monkey
 monkey.patch_all()
 from memoized import memoized
+from cfgm_common.stats_collector import collect_stats, construct_stats_collector
 from gevent import hub
 # from neutron plugin to api server, the request URL could be large. fix the const
 # fix the const
@@ -1166,7 +1167,7 @@ class VncApiServer(object):
                 logger.error("Failed updating share-relation: %s", e.message)
     # end http_resource_delete
 
-    @log_api_stats
+    @collect_stats
     def http_resource_list(self, resource_type):
         r_class = self.get_resource_class(resource_type)
         obj_type = resource_type.replace('-', '_')
@@ -1833,8 +1834,10 @@ class VncApiServer(object):
 
     # Public Methods
     def route(self, uri, method, handler):
-        #print("ADD ROUTE {}".format(uri))
         def handler_trap_exception(*args, **kwargs):
+            stats = construct_stats_collector(stats_enabled=self._args.enable_stats)
+            gevent.getcurrent().stats = stats
+            stats.start("route")
             set_context(ApiContext(external_req=bottle.request))
             trace = None
             try:
@@ -1842,6 +1845,7 @@ class VncApiServer(object):
                 self._extensions_validate_request(get_request())
 
                 trace = self._generate_rest_api_request_trace()
+
                 (ok, status) = self._rbac.validate_request(get_request())
                 if not ok:
                     (code, err_msg) = status
@@ -1884,6 +1888,10 @@ class VncApiServer(object):
                             bottle.abort(500, msg)
 
                     raise
+            finally:
+                stats.end("route")
+                gevent.getcurrent().stats.print_stats()
+                gevent.getcurrent().stats = None
 
         bottle.route(uri, method, handler_trap_exception)
     # end route
@@ -2990,7 +2998,7 @@ class VncApiServer(object):
 
         return s_obj
     # end _create_singleton_entry
-
+    @collect_stats
     def _list_collection(self, resource_type, parent_uuids=None,
                          back_ref_uuids=None, obj_uuids=None,
                          is_count=False, is_detail=False, filters=None,
@@ -3029,15 +3037,6 @@ class VncApiServer(object):
         if is_count:
             return {'%s' %(resource_type): {'count': total}}
 
-        # filter out items not authorized
-        pending_result = []
-        for fq_name, uuid in result:
-            (ok, status) = self._permissions.check_perms_read(get_request(), uuid)
-            if not ok and status[0] == 403:
-                total -= 1
-            else:
-                pending_result.append((fq_name, uuid))
-        result = pending_result
 
         owned_objs = set([obj_uuid for (fq_name, obj_uuid) in result])
 
@@ -3068,6 +3067,14 @@ class VncApiServer(object):
                     raise cfgm_common.exceptions.HttpError(404, result, "40002")
                 for obj_result in result:
                     if obj_result['id_perms'].get('user_visible', True):
+                        # skip items not authorized
+                        (ok, status) = self._permissions.check_perms_read(
+                                get_request(), obj_result['uuid'],
+                                obj_result['id_perms'], obj_result.get('fq_name')[-1],
+                                obj_type, obj_result.get('perms2'))
+                        if not ok and status[0] == 403:
+                            total -= 1
+                            continue
                         obj_dict = {}
                         obj_dict['uuid'] = obj_result['uuid']
                         obj_dict['uri'] = self.generate_uri(resource_type,
@@ -3129,6 +3136,14 @@ class VncApiServer(object):
                     continue
                 if (obj_dict['id_perms'].get('user_visible', True) or
                     self.is_admin_request()):
+                    # skip items not authorized
+                    (ok, status) = self._permissions.check_perms_read(
+                            get_request(), obj_result['uuid'],
+                            obj_result['id_perms'], obj_result.get('fq_name')[-1],
+                            obj_type, obj_result.get('perms2'))
+                    if not ok and status[0] == 403:
+                        total -= 1
+                        continue
                     obj_dicts.append(obj_dict)
 
         return {'total': total, resource_type: obj_dicts}
@@ -3201,6 +3216,7 @@ class VncApiServer(object):
     # end _set_api_audit_info
 
     # uuid is parent's for collections
+    @collect_stats
     def _http_get_common(self, request, uuid=None):
         # TODO check api + resource perms etc.
         if self.is_multi_tenancy_set() and uuid:
