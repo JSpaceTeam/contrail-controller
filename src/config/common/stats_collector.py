@@ -7,10 +7,7 @@ from six import wraps
 
 
 def construct_stats_collector(stats_enabled=False):
-    if stats_enabled:
-        return StatsCollector()
-    else:
-        return NoOpStatsCollector()
+    return StatsCollector() if stats_enabled else NoOpStatsCollector()
 
 
 class StatsCollector(object):
@@ -20,7 +17,7 @@ class StatsCollector(object):
 
     """
 
-    def __init__(self, enabled=False):
+    def __init__(self):
         self.events = defaultdict(deque)
         self.order = []
 
@@ -63,7 +60,7 @@ class StatsCollector(object):
         """
         watches = self.events.get(event_id)
         elapsed = [watches.popleft().elapsed() for _ in range(len(watches))]
-        return elapsed, reduce(operator.add, elapsed, 0)
+        return "Total Calls: %d" % len(elapsed), reduce(operator.add, elapsed, 0)
 
     def print_stats(self):
         print "%30s Event Stats %30s" % ("=" * 30, "=" * 30)
