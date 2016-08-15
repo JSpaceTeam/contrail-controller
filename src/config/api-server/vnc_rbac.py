@@ -9,11 +9,12 @@ import re
 import ConfigParser
 
 from cfgm_common.stats_collector import collect_stats
+from memoized import memoized
 from provision_defaults import *
 from cfgm_common.exceptions import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from gen.vnc_api_client_gen import SERVICE_PATH
-
+from cachetools.lfu import LFUCache
 def get_service_api_access_list_fqname():
     return ['default-domain', SERVICE_PATH.replace('/', '')+'-api-access-list']
 
@@ -27,6 +28,8 @@ class VncRbac(object):
     def __init__(self, server_mgr, db_conn):
         self._db_conn = db_conn
         self._server_mgr = server_mgr
+        self._cache = LFUCache(maxsize=100)
+
     # end __init__
 
     @property
@@ -87,6 +90,9 @@ class VncRbac(object):
                 default_api_access_list_uuid = api_access_list['uuid']
         return default_api_access_list_uuid, service_api_access_list_uuid
 
+
+
+    @collect_stats
     def get_rbac_rules(self, request):
         rule_list = []
         env = request.headers.environ
@@ -97,17 +103,8 @@ class VncRbac(object):
             project_id = str(uuid.UUID(project_id))
 
         if domain_id is None:
-            ok = False
             try:
-                (ok, result) = self._db_conn.dbe_read('project', {'uuid' : project_id},  ['fq_name'])
-            except Exception as e:
-                ok = False
-                pass
-            # if we don't know about this tenant, try default domain.
-            # This can happen for service requests such as from neutron or projects not synched from keystone
-            domain_name = result['fq_name'][:-1] if ok else ['default-domain']
-            try:
-                domain_id = self._db_conn.fq_name_to_uuid('domain', domain_name)
+                domain_id = self._project_to_domain(project_id)
             except NoIdError:
                 return rule_list
         else:
@@ -118,8 +115,7 @@ class VncRbac(object):
 
         # get domain rbac group
         obj_fields = ['api_access_lists']
-        obj_ids = {'uuid' : domain_id}
-        (ok, result) = self._db_conn.dbe_read('domain', obj_ids, obj_fields)
+        (ok, result) = self._read_cached_objects('domain', domain_id, obj_fields)
         if not ok or 'api_access_lists' not in result:
             return rule_list
         api_access_lists = result['api_access_lists']
@@ -134,7 +130,7 @@ class VncRbac(object):
             obj_ids = {'uuid' : service_api_access_list_uuid} if service_api_access_list_uuid else \
                 {'uuid' : default_api_access_list_uuid}
 
-        (ok, result) = self._db_conn.dbe_read('api-access-list', obj_ids, obj_fields)
+        (ok, result) = self._read_cached_objects('api-access-list', obj_ids['uuid'], obj_fields)
         if not ok or 'api_access_list_entries' not in result:
             return rule_list
         # {u'rbac_rule': [{u'rule_object': u'*', u'rule_perms': [{u'role_crud': u'CRUD', u'role_name': u'admin'}], u'rule_field': None}]}
@@ -148,7 +144,7 @@ class VncRbac(object):
         obj_fields = ['api_access_lists']
         obj_ids = {'uuid' : project_id}
         try:
-            (ok, result) = self._db_conn.dbe_read('project', obj_ids, obj_fields)
+            (ok, result) = self._read_cached_objects('project', project_id, obj_fields)
         except Exception as e:
             ok = False
         if not ok or 'api_access_lists' not in result:
@@ -156,7 +152,8 @@ class VncRbac(object):
         api_access_lists = result['api_access_lists']
 
         obj_fields = ['api_access_list_entries']
-        obj_ids = {'uuid' : api_access_lists[0]['uuid']}
+        obj_ids = {'uuid': api_access_lists[0]['uuid']}
+        # Don't use cached api access since project level access list can change 
         (ok, result) = self._db_conn.dbe_read('api-access-list', obj_ids, obj_fields)
         if not ok or 'api_access_list_entries' not in result:
             return rule_list
@@ -315,3 +312,47 @@ class VncRbac(object):
             roles = env['HTTP_X_ROLE'].split(',')
         return (user, roles)
     # end get_user_roles
+
+    def _read_cached_objects(self, obj_type, obj_id, obj_fields):
+        """
+        Read cached objects. Since we know that these objects are not changed we can cache them to read the same value.
+        Args:
+            obj_type:
+            obj_id:
+            obj_fields:
+
+        Returns:
+
+        """
+        if obj_type + obj_id in self._cache:
+            return True, self._cache[obj_type+obj_id]
+        obj_ids = {'uuid': obj_id}
+        ok, result = self._db_conn.dbe_read(obj_type, obj_ids, obj_fields)
+        if ok:
+            self._cache[obj_type+obj_id] = result
+        return ok, result
+
+    # end _read_cached_objects
+
+    @memoized
+    def _project_to_domain(self, project_id):
+        """
+        cached project to domain id mapping
+        Args:
+            project_id:
+
+        Returns:
+
+        """
+        ok = False
+        try:
+            (ok, result) = self._db_conn.dbe_read('project', {'uuid' : project_id},  ['fq_name'])
+        except Exception as e:
+            ok = False
+            pass
+        # if we don't know about this tenant, try default domain.
+        # This can happen for service requests such as from neutron or projects not synched from keystone
+        domain_name = result['fq_name'][:-1] if ok else ['default-domain']
+        return self._db_conn.fq_name_to_uuid('domain', domain_name)
+
+    # end _project_to_domain
