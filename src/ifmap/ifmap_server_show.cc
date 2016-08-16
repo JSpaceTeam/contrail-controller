@@ -425,7 +425,7 @@ void IFMapTableShowReq::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapTable::AllocBuffer;
     s0.cbFn_ = ShowIFMapTable::BufferStage;
     s0.instances_.push_back(0);
@@ -447,7 +447,7 @@ void IFMapTableShowReqIterate::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapTable::AllocBuffer;
     s0.cbFn_ = ShowIFMapTable::BufferStageIterate;
     s0.instances_.push_back(0);
@@ -478,7 +478,8 @@ public:
         return static_cast<RequestPipeline::InstData *>(new ShowData);
     }
 
-    static bool SkipLink(DBEntryBase *src, const string &search_string);
+    static bool IncludeLink(DBEntryBase *src, const string &search_string,
+                            const string &metadata);
     static void CopyNode(IFMapLinkShowInfo *dest, DBEntryBase *src,
                          IFMapServer *server);
     static bool BufferStageCommon(const IFMapLinkTableShowReq *request,
@@ -505,21 +506,25 @@ public:
         IFMapLinkTableShowReq *req, string *last_link_name);
 };
 
-bool ShowIFMapLinkTable::SkipLink(DBEntryBase *src,
-                                  const string &search_string) {
+bool ShowIFMapLinkTable::IncludeLink(DBEntryBase *src,
+        const string &search_string, const string &metadata) {
     IFMapLink *link = static_cast<IFMapLink *>(src);
     IFMapNode *left = link->left();
     IFMapNode *right = link->right();
-    if (search_string.empty()) {
+
+    // If we do not find the search string in the names of either of the 2 ends,
+    // do not include the link
+    if (!search_string.empty() &&
+        (!left || (left->ToString().find(search_string) == string::npos)) &&
+        (!right || (right->ToString().find(search_string) == string::npos))) {
         return false;
     }
-    // If we do not find the search string in the names of either of the 2 ends,
-    // skip the link
-    if ((!left || (left->ToString().find(search_string) == string::npos)) &&
-        (!right || (right->ToString().find(search_string) == string::npos))) {
-        return true;
+    // If the metadata does not match, do not include the link
+    if (!metadata.empty() &&
+        (link->metadata().find(metadata) == string::npos)) {
+        return false;
     }
-    return false;
+    return true;
 }
 
 void ShowIFMapLinkTable::CopyNode(IFMapLinkShowInfo *dest, DBEntryBase *src,
@@ -566,8 +571,9 @@ void ShowIFMapLinkTable::CopyNode(IFMapLinkShowInfo *dest, DBEntryBase *src,
 }
 
 // Format of link_info string:
-// search_string||last_link_name
+// search_string||metadata||last_link_name
 //      search_string: original input. Could be empty.
+//      metadata: original input. Could be empty.
 //      last_link_name: name of last link that was printed in the previous round
 bool ShowIFMapLinkTable::ConvertReqIterateToReq(
         const IFMapLinkTableShowReqIterate *req_iterate,
@@ -586,11 +592,20 @@ bool ShowIFMapLinkTable::ConvertReqIterateToReq(
     }
     string search_string = link_info.substr(0, pos1);
 
+    // metadata
+    size_t pos2 = link_info.find(kShowIterSeparator, (pos1 + sep_size));
+    if (pos2 == string::npos) {
+        return false;
+    }
+    string metadata = link_info.substr((pos1 + sep_size),
+                                       pos2 - (pos1 + sep_size));
+
     // last_link_name
-    *last_link_name = link_info.substr(pos1 + sep_size);
+    *last_link_name = link_info.substr(pos2 + sep_size);
 
     // Fill up the fields of IFMapLinkTableShowReq appropriately.
     req->set_search_string(search_string);
+    req->set_metadata(metadata);
     return true;
 }
 
@@ -616,18 +631,18 @@ bool ShowIFMapLinkTable::BufferStageCommon(const IFMapLinkTableShowReq *request,
             src = partition->GetFirst();
         }
         for (; src != NULL; src = partition->GetNext(src)) {
-            IFMapLink *src_link = static_cast<IFMapLink *>(src);
-            if (SkipLink(src, request->get_search_string())) {
-                continue;
-            }
-            IFMapLinkShowInfo dest;
-            CopyNode(&dest, src, sctx->ifmap_server());
-            show_data->send_buffer.push_back(dest);
-            // If we have picked up enough links for this round...
-            if (show_data->send_buffer.size() == kMaxElementsPerRound) {
-                show_data->last_link_name = src_link->link_name();
-                buffer_full = true;
-                break;
+            if (IncludeLink(src, request->get_search_string(),
+                            request->get_metadata())) {
+                IFMapLinkShowInfo dest;
+                CopyNode(&dest, src, sctx->ifmap_server());
+                show_data->send_buffer.push_back(dest);
+                // If we have picked up enough links for this round...
+                if (show_data->send_buffer.size() == kMaxElementsPerRound) {
+                    IFMapLink *src_link = static_cast<IFMapLink *>(src);
+                    show_data->last_link_name = src_link->link_name();
+                    buffer_full = true;
+                    break;
+                }
             }
         }
     } else {
@@ -682,6 +697,7 @@ void ShowIFMapLinkTable::SendStageCommon(const IFMapLinkTableShowReq *request,
     string next_batch;
     if (dest_buffer.size() == kMaxElementsPerRound) {
         next_batch = request->get_search_string() + kShowIterSeparator +
+                     request->get_metadata() + kShowIterSeparator +
                      show_data.last_link_name;
     }
 
@@ -736,7 +752,7 @@ void IFMapLinkTableShowReq::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapLinkTable::AllocBuffer;
     s0.cbFn_ = ShowIFMapLinkTable::BufferStage;
     s0.instances_.push_back(0);
@@ -758,7 +774,7 @@ void IFMapLinkTableShowReqIterate::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapLinkTable::AllocBuffer;
     s0.cbFn_ = ShowIFMapLinkTable::BufferStageIterate;
     s0.instances_.push_back(0);
@@ -823,7 +839,7 @@ void IFMapNodeShowReq::HandleRequest() const {
     RequestPipeline::StageSpec s0;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.cbFn_ = IFMapNodeShowReqHandleRequest;
     s0.instances_.push_back(0);
 
@@ -939,15 +955,27 @@ bool ShowIFMapPerClientNodes::CopyNode(IFMapPerClientNodesShowInfo *dest,
         } else {
             dest->sent = "No";
         }
-        if (server->exporter()->ClientHasConfigTracker(client_index)) {
-            if (server->exporter()->ClientConfigTrackerHasState(client_index,
-                                                                state)) {
-                dest->tracked = "Yes";
+        if (server->exporter()->ClientHasConfigTracker(
+                    IFMapExporter::INTEREST, client_index)) {
+            if (server->exporter()->ClientConfigTrackerHasState(
+                        IFMapExporter::INTEREST, client_index, state)) {
+                dest->interest_tracked = "Yes";
             } else {
-                dest->tracked = "No";
+                dest->interest_tracked = "No";
             }
         } else {
-            dest->tracked = "No tracker";
+            dest->interest_tracked = "No tracker";
+        }
+        if (server->exporter()->ClientHasConfigTracker(
+                    IFMapExporter::ADVERTISED, client_index)) {
+            if (server->exporter()->ClientConfigTrackerHasState(
+                        IFMapExporter::ADVERTISED, client_index, state)) {
+                dest->advertised_tracked = "Yes";
+            } else {
+                dest->advertised_tracked = "No";
+            }
+        } else {
+            dest->advertised_tracked = "No tracker";
         }
         return true;
     } else {
@@ -1166,7 +1194,7 @@ void IFMapPerClientNodesShowReq::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapPerClientNodes::AllocBuffer;
     s0.cbFn_ = ShowIFMapPerClientNodes::BufferStage;
     s0.instances_.push_back(0);
@@ -1188,7 +1216,7 @@ void IFMapPerClientNodesShowReqIterate::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapPerClientNodes::AllocBuffer;
     s0.cbFn_ = ShowIFMapPerClientNodes::BufferStageIterate;
     s0.instances_.push_back(0);
@@ -1236,15 +1264,27 @@ bool ShowIFMapPerClientLinkTable::CopyNode(IFMapPerClientLinksShowInfo *dest,
         } else {
             dest->sent = "No";
         }
-        if (server->exporter()->ClientHasConfigTracker(client_index)) {
-            if (server->exporter()->ClientConfigTrackerHasState(client_index,
-                                                                state)) {
-                dest->tracked = "Yes";
+        if (server->exporter()->ClientHasConfigTracker(
+                    IFMapExporter::INTEREST, client_index)) {
+            if (server->exporter()->ClientConfigTrackerHasState(
+                        IFMapExporter::INTEREST, client_index, state)) {
+                dest->interest_tracked = "Yes";
             } else {
-                dest->tracked = "No";
+                dest->interest_tracked = "No";
             }
         } else {
-            dest->tracked = "No tracker";
+            dest->interest_tracked = "No tracker";
+        }
+        if (server->exporter()->ClientHasConfigTracker(
+                    IFMapExporter::ADVERTISED, client_index)) {
+            if (server->exporter()->ClientConfigTrackerHasState(
+                        IFMapExporter::ADVERTISED, client_index, state)) {
+                dest->advertised_tracked = "Yes";
+            } else {
+                dest->advertised_tracked = "No";
+            }
+        } else {
+            dest->advertised_tracked = "No tracker";
         }
         return true;
     } else {
@@ -1416,7 +1456,7 @@ void IFMapPerClientLinksShowReq::HandleRequest() const {
     RequestPipeline::StageSpec s0;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.cbFn_ = ShowIFMapPerClientLinkTable::HandleRequest;
     s0.instances_.push_back(0);
 
@@ -1429,7 +1469,7 @@ void IFMapPerClientLinksShowReqIterate::HandleRequest() const {
     RequestPipeline::StageSpec s0;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.cbFn_ = ShowIFMapPerClientLinkTable::HandleRequestIterate;
     s0.instances_.push_back(0);
 
@@ -1551,7 +1591,7 @@ void IFMapUuidToNodeMappingReq::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapUuidToNodeMapping::AllocBuffer;
     s0.cbFn_ = ShowIFMapUuidToNodeMapping::BufferStage;
     s0.instances_.push_back(0);
@@ -1679,7 +1719,7 @@ void IFMapNodeToUuidMappingReq::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapNodeToUuidMapping::AllocBuffer;
     s0.cbFn_ = ShowIFMapNodeToUuidMapping::BufferStage;
     s0.instances_.push_back(0);
@@ -1806,7 +1846,7 @@ void IFMapPendingVmRegReq::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapPendingVmReg::AllocBuffer;
     s0.cbFn_ = ShowIFMapPendingVmReg::BufferStage;
     s0.instances_.push_back(0);
@@ -1831,14 +1871,18 @@ static bool IFMapServerClientShowReqHandleRequest(const Sandesh *sr,
         static_cast<IFMapSandeshContext *>(request->module_context("IFMap"));
 
     IFMapServerClientShowResp *response = new IFMapServerClientShowResp();
+    string search_string = request->get_search_string();
 
     IFMapServerShowClientMap name_list;
-    sctx->ifmap_server()->FillClientMap(&name_list);
+    sctx->ifmap_server()->FillClientMap(&name_list, search_string);
     IFMapServerShowIndexMap index_list;
-    sctx->ifmap_server()->FillIndexMap(&index_list);
+    sctx->ifmap_server()->FillIndexMap(&index_list, search_string);
+    IFMapServerClientHistoryList history_list;
+    sctx->ifmap_server()->FillClientHistory(&history_list, search_string);
 
     response->set_name_list(name_list);
     response->set_index_list(index_list);
+    response->set_history_list(history_list);
     response->set_context(request->context());
     response->set_more(false);
     response->Response();
@@ -1852,7 +1896,7 @@ void IFMapServerClientShowReq::HandleRequest() const {
     RequestPipeline::StageSpec s0;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.cbFn_ = IFMapServerClientShowReqHandleRequest;
     s0.instances_.push_back(0);
 
@@ -1888,7 +1932,7 @@ void IFMapNodeTableListShowReq::HandleRequest() const {
     RequestPipeline::StageSpec s0;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.cbFn_ = IFMapNodeTableListShowReqHandleRequest;
     s0.instances_.push_back(0);
 

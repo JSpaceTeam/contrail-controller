@@ -26,15 +26,14 @@ static map<string,string> uflowfields_ = boost::assign::map_list_of(
      "ingressInterface","pifindex");
 
 
-void IpfixCollector::HandleReceive(boost::asio::const_buffer& buffer,
+void IpfixCollector::HandleReceive(const boost::asio::const_buffer& buffer,
             boost::asio::ip::udp::endpoint remote_endpoint,
             size_t bytes_transferred,
             const boost::system::error_code& error) {
     if (!error) {
         ProcessIpfixPacket(buffer, bytes_transferred, remote_endpoint); 
-    } else {
-        DeallocateBuffer(buffer);
     }
+    DeallocateBuffer(buffer);
 }
 
 IpfixCollector::IpfixCollector(EventManager* evm,
@@ -82,7 +81,7 @@ void IpfixCollector::Shutdown() {
     }
 }
 
-void IpfixCollector::ProcessIpfixPacket(boost::asio::const_buffer& buffer,
+void IpfixCollector::ProcessIpfixPacket(const boost::asio::const_buffer& buffer,
                                         size_t length,
                                         boost::asio::ip::udp::endpoint generator_ip) { 
     num_packets_++;
@@ -173,7 +172,8 @@ int IpfixCollector::ExportDrecord(
     }
     samples.push_back(sample);
     flow_data.set_flow(samples);
-    db_handler_->UnderlayFlowSampleInsert(flow_data, tm);
+    db_handler_->UnderlayFlowSampleInsert(flow_data, tm,
+        GenDb::GenDbIf::DbAddColumnCb());
     return 0;
 }
 

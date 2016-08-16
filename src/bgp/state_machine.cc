@@ -40,8 +40,9 @@ const int StateMachine::kJitter = 10;                   // percentage
 
 #define SM_LOG(level, _Msg)                                    \
     do {                                                       \
-        ostringstream out;                                \
+        ostringstream out;                                     \
         out << _Msg;                                           \
+        if (LoggingDisabled()) break;                          \
         BGP_LOG_SERVER(peer_, (BgpTable *) 0);                 \
         BGP_LOG(BgpPeerStateMachine, level,                    \
                 BGP_LOG_FLAG_SYSLOG, BGP_PEER_DIR_NA,          \
@@ -404,12 +405,7 @@ struct Idle : sc::state<Idle, StateMachine> {
         state_machine->DeleteSession(session);
         state_machine->CancelOpenTimer();
         state_machine->CancelIdleHoldTimer();
-        bool flap = (state_machine->get_state() == StateMachine::ESTABLISHED);
         state_machine->set_state(StateMachine::IDLE);
-        if (flap) {
-            peer->increment_flap_count();
-            peer->peer_stats()->Clear();
-        }
     }
 
     ~Idle() {
@@ -432,7 +428,7 @@ struct Idle : sc::state<Idle, StateMachine> {
     sc::result react(const EvStop &event) {
         StateMachine *state_machine = &context<StateMachine>();
         state_machine->CancelIdleHoldTimer();
-        state_machine->peer()->Close();
+        state_machine->peer()->Close(false);
         return discard_event();
     }
 
@@ -563,7 +559,8 @@ struct Active : sc::state<Active, StateMachine> {
         state_machine->set_hold_time(min(event.msg->holdtime, local_holdtime));
         state_machine->AssignSession(false);
         peer->SendOpen(session);
-        peer->SetCapabilities(event.msg.get());
+        if (!peer->SetCapabilities(event.msg.get()))
+            return discard_event();
         return transit<OpenConfirm>();
     }
 };
@@ -701,7 +698,8 @@ struct Connect : sc::state<Connect, StateMachine> {
         state_machine->set_active_session(NULL);
         state_machine->AssignSession(false);
         peer->SendOpen(session);
-        peer->SetCapabilities(event.msg.get());
+        if (!peer->SetCapabilities(event.msg.get()))
+            return discard_event();
         return transit<OpenConfirm>();
     }
 };
@@ -890,7 +888,8 @@ struct OpenSent : sc::state<OpenSent, StateMachine> {
 
         int local_holdtime = state_machine->GetConfiguredHoldTime();
         state_machine->set_hold_time(min(event.msg->holdtime, local_holdtime));
-        peer->SetCapabilities(event.msg.get());
+        if (!peer->SetCapabilities(event.msg.get()))
+            return discard_event();
         return transit<OpenConfirm>();
     }
 
@@ -1027,7 +1026,7 @@ struct Established : sc::state<Established, StateMachine> {
     explicit Established(my_context ctx) : my_base(ctx) {
         StateMachine *state_machine = &context<StateMachine>();
         BgpPeer *peer = state_machine->peer();
-        peer->server()->IncUpPeerCount();
+        peer->NotifyEstablished(true);
         state_machine->connect_attempts_clear();
         state_machine->StartHoldTimer();
         state_machine->set_state(StateMachine::ESTABLISHED);
@@ -1037,16 +1036,17 @@ struct Established : sc::state<Established, StateMachine> {
     ~Established() {
         StateMachine *state_machine = &context<StateMachine>();
         BgpPeer *peer = state_machine->peer();
-        peer->server()->DecUpPeerCount();
+        peer->NotifyEstablished(false);
         state_machine->CancelHoldTimer();
     }
 
     // A new TCP session request should cause the previous BGP session
-    // to be closed, rather than ignoring the event.
+    // to be closed.
     sc::result react(const EvTcpPassiveOpen &event) {
         StateMachine *state_machine = &context<StateMachine>();
         BgpSession *session = event.session;
         state_machine->DeleteSession(session);
+        state_machine->Shutdown(BgpProto::Notification::Unknown);
         return discard_event();
     }
 
@@ -1070,26 +1070,27 @@ struct Established : sc::state<Established, StateMachine> {
 
 StateMachine::StateMachine(BgpPeer *peer)
     : work_queue_(TaskScheduler::GetInstance()->GetTaskId("bgp::StateMachine"),
-        peer->GetIndex(), boost::bind(&StateMachine::DequeueEvent, this, _1)),
+        peer->GetTaskInstance(),
+        boost::bind(&StateMachine::DequeueEvent, this, _1)),
       peer_(peer),
       active_session_(NULL),
       passive_session_(NULL),
       connect_timer_(TimerManager::CreateTimer(*peer->server()->ioservice(),
           "Connect timer",
           TaskScheduler::GetInstance()->GetTaskId("bgp::StateMachine"),
-          peer->GetIndex())),
+          peer->GetTaskInstance())),
       open_timer_(TimerManager::CreateTimer(*peer->server()->ioservice(),
           "Open timer",
           TaskScheduler::GetInstance()->GetTaskId("bgp::StateMachine"),
-          peer->GetIndex())),
+          peer->GetTaskInstance())),
       hold_timer_(TimerManager::CreateTimer(*peer->server()->ioservice(),
           "Hold timer",
           TaskScheduler::GetInstance()->GetTaskId("bgp::StateMachine"),
-          peer->GetIndex())),
+          peer->GetTaskInstance())),
       idle_hold_timer_(TimerManager::CreateTimer(*peer->server()->ioservice(),
           "Idle hold timer",
           TaskScheduler::GetInstance()->GetTaskId("bgp::StateMachine"),
-          peer->GetIndex())),
+          peer->GetTaskInstance())),
       hold_time_(GetConfiguredHoldTime()),
       idle_hold_time_(0),
       attempts_(0),
@@ -1133,11 +1134,12 @@ void StateMachine::SetAdminState(bool down) {
     if (down) {
         Enqueue(fsm::EvStop(BgpProto::Notification::AdminShutdown));
     } else {
+        // Reset all previous state.
         reset_idle_hold_time();
-        peer_->reset_flap_count();
-        // On fresh restart of state machine, all previous state should be reset
         reset_last_info();
-        Enqueue(fsm::EvStart());
+        peer_->reset_flap_count();
+        if (!peer_->IsCloseInProgress())
+            Enqueue(fsm::EvStart());
     }
 }
 
@@ -1145,14 +1147,25 @@ bool StateMachine::IsQueueEmpty() const {
     return work_queue_.IsQueueEmpty();
 }
 
+void StateMachine::UpdateFlapCount() {
+    if (get_state() == StateMachine::ESTABLISHED) {
+        peer_->increment_flap_count();
+        peer_->peer_stats()->Clear();
+    }
+}
+
 template <typename Ev, int code>
 void StateMachine::OnIdle(const Ev &event) {
+    UpdateFlapCount();
+
     // Release all resources.
     SendNotificationAndClose(peer_->session(), code);
 }
 
 template <typename Ev>
 void StateMachine::OnIdleCease(const Ev &event) {
+    UpdateFlapCount();
+
     // Release all resources.
     SendNotificationAndClose(
         peer_->session(), BgpProto::Notification::Cease, event.subcode);
@@ -1164,11 +1177,15 @@ void StateMachine::OnIdleCease(const Ev &event) {
 //
 template <typename Ev, int code>
 void StateMachine::OnIdleError(const Ev &event) {
+    UpdateFlapCount();
+
     // Release all resources.
     SendNotificationAndClose(event.session, code, event.subcode, event.data);
 }
 
 void StateMachine::OnIdleNotification(const fsm::EvBgpNotification &event) {
+    UpdateFlapCount();
+
     // Release all resources.
     SendNotificationAndClose(peer()->session(), 0);
     set_last_notification_in(event.msg->error, event.msg->subcode,
@@ -1346,7 +1363,9 @@ void StateMachine::SendNotificationAndClose(BgpSession *session, int code,
 
     set_idle_hold_time(idle_hold_time() ? idle_hold_time() : kIdleHoldTime);
     reset_hold_time();
-    peer_->Close();
+
+    bool non_graceful = code && !peer_->SkipNotificationReceive(code, subcode);
+    peer_->Close(non_graceful);
 }
 
 //
@@ -1440,6 +1459,15 @@ bool StateMachine::PassiveOpen(BgpSession *session) {
     return true;
 }
 
+void StateMachine::OnNotificationMessage(BgpSession *session,
+                                         BgpProto::BgpMessage *msg) {
+    BgpPeer *peer = session->peer();
+    if (peer)
+        peer->inc_rx_notification();
+    Enqueue(fsm::EvBgpNotification(session,
+            static_cast<BgpProto::Notification *>(msg)));
+}
+
 //
 // Handle incoming message on the session.
 //
@@ -1467,11 +1495,7 @@ void StateMachine::OnMessage(BgpSession *session, BgpProto::BgpMessage *msg,
         break;
     }
     case BgpProto::NOTIFICATION: {
-        BgpPeer *peer = session->peer();
-        if (peer)
-            peer->inc_rx_notification();
-        Enqueue(fsm::EvBgpNotification(session,
-                static_cast<BgpProto::Notification *>(msg)));
+        OnNotificationMessage(session, msg);
         msg = NULL;
         break;
     }
@@ -1547,6 +1571,10 @@ const std::string StateMachine::last_state_change_at() const {
     return integerToString(UTCUsecToPTime(last_state_change_at_));
 }
 
+const uint64_t StateMachine::last_state_change_usecs_at() const {
+    return last_state_change_at_;
+}
+
 ostream &operator<<(ostream &out, const StateMachine::State &state) {
     out << state_names[state];
     return out;
@@ -1592,7 +1620,7 @@ void StateMachine::LogEvent(string event_name, string msg,
     // Reduce log level for keepalive and update messages.
     if (get_state() == ESTABLISHED &&
         (event_name == "fsm::EvBgpKeepalive" ||
-             event_name == "fsm::EvBgpUpdate")) {
+         event_name == "fsm::EvBgpUpdate")) {
         log_level = Sandesh::LoggingUtLevel();
     }
     SM_LOG(log_level, msg << " " << event_name << " in state " << StateName());
@@ -1673,7 +1701,7 @@ int StateMachine::GetConfiguredHoldTime() const {
     return kHoldTime;
 }
 
-void StateMachine::BGPPeerInfoSend(BgpPeerInfoData &peer_info) {
+void StateMachine::BGPPeerInfoSend(const BgpPeerInfoData &peer_info) {
     BGPPeerInfo::Send(peer_info);
 }
 
@@ -1681,9 +1709,11 @@ void StateMachine::set_last_event(const std::string &event) {
     last_event_ = event;
     last_event_at_ = UTCTimestampUsec();
 
-    // Don't log keepalive events.
-    if (event == "fsm::EvBgpKeepalive")
+    // Skip keepalive and update events after we've reached established state.
+    if (state_ == ESTABLISHED &&
+        (event == "fsm::EvBgpKeepalive" || event == "fsm::EvBgpUpdate")) {
         return;
+    }
 
     BgpPeerInfoData peer_info;
     peer_info.set_name(peer()->ToUVEKey());

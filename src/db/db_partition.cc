@@ -10,13 +10,12 @@
 #include <tbb/mutex.h>
 
 #include "base/task.h"
+#include "db/db.h"
 #include "db/db_client.h"
 #include "db/db_entry.h"
 
 using tbb::concurrent_queue;
 using tbb::atomic;
-
-int DBPartition::db_partition_task_id_ = -1;
 
 struct RequestQueueEntry {
     // Constructor takes ownership of DBRequest key, data.
@@ -44,8 +43,11 @@ public:
     typedef concurrent_queue<RemoveQueueEntry *> RemoveQueue;
     typedef std::list<DBTablePartBase *> TablePartList;
 
-    explicit WorkQueue(int partition_id) 
-        : db_partition_id_(partition_id), disable_(false), running_(false) {
+    explicit WorkQueue(DBPartition *partition, int partition_id)
+        : db_partition_(partition),
+          db_partition_id_(partition_id),
+          disable_(false),
+          running_(false) {
         request_count_ = 0;
         max_request_queue_len_ = 0;
         total_request_count_ = 0;
@@ -89,12 +91,17 @@ public:
         return success;
     }
 
+    void MaybeStartRunnerUnlocked();
     void MaybeStartRunner();
     bool RunnerDone();
 
+    // Normally called from single task that either runs in DB context or is
+    // exclusive with DB task, but can be called concurrently from multiple
+    // bgp::ConfigHelper tasks.
     void SetActive(DBTablePartBase *tpart) {
+        tbb::mutex::scoped_lock lock(mutex_);
         change_list_.push_back(tpart);
-        MaybeStartRunner();
+        MaybeStartRunnerUnlocked();
     }
 
     DBTablePartBase *GetActiveTable() {
@@ -109,6 +116,8 @@ public:
     int db_partition_id() {
         return db_partition_id_;
     }
+
+    int db_task_id() const { return db_partition_->task_id(); }
 
     bool IsDBQueueEmpty() const {
         return (request_queue_.empty() && change_list_.empty());
@@ -130,6 +139,7 @@ public:
     }
 
 private:
+    DBPartition *db_partition_;
     RequestQueue request_queue_;
     TablePartList change_list_;
     atomic<long> request_count_;
@@ -140,6 +150,7 @@ private:
     int db_partition_id_;
     bool disable_;
     bool running_;
+
     DISALLOW_COPY_AND_ASSIGN(WorkQueue);
 };
 
@@ -160,7 +171,7 @@ class DBPartition::QueueRunner : public Task {
 public:
     static const int kMaxIterations = 32;
     QueueRunner(WorkQueue *queue) 
-        : Task(db_partition_task_id_, queue->db_partition_id()), 
+        : Task(queue->db_task_id(), queue->db_partition_id()),
           queue_(queue) {
     }
 
@@ -225,8 +236,7 @@ private:
     WorkQueue *queue_;
 };
 
-void DBPartition::WorkQueue::MaybeStartRunner() {
-    tbb::mutex::scoped_lock lock(mutex_);
+void DBPartition::WorkQueue::MaybeStartRunnerUnlocked() {
     if (running_) {
         return;
     }
@@ -234,6 +244,11 @@ void DBPartition::WorkQueue::MaybeStartRunner() {
     QueueRunner *runner = new QueueRunner(this);
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
     scheduler->Enqueue(runner);
+}
+
+void DBPartition::WorkQueue::MaybeStartRunner() {
+    tbb::mutex::scoped_lock lock(mutex_);
+    MaybeStartRunnerUnlocked();
 }
 
 bool DBPartition::WorkQueue::RunnerDone() {
@@ -247,12 +262,8 @@ bool DBPartition::WorkQueue::RunnerDone() {
     return false;
 }
 
-DBPartition::DBPartition(int partition_id)
-    : work_queue_(new WorkQueue(partition_id)) {
-    if (db_partition_task_id_ == -1) {
-        TaskScheduler *scheduler = TaskScheduler::GetInstance();
-        db_partition_task_id_ = scheduler->GetTaskId("db::DBTable");
-    }
+DBPartition::DBPartition(DB *db, int partition_id)
+    : db_(db), work_queue_(new WorkQueue(this, partition_id)) {
 }
 
 // The DBPartition destructor needs to be defined after WorkQueue has
@@ -287,4 +298,8 @@ uint64_t DBPartition::total_request_count() const {
 
 uint64_t DBPartition::max_request_queue_len() const {
     return work_queue_->max_request_queue_len();
+}
+
+int DBPartition::task_id() const {
+    return db_->task_id();
 }

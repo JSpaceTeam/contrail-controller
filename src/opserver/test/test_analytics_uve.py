@@ -64,7 +64,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         Then it checks that the collector UVE (via redis)
         can be accessed from opserver.
         '''
-        logging.info("*** test_00_nocassandra ***")
+        logging.info("%%% test_00_nocassandra %%%")
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir, self.__class__.redis_port, 0)) 
@@ -81,7 +81,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         Then it checks that the VM UVE (via redis) can be accessed from
         opserver.
         '''
-        logging.info("*** test_01_vm_uve ***")
+        logging.info("%%% test_01_vm_uve %%%")
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir, self.__class__.redis_port, 0))
@@ -125,7 +125,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         Then it checks that the VM UVE (via redis) can be accessed from
         opserver.
         '''
-        logging.info("*** test_02_vm_uve_with_password ***")
+        logging.info("%%% test_02_vm_uve_with_password %%%")
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir, -1, 0,
@@ -147,7 +147,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
 
     #@unittest.skip('verify redis-uve restart')
     def test_03_redis_uve_restart(self):
-        logging.info('*** test_03_redis_uve_restart ***')
+        logging.info('%%% test_03_redis_uve_restart %%%')
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir, -1, 0,
@@ -164,20 +164,20 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         # check for PartialSysinfo alarm
         alarm_gen1.send_vrouterinfo("myvrouter1")
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter1", "PartialSysinfoCompute"))
+            "ObjectVRouter:myvrouter1", "partial-sysinfo-compute"))
 
         self.verify_uve_resync(vizd_obj)
  
         # Alarm should return after redis restart
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter1", "PartialSysinfoCompute"))
+            "ObjectVRouter:myvrouter1", "partial-sysinfo-compute"))
 
         # should there be a return True here?
     # end test_03_redis_uve_restart
 
     #@unittest.skip('verify redis-uve restart')
     def test_04_redis_uve_restart_with_password(self):
-        logging.info('*** test_03_redis_uve_restart_with_password ***')
+        logging.info('%%% test_03_redis_uve_restart_with_password %%%')
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging,
@@ -218,7 +218,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
 
     #@unittest.skip('Skipping contrail-collector HA test')
     def test_05_collector_ha(self):
-        logging.info('*** test_05_collector_ha ***')
+        logging.info('%%% test_05_collector_ha %%%')
         
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir, -1, 0,
@@ -341,7 +341,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         It enables partition 0 on alarmgen, and confirms
         that it got enabled
         '''
-        logging.info("*** test_06_alarmgen_basic ***")
+        logging.info("%%% test_06_alarmgen_basic %%%")
 
         if AnalyticsUveTest._check_skip_kafka() is True:
             return True
@@ -352,7 +352,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         assert vizd_obj.verify_on_setup()
 
         assert(vizd_obj.verify_uvetable_alarm("ObjectCollectorInfo",
-            "ObjectCollectorInfo:" + socket.gethostname(), "ProcessStatus"))
+            "ObjectCollectorInfo:" + socket.gethostname(), "process-status"))
         # setup generator for sending Vrouter build_info
         collector = vizd_obj.collectors[0].get_addr()
         alarm_gen1 = self.useFixture(
@@ -364,28 +364,35 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         # check for PartialSysinfo alarm
         alarm_gen1.send_vrouterinfo("myvrouter1")
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter1", "PartialSysinfoCompute",
-                any_of = [[{"json_operand1_value":"null",
-                    "rule": {"AlarmTemplate":{"oper":"==",
-                    "operand1":{"Operand1":{"keys":["ObjectVRouter","build_info"]}},
-                    "operand2":{"Operand2":{"json_value":"null"}}}}}]]))
+            "ObjectVRouter:myvrouter1", "partial-sysinfo-compute",
+            rules=[{"and_list": [{
+                "condition": {
+                    "operation": "==",
+                    "operand1": "ObjectVRouter.build_info",
+                    "operand2": {
+                        "json_value": "null"
+                    }
+                },
+                "match": [{"json_operand1_value": "null"}]
+            }]}]
+        ))
 
         # Now try to clear the alarm by sending build_info
         alarm_gen1.send_vrouterinfo("myvrouter1", b_info = True)
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter1", "PartialSysinfoCompute", is_set = False))
+            "ObjectVRouter:myvrouter1", "partial-sysinfo-compute", is_set = False))
 
         # send vrouter UVE without build_info !!!
         # check for PartialSysinfo alarm
         alarm_gen1.send_vrouterinfo("myvrouter1", deleted = True)
         alarm_gen1.send_vrouterinfo("myvrouter1")
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter1", "PartialSysinfoCompute"))
+            "ObjectVRouter:myvrouter1", "partial-sysinfo-compute"))
 
         # Now try to clear the alarm by deleting the UVE
         alarm_gen1.send_vrouterinfo("myvrouter1", deleted = True)
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter1", "PartialSysinfoCompute", is_set = False))
+            "ObjectVRouter:myvrouter1", "partial-sysinfo-compute", is_set = False))
 
         alarm_gen2 = self.useFixture(
             GeneratorFixture('vrouter-agent', [collector], logging,
@@ -396,19 +403,19 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         # check for PartialSysinfo alarm
         alarm_gen2.send_vrouterinfo("myvrouter2")
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter2", "PartialSysinfoCompute"))
+            "ObjectVRouter:myvrouter2", "partial-sysinfo-compute"))
 
         # Now try to clear the alarm by disconnecting the generator
         alarm_gen2._sandesh_instance._client._connection.set_admin_state(\
             down=True)
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter2", "PartialSysinfoCompute", is_set = False))
+            "ObjectVRouter:myvrouter2", "partial-sysinfo-compute", is_set = False))
          
         # send vrouter UVE of myvrouter without build_info again !!!
         # check for PartialSysinfo alarm
         alarm_gen1.send_vrouterinfo("myvrouter1")
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter1", "PartialSysinfoCompute"))
+            "ObjectVRouter:myvrouter1", "partial-sysinfo-compute"))
 
         # Verify that we can give up partition ownership 
         assert(vizd_obj.set_alarmgen_partition(0,0) == 'true')
@@ -432,7 +439,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         # The PartialSysinfo alarm om myvrouter should return
         assert(vizd_obj.verify_uvetable_alarm("ObjectVRouter",
-            "ObjectVRouter:myvrouter1", "PartialSysinfoCompute"))
+            "ObjectVRouter:myvrouter1", "partial-sysinfo-compute"))
 
         return True
     # end test_06_alarmgen_basic
@@ -445,7 +452,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         test sends alarms from alarm generators and verifies the
         retrieval of alarms from analytics-api.
         '''
-        logging.info('*** test_07_alarm ***')
+        logging.info('%%% test_07_alarm %%%')
 
         if AnalyticsUveTest._check_skip_kafka() is True:
             return True
@@ -469,8 +476,6 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         # send process state alarm for analytics-node
         alarms = alarm_gen1.create_process_state_alarm(
                     'contrail-query-engine')
-        alarms += alarm_gen1.create_process_state_alarm(
-                    'contrail-snmp-collector')
         alarm_gen1.send_alarm(socket.gethostname()+'_1', alarms,
                               COLLECTOR_INFO_TABLE)
         analytics_tbl = _OBJECT_TABLES[COLLECTOR_INFO_TABLE].log_query_name
@@ -562,7 +567,7 @@ class AnalyticsUveTest(testtools.TestCase, fixtures.TestWithFixtures):
         This test verifies the filter options kfilt, sfilt, mfilt and cfilt
         in the UVE/Alarm GET and POST methods.
         '''
-        logging.info('*** test_08_uve_alarm_filter ***')
+        logging.info('%%% test_08_uve_alarm_filter %%%')
 
         if AnalyticsUveTest._check_skip_kafka() is True:
             return True

@@ -259,6 +259,13 @@ PathPreferenceSM::~PathPreferenceSM() {
         timer_->Cancel();
         TimerManager::DeleteTimer(timer_);
     }
+
+    PathDependencyList::iterator iter = dependent_routes_.begin();
+    for (;iter != dependent_routes_.end(); iter++) {
+        PathPreferenceSM *path_sm = iter.operator->();
+        path_sm->process_event(EvWaitForTraffic());
+    }
+
     timer_ = NULL;
 }
 
@@ -416,8 +423,14 @@ void PathPreferenceSM::Process() {
 }
 
 void PathPreferenceSM::Log(std::string state) {
+    std::string dependent_ip_str = "";
+    if (is_dependent_rt()) {
+        dependent_ip_str = dependent_ip().to_string();
+    }
+
     PATH_PREFERENCE_TRACE(rt_->vrf()->GetName(), rt_->GetAddressString(),
-                          preference(), sequence(), state, timeout());
+                          preference(), sequence(), state, timeout(),
+                          dependent_ip_str);
 }
 
 void PathPreferenceSM::EnqueuePathChange() {
@@ -767,6 +780,8 @@ void PathPreferenceState::Process() {
              path_preference_sm->set_dependent_rt(NULL);
          }
          path_preference_sm->set_is_dependent_rt(dependent_rt);
+         path_preference_sm->set_dependent_ip(
+                 path->path_preference().dependent_ip());
 
          path_preference_sm->set_seen(true);
          path_preference_sm->Process();
@@ -1042,8 +1057,14 @@ void PathPreferenceModule::EnqueueTrafficSeen(IpAddress ip, uint32_t plen,
     }
 
     PathPreferenceEventContainer event;
-    event.ip_ = rt->addr();
-    event.plen_ = rt->plen();
+    if (rt) {
+        event.ip_ = rt->addr();
+        event.plen_ = rt->plen();
+    } else {
+        // (0 IP + Mac) event required for EVPN
+        event.ip_ = IpAddress();
+        event.plen_ = 32;
+    }
     event.interface_index_ = interface_index;
     event.vrf_index_ = vrf_index;
     event.mac_ = mac;

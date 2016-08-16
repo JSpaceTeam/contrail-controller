@@ -21,7 +21,7 @@ public:
         FlowStatsCollectorTest *f = static_cast<FlowStatsCollectorTest *>
                                     (Agent::GetInstance()->flow_stats_manager()
                                      ->default_flow_stats_collector());
-        FlowExportInfo *info = f->FindFlowExportInfo(fe_->uuid());
+        FlowExportInfo *info = f->FindFlowExportInfo(fe_);
         if (info) {
             info->SetActionLog();
         }
@@ -35,7 +35,7 @@ private:
 class ProuterUveSendTask : public Task {
 public:
     ProuterUveSendTask() :
-        Task((TaskScheduler::GetInstance()->GetTaskId("db::DBTable")), 0) {
+        Task((TaskScheduler::GetInstance()->GetTaskId(kTaskDBExclude)), 0) {
     }
     virtual bool Run() {
         Agent::GetInstance()->uve()->prouter_uve_table()->TimerExpiry();
@@ -47,7 +47,7 @@ public:
 class PIUveSendTask : public Task {
 public:
     PIUveSendTask() :
-        Task((TaskScheduler::GetInstance()->GetTaskId("db::DBTable")), 0) {
+        Task((TaskScheduler::GetInstance()->GetTaskId(kTaskDBExclude)), 0) {
     }
     virtual bool Run() {
         Agent::GetInstance()->uve()->prouter_uve_table()->PITimerExpiry();
@@ -59,7 +59,7 @@ public:
 class LIUveSendTask : public Task {
 public:
     LIUveSendTask() :
-        Task((TaskScheduler::GetInstance()->GetTaskId("db::DBTable")), 0) {
+        Task((TaskScheduler::GetInstance()->GetTaskId(kTaskDBExclude)), 0) {
     }
     virtual bool Run() {
         Agent::GetInstance()->uve()->prouter_uve_table()->LITimerExpiry();
@@ -89,14 +89,12 @@ private:
 class FlowStatsCollectorTask : public Task {
 public:
     FlowStatsCollectorTask() :
-        Task((TaskScheduler::GetInstance()->GetTaskId("Agent::StatsCollector")),
-                StatsCollector::FlowStatsCollector) {
+        Task((TaskScheduler::GetInstance()->GetTaskId(kTaskFlowStatsCollector)),
+              0) {
     }
     virtual bool Run() {
         Agent::GetInstance()->flow_stats_manager()->
             default_flow_stats_collector()->Run();
-        Agent::GetInstance()->flow_stats_manager()->
-            tcp_flow_stats_collector()->Run();
     }
     std::string Description() const { return "FlowStatsCollectorTask"; }
 };
@@ -104,7 +102,7 @@ public:
 class VRouterStatsCollectorTask : public Task {
 public:
     VRouterStatsCollectorTask(int count) :
-        Task((TaskScheduler::GetInstance()->GetTaskId("Agent::Uve")), 0),
+        Task((TaskScheduler::GetInstance()->GetTaskId(kTaskDBExclude)), 0),
         count_(count) {
     }
     virtual bool Run() {
@@ -122,7 +120,7 @@ private:
 class VnUveSendTask : public Task {
 public:
     VnUveSendTask() :
-        Task((TaskScheduler::GetInstance()->GetTaskId("db::DBTable")), 0) {
+        Task((TaskScheduler::GetInstance()->GetTaskId(kTaskDBExclude)), 0) {
     }
     virtual bool Run() {
         Agent::GetInstance()->uve()->vn_uve_table()->TimerExpiry();
@@ -134,7 +132,7 @@ public:
 class VmUveSendTask : public Task {
 public:
     VmUveSendTask() :
-        Task((TaskScheduler::GetInstance()->GetTaskId("db::DBTable")), 0) {
+        Task((TaskScheduler::GetInstance()->GetTaskId(kTaskDBExclude)), 0) {
     }
     virtual bool Run() {
         Agent::GetInstance()->uve()->vm_uve_table()->TimerExpiry();
@@ -146,7 +144,7 @@ public:
 class VmiUveSendTask : public Task {
 public:
     VmiUveSendTask() :
-        Task((TaskScheduler::GetInstance()->GetTaskId("db::DBTable")), 0) {
+        Task((TaskScheduler::GetInstance()->GetTaskId(kTaskDBExclude)), 0) {
     }
     virtual bool Run() {
         Agent::GetInstance()->uve()->interface_uve_table()->TimerExpiry();
@@ -154,6 +152,11 @@ public:
     }
     std::string Description() const { return "VmiUveSendTask"; }
 };
+
+static bool FlowStatsTimerStartStopTrigger(FlowStatsCollector *fsc, bool stop) {
+    fsc->TestStartStopTimer(stop);
+    return true;
+}
 
 class TestUveUtil {
 public:
@@ -212,6 +215,20 @@ public:
         TaskScheduler *scheduler = TaskScheduler::GetInstance();
         FlowActionLogTask *task = new FlowActionLogTask(fe);
         scheduler->Enqueue(task);
+    }
+
+    void FlowStatsTimerStartStop(bool stop) {
+        Agent *agent = Agent::GetInstance();
+        FlowStatsCollector* fsc = agent->flow_stats_manager()->
+            default_flow_stats_collector();
+        int task_id =
+            agent->task_scheduler()->GetTaskId(kTaskFlowStatsCollector);
+        std::auto_ptr<TaskTrigger> trigger_
+            (new TaskTrigger(boost::bind(FlowStatsTimerStartStopTrigger,
+                                         fsc, stop),
+                             task_id, 0));
+        trigger_->Set();
+        client->WaitForIdle();
     }
 
     void VnAdd(int id) {

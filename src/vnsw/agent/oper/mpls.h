@@ -47,13 +47,16 @@ public:
                                  uint32_t label,
                                  const uuid &intf_uuid,
                                  bool policy,
-                                 InterfaceNHFlags::Type type);
+                                 InterfaceNHFlags::Type type,
+                                 const MacAddress &mac);
     static void CreateInetInterfaceLabel(const Agent *agent,
                                          uint32_t label,
                                          const string &ifname,
                                          bool policy,
-                                         InterfaceNHFlags::Type type);
-    static void CreateEcmpLabel(const Agent *agent, uint32_t label, COMPOSITETYPE type,
+                                         InterfaceNHFlags::Type type,
+                                         const MacAddress &mac);
+    static void CreateEcmpLabel(const Agent *agent, uint32_t label,
+                                COMPOSITETYPE type, bool policy,
                                 ComponentNHKeyList &component_nh_key_list,
                                 const std::string vrf_name);
     // Delete MPLS Label entry
@@ -96,17 +99,17 @@ public:
 class MplsLabelData : public AgentData {
 public:
     MplsLabelData(const string &intf_name, bool policy,
-                  InterfaceNHFlags::Type type) : 
+                  InterfaceNHFlags::Type type, const MacAddress &mac) :
         AgentData(), nh_key(new InterfaceNHKey(new InetInterfaceKey
-                                               (intf_name), policy, type)) {
+                                              (intf_name), policy, type, mac)) {
     }
 
-    MplsLabelData(const uuid &intf_uuid, bool policy, 
-                  InterfaceNHFlags::Type type) : 
-        AgentData(), 
+    MplsLabelData(const uuid &intf_uuid, bool policy,
+                  InterfaceNHFlags::Type type, const MacAddress &mac) :
+        AgentData(),
         nh_key(new InterfaceNHKey(new VmInterfaceKey(AgentKey::ADD_DEL_CHANGE,
-                                                     intf_uuid, ""), 
-               policy, type)) {
+                                                     intf_uuid, ""),
+               policy, type, mac)) {
     }
 
     MplsLabelData(const uuid &intf_uuid, int tag) : 

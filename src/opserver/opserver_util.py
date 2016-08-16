@@ -21,17 +21,31 @@ import socket, struct
 import copy
 import traceback
 import ast
+import re
 try:
     from pysandesh.gen_py.sandesh.ttypes import SandeshType
 except:
     class SandeshType(object):
         SYSTEM = 1
         TRACE = 4
-
+from requests.auth import HTTPBasicAuth
 
 def enum(**enums):
     return type('Enum', (), enums)
 # end enum
+
+
+def camel_case_to_hyphen(name):
+    name = re.sub('(.)([A-Z][a-z]+)', r'\1-\2', name)
+    name = re.sub('([a-z])([A-Z])', r'\1-\2', name).lower()
+    return name
+# end camel_case_to_hyphen
+
+
+def inverse_dict(d):
+    return dict(zip(d.values(), d.keys()))
+# end inverse_dict
+
 
 class ServicePoller(gevent.Greenlet):
     def __init__(self, logger, trace_cls, disc, svc_name, callbk, snh):
@@ -90,13 +104,14 @@ class OpServerUtils(object):
 
     @staticmethod
     def uve_attr_flatten(inp):
-        #import pdb; pdb.set_trace()
         sname = ""
         if (inp['@type'] == 'struct'):
             sname = OpServerUtils._get_list_name(inp)
             if (sname == ""):
-                return Exception('Struct Parse Error')
+                raise Exception('Struct Parse Error')
             ret = {}
+            if inp[sname] is None:
+                return ret
             for k, v in inp[sname].items():
                 ret[k] = OpServerUtils.uve_attr_flatten(v)
             return ret
@@ -122,10 +137,28 @@ class OpServerUtils(object):
             return ret
         elif (inp['@type'] == 'map'):
             fmap = {}
-            for idx in range(0,int(inp['map']['@size'])):
-                m_attr = inp['map']['element'][idx*2]
-                m_val = str(inp['map']['element'][(idx*2)+1])
-                fmap[m_attr] = m_val
+
+            sname = None
+            for ss in inp['map'].keys():
+                if ss[0] != '@':
+                    if ss != 'element':
+                        sname = ss
+            if sname is None:
+                for idx in range(0,int(inp['map']['@size'])):
+                    m_attr = inp['map']['element'][idx*2]
+                    m_val = str(inp['map']['element'][(idx*2)+1])
+                    fmap[m_attr] = m_val
+            else:
+                if not isinstance(inp['map']['element'], list):
+                    inp['map']['element'] = [inp['map']['element']]
+                if not isinstance(inp['map'][sname], list):
+                    inp['map'][sname] = [inp['map'][sname]]
+                for idx in range(0,int(inp['map']['@size'])):
+                    m_attr = inp['map']['element'][idx]
+                    subst = {}
+                    for sk,sv in inp['map'][sname][idx].iteritems():
+                        subst[sk] = OpServerUtils.uve_attr_flatten(sv)
+                    fmap[m_attr] = subst
             return fmap
         else:
             if '#text' not in inp:
@@ -196,7 +229,7 @@ class OpServerUtils(object):
     # end parse_start_end_time
 
     @staticmethod
-    def post_url_http(url, params, sync=False):
+    def post_url_http(url, params, user, password, sync=False):
         if sync:
             hdrs = OpServerUtils.POST_HEADERS_SYNC
             stm = False
@@ -210,10 +243,12 @@ class OpServerUtils(object):
             if int(pkg_resources.get_distribution("requests").version[0]) != 0:
                 response = requests.post(url, stream=stm,
                                          data=params,
+                                         auth=HTTPBasicAuth(user, password),
                                          headers=hdrs)
             else:
                 response = requests.post(url, prefetch=pre,
                                          data=params,
+                                         auth=HTTPBasicAuth(user, password),
                                          headers=hdrs)
         except requests.exceptions.ConnectionError, e:
             print "Connection to %s failed %s" % (url, str(e))
@@ -226,13 +261,15 @@ class OpServerUtils(object):
     # end post_url_http
 
     @staticmethod
-    def get_url_http(url):
+    def get_url_http(url, user, password):
         data = {}
         try:
             if int(pkg_resources.get_distribution("requests").version[0]) != 0:
-                data = requests.get(url, stream=True)
+                data = requests.get(url, stream=True,
+                                    auth=HTTPBasicAuth(user, password))
             else:
-                data = requests.get(url, prefetch=False)
+                data = requests.get(url, prefetch=False,
+                                    auth=HTTPBasicAuth(user, password))
         except requests.exceptions.ConnectionError, e:
             print "Connection to %s failed %s" % (url, str(e))
 
@@ -267,13 +304,14 @@ class OpServerUtils(object):
     # end parse_query_result
 
     @staticmethod
-    def get_query_result(opserver_ip, opserver_port, qid, time_out=None):
+    def get_query_result(opserver_ip, opserver_port, qid, user, password,
+                         time_out=None):
         sleep_interval = 0.5
         time_left = time_out
         while True:
             url = OpServerUtils.opserver_query_url(
                 opserver_ip, opserver_port) + '/' + qid
-            resp = OpServerUtils.get_url_http(url)
+            resp = OpServerUtils.get_url_http(url, user, password)
             if resp.status_code != 200:
                 yield {}
                 return
@@ -296,7 +334,7 @@ class OpServerUtils(object):
                 for chunk in status['chunks']:
                     url = OpServerUtils.opserver_url(
                         opserver_ip, opserver_port) + chunk['href']
-                    resp = OpServerUtils.get_url_http(url)
+                    resp = OpServerUtils.get_url_http(url, user, password)
                     if resp.status_code != 200:
                         yield {}
                     else:
@@ -590,14 +628,24 @@ class OpServerUtils(object):
                          data_str += ', '
                     vdict = value_dict['map']
                     data_str += key + ': {'
-                    if vdict['@value'] == 'struct':
+
+                    sname = None
+                    for ss in vdict.keys():
+                        if ss[0] != '@':
+                            if ss != 'element':
+                                sname = ss
+
+                    if sname is not None:
                         keys = []
                         values = []
                         for key, value in vdict.iteritems():
                             if key == 'element':
-                                keys = value
+                                if isinstance(value, list):
+                                    keys = value
+                                else:
+                                    keys = [value]
                             elif isinstance(value, dict):
-                                values = value
+                                values = [value]
                             elif isinstance(value, list):
                                 values = value
                         for i in range(len(keys)):
@@ -605,11 +653,12 @@ class OpServerUtils(object):
                                 '[' + OpServerUtils._data_dict_to_str(
                                     values[i], sandesh_type) + '], '
                     else:
-                        vdict_list = vdict['element']
-                        for i in range(int(vdict['@size'])):
-                            k = i*2
-                            data_str += vdict_list[k] + ': ' + \
-                                vdict_list[k+1] + ', '
+                        if 'element' in vdict:
+                            vdict_list = vdict['element']
+                            for i in range(int(vdict['@size'])):
+                                k = i*2
+                                data_str += vdict_list[k] + ': ' + \
+                                    vdict_list[k+1] + ', '
                     data_str += '}'
                     continue
             else:
@@ -746,13 +795,13 @@ class OpServerUtils(object):
                     match_op[1] = match_e[1].strip(' ()')
                     op = OpServerUtils.MatchOp.REGEX_MATCH
 
-                match_e = match_s.split('<')
+                match_e = match_s.split('<=')
                 if (len(match_e) == 2):
                     match_op[0] = match_e[0].strip(' ()')
                     match_op[1] = match_e[1].strip(' ()')
                     op = OpServerUtils.MatchOp.LEQ
 
-                match_e = match_s.split('>')
+                match_e = match_s.split('>=')
                 if (len(match_e) == 2):
                     match_op[0] = match_e[0].strip(' ()')
                     match_op[1] = match_e[1].strip(' ()')

@@ -34,15 +34,13 @@ from sandesh_common.vns.constants import ModuleNames, NodeTypeNames,\
 from subprocess import Popen, PIPE
 from StringIO import StringIO
 
-from vrouter.vrouter.ttypes import \
-    NodeStatusUVE, NodeStatus
+from nodemgr.common.sandesh.nodeinfo.ttypes import *
+from nodemgr.common.sandesh.nodeinfo.cpuinfo.ttypes import *
+from nodemgr.common.sandesh.nodeinfo.process_info.ttypes import *
+from nodemgr.common.sandesh.nodeinfo.process_info.constants import *
 from pysandesh.connection_info import ConnectionState
-from vrouter.vrouter.process_info.ttypes import \
-    ProcessStatus, ProcessState, ProcessInfo, DiskPartitionUsageStats
-from vrouter.vrouter.process_info.constants import \
-    ProcessStateNames
 
-from loadbalancer_stats import LoadbalancerStats
+from loadbalancer_stats import LoadbalancerStatsUVE
 
 
 class VrouterEventManager(EventManager):
@@ -57,20 +55,24 @@ class VrouterEventManager(EventManager):
         EventManager.__init__(self, rule_file, discovery_server,
                               discovery_port, collector_addr, sandesh_global)
         self.node_type = "contrail-vrouter"
+        self.table = "ObjectVRouter"
         _disc = self.get_discovery_client()
         sandesh_global.init_generator(
             self.module_id, socket.gethostname(),
             node_type_name, self.instance_id, self.collector_addr,
-            self.module_id, 8102, ['vrouter.vrouter'], _disc)
+            self.module_id, 8102, ['vrouter.loadbalancer',
+                'nodemgr.common.sandesh'], _disc)
         sandesh_global.set_logging_params(enable_local_log=True)
-        self.supervisor_serverurl = "unix:///tmp/supervisord_vrouter.sock"
+        self.supervisor_serverurl = "unix:///var/run/supervisord_vrouter.sock"
         self.add_current_process()
         ConnectionState.init(sandesh_global, socket.gethostname(), self.module_id,
             self.instance_id,
             staticmethod(ConnectionState.get_process_state_cb),
-            NodeStatusUVE, NodeStatus)
+            NodeStatusUVE, NodeStatus, self.table)
 
-        self.lb_stats = LoadbalancerStats()
+        self.lb_stats = LoadbalancerStatsUVE()
+        self.send_system_cpu_info()
+        self.third_party_process_dict = {}
     # end __init__
 
     def msg_log(self, msg, level):
@@ -87,20 +89,18 @@ class VrouterEventManager(EventManager):
 
     def send_process_state_db(self, group_names):
         self.send_process_state_db_base(
-            group_names, ProcessInfo, NodeStatus, NodeStatusUVE)
+            group_names, ProcessInfo)
 
     def send_nodemgr_process_status(self):
         self.send_nodemgr_process_status_base(
-            ProcessStateNames, ProcessState, ProcessStatus,
-            NodeStatus, NodeStatusUVE)
+            ProcessStateNames, ProcessState, ProcessStatus)
+
+    def get_node_third_party_process_dict(self):
+        return self.third_party_process_dict 
 
     def get_process_state(self, fail_status_bits):
         return self.get_process_state_base(
             fail_status_bits, ProcessStateNames, ProcessState)
-
-    def send_disk_usage_info(self):
-        self.send_disk_usage_info_base(
-            NodeStatusUVE, NodeStatus, DiskPartitionUsageStats)
 
     def get_process_stat_object(self, pname):
         return VrouterProcessStat(pname)
@@ -112,7 +112,7 @@ class VrouterEventManager(EventManager):
     # end delete_process_handler
 
     def runforever(self, test=False):
-        prev_current_time = int(time.time())
+        self.prev_current_time = int(time.time())
         while 1:
             # we explicitly use self.stdin, self.stdout, and self.stderr
             # instead of sys.* so we can unit test this code
@@ -138,7 +138,7 @@ class VrouterEventManager(EventManager):
                 self.event_process_communication(pdata)
             # do periodic events
             if headers['eventname'].startswith("TICK_60"):
-                prev_current_time = self.event_tick_60(prev_current_time)
+                self.event_tick_60()
 
                 # loadbalancer processing
                 self.lb_stats.send_loadbalancer_stats()

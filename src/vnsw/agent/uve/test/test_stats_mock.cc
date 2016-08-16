@@ -33,6 +33,15 @@ struct PortInfo stats_if[] = {
         {"test1", 9, "4.1.1.2", "00:00:00:01:01:02", 6, 4},
 };
 
+IpamInfo ipam_info[] = {
+    {"1.1.1.0", 24, "1.1.1.10"},
+};
+
+IpamInfo ipam_stats[] = {
+    {"3.1.1.0", 24, "3.1.1.10"},
+    {"4.1.1.0", 24, "4.1.1.10"},
+};
+
 int hash_id;
 VmInterface *flow0, *flow1;
 VmInterface *test0, *test1;
@@ -72,6 +81,10 @@ public:
         unsigned int vn_count = 0;
         hash_id = 1;
         client->Reset();
+        AddIPAM("vn5", ipam_info, 1);
+        client->WaitForIdle();
+        AddIPAM("vn6", ipam_stats, 2);
+        client->WaitForIdle();
         CreateVmportEnv(input, 2, 1);
         client->WaitForIdle(10);
         vn_count++;
@@ -126,6 +139,10 @@ public:
         client->Reset();
         DeleteVmportEnv(stats_if, 2, 1);
         client->WaitForIdle(10);
+        DelIPAM("vn5");
+        client->WaitForIdle();
+        DelIPAM("vn6");
+        client->WaitForIdle();
         client->VnDelNotifyWait(1);
         client->PortDelNotifyWait(2);
     }
@@ -496,24 +513,22 @@ TEST_F(StatsTestMock, FlowStatsOverflow_AgeTest) {
                            default_flow_stats_collector()->flow_age_time_intvl();
 
     //Set the flow age time to 1000 microsecond
-    agent->flow_stats_manager()->tcp_flow_stats_collector()->
+    agent->flow_stats_manager()->default_flow_stats_collector()->
         UpdateFlowAgeTime(tmp_age_time);
 
     usleep(tmp_age_time + 10);
-    util_.EnqueueFlowStatsCollectorTask();
+    client->EnqueueFlowAge();
     client->WaitForIdle();
     WAIT_FOR(100, 10000, (flow_proto_->FlowCount() == 0U));
 
     //Restore flow aging time
-    agent->flow_stats_manager()->tcp_flow_stats_collector()->
+    agent->flow_stats_manager()->default_flow_stats_collector()->
         UpdateFlowAgeTime(bkp_age_time);
 }
 
 TEST_F(StatsTestMock, FlowStatsTest_tcp_flags) {
     hash_id = 1;
 
-    FlowStatsCollector *fs = agent_->flow_stats_manager()->
-                                 tcp_flow_stats_collector();
     VrfEntry *vrf = Agent::GetInstance()->vrf_table()->FindVrfFromName("vrf5");
     //Flow creation using TCP packet
     TxTcpPacketUtil(flow0->id(), "1.1.1.1", "1.1.1.2",
@@ -526,8 +541,8 @@ TEST_F(StatsTestMock, FlowStatsTest_tcp_flags) {
     EXPECT_TRUE(f2 != NULL);
     FlowEntry *f2_rev = f2->reverse_flow_entry();
     EXPECT_TRUE(f2_rev != NULL);
-    FlowExportInfo *info = fs->FindFlowExportInfo(f2->uuid());
-    FlowExportInfo *rinfo = fs->FindFlowExportInfo(f2_rev->uuid());
+    FlowExportInfo *info = col_->FindFlowExportInfo(f2);
+    FlowExportInfo *rinfo = col_->FindFlowExportInfo(f2_rev);
     EXPECT_TRUE(info != NULL);
     EXPECT_TRUE(rinfo != NULL);
 
@@ -548,8 +563,8 @@ TEST_F(StatsTestMock, FlowStatsTest_tcp_flags) {
     util_.EnqueueFlowStatsCollectorTask();
     client->WaitForIdle(10);
 
-    info = fs->FindFlowExportInfo(f2->uuid());
-    rinfo = fs->FindFlowExportInfo(f2_rev->uuid());
+    info = col_->FindFlowExportInfo(f2);
+    rinfo = col_->FindFlowExportInfo(f2_rev);
     EXPECT_TRUE(info != NULL);
     EXPECT_TRUE(rinfo != NULL);
     //Verify flow TCP flags
@@ -564,8 +579,8 @@ TEST_F(StatsTestMock, FlowStatsTest_tcp_flags) {
     util_.EnqueueFlowStatsCollectorTask();
     client->WaitForIdle(10);
 
-    info = fs->FindFlowExportInfo(f2->uuid());
-    rinfo = fs->FindFlowExportInfo(f2_rev->uuid());
+    info = col_->FindFlowExportInfo(f2);
+    rinfo = col_->FindFlowExportInfo(f2_rev);
     EXPECT_TRUE(info != NULL);
     EXPECT_TRUE(rinfo != NULL);
     //Verify the updated flow TCP flags
@@ -895,8 +910,8 @@ TEST_F(StatsTestMock, Underlay_1) {
 
     FlowEntry *fe = flow[0].pkt_.FlowFetch();
     FlowEntry *rfe = fe->reverse_flow_entry();
-    FlowExportInfo *info = col_->FindFlowExportInfo(fe->uuid());
-    FlowExportInfo *rinfo = col_->FindFlowExportInfo(rfe->uuid());
+    FlowExportInfo *info = col_->FindFlowExportInfo(fe);
+    FlowExportInfo *rinfo = col_->FindFlowExportInfo(rfe);
     EXPECT_TRUE(info != NULL);
     EXPECT_TRUE(rinfo != NULL);
 
@@ -938,8 +953,8 @@ TEST_F(StatsTestMock, Underlay_2) {
 
     FlowEntry *fe = flow[0].pkt_.FlowFetch();
     FlowEntry *rfe = fe->reverse_flow_entry();
-    FlowExportInfo *info = col_->FindFlowExportInfo(fe->uuid());
-    FlowExportInfo *rinfo = col_->FindFlowExportInfo(rfe->uuid());
+    FlowExportInfo *info = col_->FindFlowExportInfo(fe);
+    FlowExportInfo *rinfo = col_->FindFlowExportInfo(rfe);
     EXPECT_TRUE(info != NULL);
     EXPECT_TRUE(rinfo != NULL);
 
@@ -982,13 +997,13 @@ TEST_F(StatsTestMock, Underlay_3) {
 
     FlowEntry *fe = flow[0].pkt_.FlowFetch();
     FlowEntry *rfe = fe->reverse_flow_entry();
-    FlowExportInfo *info = col_->FindFlowExportInfo(fe->uuid());
-    FlowExportInfo *rinfo = col_->FindFlowExportInfo(rfe->uuid());
+    FlowExportInfo *info = col_->FindFlowExportInfo(fe);
+    FlowExportInfo *rinfo = col_->FindFlowExportInfo(rfe);
     EXPECT_TRUE(info != NULL);
     EXPECT_TRUE(rinfo != NULL);
     client->WaitForIdle();
 
-    WAIT_FOR(1000, 10000, (rinfo->flow_handle() != FlowEntry::kInvalidFlowHandle));
+    WAIT_FOR(1000, 10000, (rfe->flow_handle() != FlowEntry::kInvalidFlowHandle));
     //Change the underlay source port
     KSyncSockTypeMap::SetUnderlaySourcePort(fe->flow_handle(), 1234);
     KSyncSockTypeMap::SetUnderlaySourcePort(rfe->flow_handle(), 5678);
@@ -1000,6 +1015,10 @@ TEST_F(StatsTestMock, Underlay_3) {
     //Invoke FlowStatsCollector to update the stats
     util_.EnqueueFlowStatsCollectorTask();
     client->WaitForIdle(10);
+
+    //Verify that exported flows have exported_alteast_once_ flag set
+    EXPECT_TRUE(info->exported_atleast_once());
+    EXPECT_TRUE(rinfo->exported_atleast_once());
 
     //Verify underlay source port for forward flow
     EXPECT_EQ(fe->tunnel_type().GetType(), TunnelType::MPLS_GRE);
@@ -1017,10 +1036,24 @@ TEST_F(StatsTestMock, Underlay_3) {
     FlowLogData flow_log = f->last_sent_flow_log();
     EXPECT_EQ(flow_log.get_underlay_source_port(), 0);
 
+    //Verify that forward_flow field is set
+    EXPECT_TRUE((flow_log.__isset.forward_flow));
+
+    //Verify that teardown_time is not set
+    EXPECT_FALSE((flow_log.__isset.teardown_time));
+
     //cleanup
     DeleteFlow(flow, 1);
     client->WaitForIdle();
     EXPECT_EQ(0U, flow_proto_->FlowCount());
+
+    //Verify that FlowLog sent for deleted flow has teadown time set.
+    flow_log = f->last_sent_flow_log();
+    EXPECT_TRUE((flow_log.__isset.teardown_time));
+    EXPECT_TRUE((flow_log.get_teardown_time() != 0));
+
+    //Verify that forward_flow field is set
+    EXPECT_TRUE((flow_log.__isset.forward_flow));
 
     //Remove remote VM routes
     util_.DeleteRemoteRoute("vrf5", remote_vm4_ip, peer_);

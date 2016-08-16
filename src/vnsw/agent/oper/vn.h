@@ -37,11 +37,13 @@ struct VnIpam {
     bool       dhcp_enable;
     std::string ipam_name;
     OperDhcpOptions oper_dhcp_options;
+    uint32_t alloc_unit;
 
     VnIpam(const std::string& ip, uint32_t len, const std::string& gw,
-           const std::string& dns, bool dhcp, std::string &name,
+           const std::string& dns, bool dhcp, const std::string &name,
            const std::vector<autogen::DhcpOptionType> &dhcp_options,
-           const std::vector<autogen::RouteType> &host_routes);
+           const std::vector<autogen::RouteType> &host_routes,
+           uint32_t alloc);
 
     bool IsV4() const {
         return ip_prefix.is_v4();
@@ -91,7 +93,8 @@ struct VnData : public AgentOperDBData {
            const std::vector<VnIpam> &ipam, const VnIpamDataMap &vn_ipam_data,
            int vxlan_id, int vnid, bool bridging,
            bool layer3_forwarding, bool admin_state, bool enable_rpf,
-           bool flood_unknown_unicast, Agent::ForwardingMode forwarding_mode) :
+           bool flood_unknown_unicast, Agent::ForwardingMode forwarding_mode,
+           const boost::uuids::uuid &qos_config_uuid, bool mirror_destination) :
         AgentOperDBData(agent, node), name_(name), vrf_name_(vrf_name),
         acl_id_(acl_id), mirror_acl_id_(mirror_acl_id),
         mirror_cfg_acl_id_(mc_acl_id), ipam_(ipam), vn_ipam_data_(vn_ipam_data),
@@ -99,7 +102,8 @@ struct VnData : public AgentOperDBData {
         layer3_forwarding_(layer3_forwarding), admin_state_(admin_state),
         enable_rpf_(enable_rpf),
         flood_unknown_unicast_(flood_unknown_unicast),
-        forwarding_mode_(forwarding_mode) {
+        forwarding_mode_(forwarding_mode), qos_config_uuid_(qos_config_uuid),
+        mirror_destination_(mirror_destination){
     };
     virtual ~VnData() { }
 
@@ -118,6 +122,8 @@ struct VnData : public AgentOperDBData {
     bool enable_rpf_;
     bool flood_unknown_unicast_;
     Agent::ForwardingMode forwarding_mode_;
+    boost::uuids::uuid qos_config_uuid_;
+    bool mirror_destination_;
 };
 
 class VnEntry : AgentRefCount<VnEntry>, public AgentOperDBEntry {
@@ -144,6 +150,7 @@ public:
     const VnIpam *GetIpam(const IpAddress &ip) const;
     IpAddress GetGatewayFromIpam(const IpAddress &ip) const;
     IpAddress GetDnsFromIpam(const IpAddress &ip) const;
+    uint32_t GetAllocUnitFromIpam(const IpAddress &ip) const;
     bool GetVnHostRoutes(const std::string &ipam,
                          std::vector<OperDhcpOptions::HostRoute> *routes) const;
     bool GetIpamName(const IpAddress &vm_addr, std::string *ipam_name) const;
@@ -183,6 +190,13 @@ public:
     void ResyncRoutes();
     bool IdentifyBgpRoutersServiceIp(const IpAddress &ip_address,
                                      bool *is_dns, bool *is_gateway) const;
+    const AgentQosConfig* qos_config() const {
+        return qos_config_.get();
+    }
+
+    const bool mirror_destination() const {
+        return mirror_destination_;
+    }
 
 private:
     friend class VnTable;
@@ -208,6 +222,8 @@ private:
     uint32_t old_vxlan_id_;
     Agent::ForwardingMode forwarding_mode_;
     boost::scoped_ptr<AgentRouteResync> route_resync_walker_;
+    AgentQosConfigConstRef qos_config_;
+    bool mirror_destination_;
     DISALLOW_COPY_AND_ASSIGN(VnEntry);
 };
 
@@ -237,7 +253,8 @@ public:
     int ComputeCfgVxlanId(IFMapNode *node);
     void CfgForwardingFlags(IFMapNode *node, bool *l2, bool *l3, bool *rpf,
                             bool *flood_unknown_unicast,
-                            Agent::ForwardingMode *forwarding_mode);
+                            Agent::ForwardingMode *forwarding_mode,
+                            bool *mirror_destination);
 
 
     static DBTableBase *CreateTable(DB *db, const std::string &name);
@@ -269,7 +286,8 @@ private:
     bool IpamChangeNotify(std::vector<VnIpam> &old_ipam, 
                           std::vector<VnIpam> &new_ipam, VnEntry *vn);
     void UpdateHostRoute(const IpAddress &old_address,
-                         const IpAddress &new_address, VnEntry *vn);
+                         const IpAddress &new_address, VnEntry *vn,
+                         bool relaxed_policy);
     void AddIPAMRoutes(VnEntry *vn, VnIpam &ipam);
     void DelIPAMRoutes(VnEntry *vn, VnIpam &ipam);
     void AddAllIpamRoutes(VnEntry *vn);
@@ -277,10 +295,14 @@ private:
     void AddSubnetRoute(VnEntry *vn, VnIpam &ipam);
     void DelSubnetRoute(VnEntry *vn, VnIpam &ipam);
     bool IsGwHostRouteRequired();
-    void AddHostRoute(VnEntry *vn, const IpAddress &address);
+    void AddHostRoute(VnEntry *vn, const IpAddress &address,
+                      bool relaxed_policy);
     void DelHostRoute(VnEntry *vn, const IpAddress &address);
     bool ChangeHandler(DBEntry *entry, const DBRequest *req);
     bool IsGatewayL2(const string &gateway) const;
+    void BuildVnIpamData(const std::vector<autogen::IpamSubnetType> &subnets,
+                         const std::string &ipam_name,
+                         std::vector<VnIpam> *vn_ipam);
     VnData *BuildData(IFMapNode *node);
     IFMapNode *FindTarget(IFMapAgentTable *table, IFMapNode *node, 
                           std::string node_type);

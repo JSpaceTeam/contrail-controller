@@ -37,9 +37,9 @@ public:
     void PeerResurrect(std::string name);
     BgpPeer *TriggerPeerDeletion(const BgpNeighborConfig *config);
     virtual void DestroyIPeer(IPeer *ipeer);
+    void ClearAllPeers();
 
-    virtual BgpPeer *NextPeer(BgpPeerKey &key);
-    virtual const BgpPeer *NextPeer(BgpPeerKey &key) const;
+    const BgpPeer *NextPeer(const BgpPeerKey &key) const;
 
     void FillBgpNeighborInfo(const BgpSandeshContext *bsc,
         std::vector<BgpNeighborResp> *sbnr_list,

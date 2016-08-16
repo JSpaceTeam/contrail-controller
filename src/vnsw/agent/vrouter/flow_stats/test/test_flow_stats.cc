@@ -19,6 +19,10 @@ struct PortInfo input[] = {
         {"flow1", 7, "1.1.1.2", "00:00:00:01:01:02", 5, 2},
 };
 
+IpamInfo ipam_info[] = {
+    {"1.1.1.0", 24, "1.1.1.10"},
+};
+
 VmInterface *flow0;
 VmInterface *flow1;
 
@@ -37,25 +41,6 @@ public:
             dynamic_cast<FlowStatsCollectionParamsResp *>(sandesh);
         if (resp != NULL) {
             type_specific_response_count_++;
-        }
-    }
-    void FlowAgeTimeSet(uint64_t age_time_secs) {
-        FlowAgeTimeReq *req = new FlowAgeTimeReq();
-        req->set_new_age_time(age_time_secs);
-        Sandesh::set_response_callback(
-            boost::bind(&FlowStatsTest::FlowAgeTimeResponse, this, _1));
-        req->HandleRequest();
-        client->WaitForIdle();
-        req->Release();
-    }
-    void FlowAgeTimeResponse(Sandesh *sandesh) {
-        response_count_++;
-        FlowAgeTimeResp *resp =
-            dynamic_cast<FlowAgeTimeResp *>(sandesh);
-        if (resp != NULL) {
-            type_specific_response_count_++;
-            age_resp_.set_new_age_time(resp->get_new_age_time());
-            age_resp_.set_new_tcp_age_time(resp->get_new_tcp_age_time());
         }
     }
     void FlowParamsGet() {
@@ -91,6 +76,8 @@ public:
         client->Reset();
         CreateVmportEnv(input, 2, 1);
         client->WaitForIdle(10);
+        AddIPAM("vn5", ipam_info, 1);
+        client->WaitForIdle();
         vn_count++;
 
         EXPECT_TRUE(VmPortActive(input, 0));
@@ -114,6 +101,8 @@ public:
         client->Reset();
         DeleteVmportEnv(input, 2, 1, 1);
         client->WaitForIdle(10);
+        DelIPAM("vn5");
+        client->WaitForIdle();
         client->VnDelNotifyWait(1);
         client->PortDelNotifyWait(2);
         EXPECT_TRUE(client->AclNotifyWait(1));
@@ -124,7 +113,6 @@ public:
     uint32_t num_entries_;
     Agent *agent_;
     FlowProto *flow_proto_;
-    FlowAgeTimeResp age_resp_;
 };
 
 TEST_F(FlowStatsTest, SandeshFlowParams) {
@@ -195,8 +183,8 @@ TEST_F(FlowStatsTest, FlowTreeSize) {
     EXPECT_TRUE(rfe != NULL);
     FlowStatsCollector *col =
         agent_->flow_stats_manager()->default_flow_stats_collector();
-    FlowExportInfo *info = col->FindFlowExportInfo(fe->uuid());
-    FlowExportInfo *rinfo = col->FindFlowExportInfo(rfe->uuid());
+    FlowExportInfo *info = col->FindFlowExportInfo(fe);
+    FlowExportInfo *rinfo = col->FindFlowExportInfo(rfe);
     EXPECT_TRUE(info != NULL);
     EXPECT_TRUE(rinfo != NULL);
     EXPECT_EQ(2U, col->Size());
@@ -213,47 +201,6 @@ TEST_F(FlowStatsTest, FlowTreeSize) {
     EXPECT_EQ(0U, flow_proto_->FlowCount());
     WAIT_FOR(1000, 1000, (col->Size() == 0));
     FlowTeardown();
-}
-
-TEST_F(FlowStatsTest, FlowAgeIntrospect_1) {
-    ClearCount();
-    FlowAgeTimeSet(100);
-    client->WaitForIdle();
-    WAIT_FOR(1000, 1000, (response_count_ == 1));
-    EXPECT_EQ(1U, type_specific_response_count_);
-    EXPECT_EQ(100U, age_resp_.get_new_age_time());
-    EXPECT_EQ(100U, age_resp_.get_new_tcp_age_time());
-
-    //cleanup
-    ClearCount();
-    uint64_t default_age_time = FlowStatsCollector::FlowAgeTime/(1000 * 1000);
-    FlowAgeTimeSet(default_age_time);
-    client->WaitForIdle();
-    WAIT_FOR(1000, 1000, (response_count_ == 1));
-}
-
-TEST_F(FlowStatsTest, FlowAgeIntrospect_2) {
-    ClearCount();
-    /* Mark TCP flow-stats-collector as user_configured */
-    FlowStatsCollector *tcp_col =
-        agent_->flow_stats_manager()->tcp_flow_stats_collector();
-    tcp_col->set_user_configured(true);
-    uint64_t old_age_time = tcp_col->flow_age_time_intvl_in_secs();
-    FlowAgeTimeSet(100);
-    client->WaitForIdle();
-    WAIT_FOR(1000, 1000, (response_count_ == 1));
-    EXPECT_EQ(1U, type_specific_response_count_);
-
-    //Verify that age is updated only for default collector.
-    EXPECT_EQ(100U, age_resp_.get_new_age_time());
-    EXPECT_EQ(old_age_time, age_resp_.get_new_tcp_age_time());
-
-    //cleanup
-    ClearCount();
-    uint64_t default_age_time = FlowStatsCollector::FlowAgeTime/(1000 * 1000);
-    FlowAgeTimeSet(default_age_time);
-    client->WaitForIdle();
-    WAIT_FOR(1000, 1000, (response_count_ == 1));
 }
 
 int main(int argc, char *argv[]) {

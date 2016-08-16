@@ -25,6 +25,7 @@ class IPeerUpdate;
 class RibOutUpdates;
 class SchedulingGroup;
 class SchedulingGroupManager;
+class ShowRibOutStatistics;
 class BgpTable;
 class BgpExport;
 class BgpRoute;
@@ -69,15 +70,18 @@ public:
 
     typedef std::vector<NextHop> NextHopList;
 
-    RibOutAttr() : attr_out_(NULL), vrf_originated_(false) { }
+    RibOutAttr(const RibOutAttr &rhs);
+    RibOutAttr() : attr_out_(NULL), is_xmpp_(false), vrf_originated_(false) { }
     RibOutAttr(const BgpTable *table, const BgpAttr *attr, uint32_t label);
     RibOutAttr(const BgpTable *table, const BgpRoute *route,
-        const BgpAttr *attr, uint32_t label, bool include_nh = true);
+        const BgpAttr *attr, uint32_t label, bool include_nh = true,
+        bool is_xmpp = false);
     RibOutAttr(const BgpRoute *route, const BgpAttr *attr, bool is_xmpp);
 
-    bool IsReachable() const { return attr_out_.get() != NULL; }
+    RibOutAttr &operator=(const RibOutAttr &rhs);
     bool operator==(const RibOutAttr &rhs) const { return CompareTo(rhs) == 0; }
     bool operator!=(const RibOutAttr &rhs) const { return CompareTo(rhs) != 0; }
+    bool IsReachable() const { return attr_out_.get() != NULL; }
 
     const NextHopList &nexthop_list() const { return nexthop_list_; }
     const BgpAttr *attr() const { return attr_out_.get(); }
@@ -91,14 +95,22 @@ public:
     uint32_t label() const {
         return nexthop_list_.empty() ? 0 : nexthop_list_.at(0).label();
     }
+    bool is_xmpp() const { return is_xmpp_; }
     bool vrf_originated() const { return vrf_originated_; }
+    const std::string &repr() const { return repr_; }
+    void set_repr(const std::string &repr, size_t pos = 0) const {
+        repr_.clear();
+        repr_.append(repr, pos, std::string::npos);
+    }
 
 private:
     int CompareTo(const RibOutAttr &rhs) const;
 
     BgpAttrPtr attr_out_;
     NextHopList nexthop_list_;
+    bool is_xmpp_;
     bool vrf_originated_;
+    mutable std::string repr_;
 };
 
 //
@@ -261,7 +273,8 @@ public:
     const RibPeerSet &PeerSet() const;
     void GetSubsetPeerSet(RibPeerSet *peerset, const IPeerUpdate *cpeer) const;
 
-    BgpTable* table() const { return table_; }
+    BgpTable* table() { return table_; }
+    const BgpTable* table() const { return table_; }
 
     const RibExportPolicy &ExportPolicy() const { return policy_; }
 
@@ -277,6 +290,7 @@ public:
     BgpProto::BgpPeerType peer_type() const { return policy_.type; }
     as_t peer_as() const { return policy_.as_number; }
     bool as_override() const { return policy_.as_override; }
+    bool llgr() const { return policy_.llgr; }
     const IpAddress &nexthop() const { return policy_.nexthop; }
     bool IsEncodingXmpp() const {
         return (policy_.encoding == RibExportPolicy::XMPP);
@@ -284,6 +298,21 @@ public:
     bool IsEncodingBgp() const {
         return (policy_.encoding == RibExportPolicy::BGP);
     }
+    std::string EncodingString() const {
+        return IsEncodingXmpp() ? "XMPP" : "BGP";
+    }
+    bool remove_private_enabled() const {
+        return policy_.remove_private.enabled;
+    }
+    bool remove_private_all() const { return policy_.remove_private.all; }
+    bool remove_private_replace() const {
+        return policy_.remove_private.replace;
+    }
+    bool remove_private_peer_loop_check() const {
+        return policy_.remove_private.peer_loop_check;
+    }
+
+    void FillStatisticsInfo(std::vector<ShowRibOutStatistics> *sros_list) const;
 
 private:
     struct PeerState {

@@ -163,7 +163,8 @@ class PartitionClient(object):
             # TODO: If we have a non-KazooException, the lock object
             #       may get stuck in the "cancelled" state
             self._logger.error("Lock acquire unexpected error!: " + str(ex))
-            assert()
+            # This exception should get propogated to main thread
+            raise SystemExit
             return False
     #end _acquire_lock
 
@@ -185,13 +186,13 @@ class PartitionClient(object):
         # list of partitions for which locks have to be released
         release_lock_list = []
 
-        self._logger.error("known servers: %s" % self._con_hash.get_all_nodes())
+        self._logger.info("known servers: %s" % self._con_hash.get_all_nodes())
 
         for part in range(0, self._max_partition):
             if (part in self._target_part_ownership_list):
                 if (part in self._curr_part_ownership_list):
                     # do nothing, I already have ownership of this partition
-                    self._logger.error("No need to acquire ownership of:" +
+                    self._logger.info("No need to acquire ownership of:" +
                             str(part))
                 else:
                     # I need to acquire lock for this partition before I own
@@ -273,13 +274,13 @@ class PartitionClient(object):
         deleted_servers = list(set(self._cluster_list).difference(
             new_cluster_list)) 
         self._cluster_list = set(cluster_list)
-        self._logger.error("deleted servers:" + str(deleted_servers))
-        self._logger.error("new servers:" + str(new_servers))
 
         # update the hash structure
         if new_servers:
+            self._logger.error("new servers:" + str(new_servers))
             self._con_hash.add_nodes(new_servers)
         if deleted_servers:
+            self._logger.error("deleted servers:" + str(deleted_servers))
             self._con_hash.del_nodes(deleted_servers)
 
         # update target partition ownership list

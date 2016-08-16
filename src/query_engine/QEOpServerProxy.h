@@ -14,9 +14,14 @@
 #include <boost/variant.hpp>
 #include <boost/uuid/uuid.hpp>
 
+extern "C" {
+#include <base/tdigest.h>
+};
 class EventManager;
 class QueryEngine;
 class QueryResultMetaData;
+class query_result_unit_t;
+
 // This class represents the interface between the Query Engine and 
 // the OpServer. It will internally talk to the OpServer using Redis
 
@@ -68,13 +73,15 @@ public:
     typedef std::pair<OutRowT, MetadataT> ResultRowT; 
     typedef std::vector<ResultRowT> BufferT;
 
-    typedef boost::variant<boost::blank, std::string, uint64_t, double, boost::uuids::uuid> SubVal;
+    typedef boost::variant<boost::blank, std::string, uint64_t, double, boost::uuids::uuid, boost::shared_ptr<TDigest>, boost::shared_ptr<Centroid> > SubVal;
     enum VarType {
         BLANK=0,
         STRING=1,
         UINT64=2,
         DOUBLE=3,
-        UUID=4
+        UUID=4,
+        TDIGEST=5,
+	CENTROID=6,
     };
     enum AggOper {
         INVALID = 0,
@@ -82,7 +89,9 @@ public:
         COUNT = 2,
         CLASS = 3,
         MAX = 4,
-        MIN = 5
+        MIN = 5,
+        PERCENTILES = 6,
+	AVG = 7,
     };
 
     // This is a map of aggregations for an output row
@@ -114,6 +123,8 @@ public:
 
     void QueryResult(void *, QPerfInfo qperf, std::auto_ptr<BufferT> res,
             std::auto_ptr<OutRowMultimapT> mres);
+    void QueryResult(void *, QPerfInfo qperf,
+            std::auto_ptr<std::vector<query_result_unit_t> > res);
 private:
     EventManager * const evm_;
     QueryEngine * const qe_;

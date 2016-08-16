@@ -23,6 +23,8 @@ public:
             // cancelled task .. ignore
             if (task_cancelled()) {
                 // Cancelled timer's task releases the ownership of the timer
+
+                lock.release();
                 timer_ = NULL;
                 return true;
             }
@@ -115,6 +117,7 @@ bool Timer::Start(int time, Handler handler, ErrorHandler error_handler) {
     }
 
     // Restart the timer
+    time_ = time;
     handler_ = handler;
     seq_no_++;
     error_handler_ = error_handler;
@@ -186,7 +189,6 @@ void Timer::StartTimerTask(TimerPtr reference, int time, uint32_t seq_no,
     // Start a task and add Task reference.
     assert(timer_task_ == NULL);
     timer_task_ = new TimerTask(reference, ec);
-    time_ = time;
     TaskScheduler::GetInstance()->Enqueue(timer_task_);
 }
 
@@ -229,3 +231,19 @@ bool TimerManager::DeleteTimer(Timer *timer) {
     return true;
 }
 
+// Get timer's already elapsed time in milliseconds.
+int Timer::GetElapsedTime() const {
+    tbb::mutex::scoped_lock lock(mutex_);
+    int64_t elapsed;
+
+#if BOOST_VERSION >= 104900
+    elapsed =
+        boost::chrono::nanoseconds(impl_->timer_.expires_from_now()).count();
+#else
+    elapsed = impl_->timer_.expires_from_now().total_nanoseconds();
+#endif
+    elapsed = time_ - elapsed/1000000; // Convert nanoseconds to milliseconds.
+    if (elapsed < 0)
+        elapsed = 0;
+    return elapsed;
+}

@@ -15,6 +15,7 @@
 #include <oper/mirror_table.h>
 #include <vrouter/ksync/ksync_init.h>
 #include <pkt/flow_proto.h>
+#include <pkt/flow_token.h>
 
 void vr_interface_req::Process(SandeshContext *context) {
      AgentSandeshContext *ioc = static_cast<AgentSandeshContext *>(context);
@@ -71,6 +72,10 @@ static void LogFlowError(vr_flow_req *r, int err) {
         << " flow_handle = " << (int) r->get_fr_index());
 }
 
+// Handle vr_flow response from VRouter
+// We combine responses from both vr_flow and vr_response messages and
+// generate single event. Copy the results in vr_flow in KSync entry.
+// On receiving vr_response message, event will be generated for both messages
 void KSyncSandeshContext::FlowMsgHandler(vr_flow_req *r) {
     assert(r->get_fr_op() == flow_op::FLOW_TABLE_GET || 
            r->get_fr_op() == flow_op::FLOW_SET);
@@ -83,66 +88,31 @@ void KSyncSandeshContext::FlowMsgHandler(vr_flow_req *r) {
         return;
     } 
 
+    const KSyncIoContext *ioc = ksync_io_ctx();
+    FlowTableKSyncEntry *ksync_entry =
+        dynamic_cast<FlowTableKSyncEntry *>(ioc->GetKSyncEntry());
+    assert(ksync_entry != NULL);
+    ksync_entry->ReleaseToken();
+    // Handling a new KSync response. Reset the response-info fields, they will
+    // be filled below as necessary
+    ksync_entry->ResetKSyncResponseInfo();
+
     assert(r->get_fr_op() == flow_op::FLOW_SET);
     int err = GetErrno();
     if (err == EBADF) {
         LogFlowError(r, err);
     }
 
-    const KSyncIoContext *ioc = ksync_io_ctx();
     // Skip delete operation.
     if (ioc->event() == KSyncEntry::DEL_ACK) {
         return;
     }
 
-    FlowTableKSyncEntry *ksync_entry =
-        dynamic_cast<FlowTableKSyncEntry *>(ioc->GetKSyncEntry());
-    assert(ksync_entry != NULL);
-
-    FlowEntry *flow = ksync_entry->flow_entry().get();
-    if (flow == NULL)
-        return;
-
-    tbb::mutex::scoped_lock lock(flow->mutex());
-    FlowProto *proto = flow->flow_table()->agent()->pkt()->get_flow_proto();
-    // for any error report KSync Error
-    if (err != 0) {
-        if ((err == EBADF || err == ENOENT) &&
-            (((int)flow->flow_handle() != r->get_fr_index()))) {
-            // ignore EBADF and ENOENT error, if flow handle change
-            // was observed before gettign the response, thus avoid
-            // marking the flow as short flow
-            return;
-        }
-
-        proto->KSyncFlowErrorRequest(ksync_entry, err);
-        return;
-    }
-
-    if (flow->flow_handle() != FlowEntry::kInvalidFlowHandle) {
-        if ((int)flow->flow_handle() != r->get_fr_index()) {
-            LOG(DEBUG, "Flow index changed from <" <<
-                flow->flow_handle() << "> to <" <<
-                r->get_fr_index() << ">");
-        }
-    }
-
-    // When vrouter allocates a flow-index or changes flow-handle, its possible
-    // that a flow in vrouter is evicted. Update stats for evicted flow
-    if (r->get_fr_index() != (int)FlowEntry::kInvalidFlowHandle &&
-        r->get_fr_index() != (int)flow->flow_handle()) {
-        KSyncFlowIndexManager *imgr = flow_ksync_->ksync()->
-            ksync_flow_index_manager();
-        FlowMgmtManager *mgr = flow_ksync_->ksync()->agent()->pkt()->
-            flow_mgmt_manager();
-        FlowEntryPtr evicted_flow = imgr->FindByIndex(r->get_fr_index());
-        if (evicted_flow.get() && evicted_flow->deleted() == false) {
-            mgr->FlowStatsUpdateEvent(evicted_flow.get(), r->get_fr_flow_bytes(),
+    ksync_entry->SetKSyncResponseInfo(err, r->get_fr_index(),
+                                      r->get_fr_gen_id(),
+                                      r->get_fr_flow_bytes(),
                                       r->get_fr_flow_packets(),
                                       r->get_fr_flow_stats_oflow());
-        }
-    }
-    proto->KSyncFlowHandleRequest(ksync_entry, r->get_fr_index());
     return;
 }
 
@@ -161,6 +131,8 @@ void KSyncSandeshContext::VrouterOpsMsgHandler(vrouter_ops *r) {
     agent->set_vrouter_max_interfaces(r->get_vo_interfaces());
     agent->set_vrouter_max_mirror_entries(r->get_vo_mirror_entries());
     agent->set_vrouter_max_vrfs(r->get_vo_vrfs());
+    agent->set_vrouter_max_flow_entries(r->get_vo_flow_entries());
+    agent->set_vrouter_max_oflow_entries(r->get_vo_oflow_entries());
     agent->set_vrouter_build_info(r->get_vo_build_info());
     return;
 }

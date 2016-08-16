@@ -347,7 +347,7 @@ UpdateInfo *McastForwarder::GetUpdateInfo(ErmVpnTable *table) {
     BgpAttrPtr attr = table->server()->attr_db()->Locate(attr_spec);
 
     UpdateInfo *uinfo = new UpdateInfo;
-    uinfo->roattr = RibOutAttr(table, route_, attr.get(), label_);
+    uinfo->roattr = RibOutAttr(table, route_, attr.get(), label_, true, true);
     return uinfo;
 }
 
@@ -836,7 +836,7 @@ void McastTreeManager::Terminate() {
 // Allocate the McastManagerPartitions.
 //
 void McastTreeManager::AllocPartitions() {
-    for (int part_id = 0; part_id < DB::PartitionCount(); part_id++) {
+    for (int part_id = 0; part_id < table_->PartitionCount(); part_id++) {
         partitions_.push_back(new McastManagerPartition(this, part_id));
     }
 }

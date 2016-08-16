@@ -70,7 +70,7 @@ class HAProxyTest(unittest.TestCase):
         def validate_pool_update(obj_type, obj_uuid, ref_type, ref_uuid,
                                  ref_fq_name, operation):
             self.assertEqual(obj_type, "loadbalancer-pool")
-            self.assertEqual(ref_type, "service_instance_refs")
+            self.assertEqual(ref_type, "service-instance")
             pool = config_db.LoadbalancerPoolSM.get(obj_uuid)
             if operation is "ADD":
                 si = config_db.ServiceInstanceSM.get(ref_uuid)
@@ -171,7 +171,8 @@ OpencontrailLoadbalancerDriver")
         pool_obj['loadbalancer_pool_provider'] = 'opencontrail'
         pool_obj['loadbalancer_pool_properties'] = \
             {'protocol': 'HTTP', 'subnet_id': 'subnet-id',
-             'loadbalancer_method': 'ROUND_ROBIN', 'admin_state': 'true'}
+             'loadbalancer_method': 'ROUND_ROBIN', 'admin_state': 'true',
+             'session_persistence': None, 'persistence_cookie_name': None}
         if vip:
             pool_obj['virtual_ip_back_refs']=[{'uuid': vip.uuid}]
         if hm:

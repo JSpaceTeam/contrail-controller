@@ -9,6 +9,7 @@
 #include <boost/system/error_code.hpp>
 
 #include "base/queue_task.h"
+#include "ifmap/ifmap_config_options.h"
 
 namespace sc = boost::statechart;
 
@@ -26,7 +27,6 @@ class IFMapStateMachine :
         public sc::state_machine<IFMapStateMachine, ifsm::Idle> {
 public:
     static const int kConnectWaitIntervalMs; // in milliseconds
-    static const int kResponseWaitIntervalMs; // in milliseconds
 
     enum State {
         IDLE                   = 0,
@@ -46,7 +46,8 @@ public:
         // Add an entry to state_names[] if you add an entry here
     };
 
-    IFMapStateMachine(IFMapManager *manager);
+    IFMapStateMachine(IFMapManager *manager,
+                      const IFMapConfigOptions& config_options);
 
     void Initialize();
 
@@ -134,11 +135,12 @@ public:
     void set_max_response_wait_interval_ms(int ms) {
         max_response_wait_interval_ms_ = ms;
     }
+    int max_response_wait_interval_ms() {
+        return max_response_wait_interval_ms_;
+    }
     size_t WorkQueueEnqueues() const { return work_queue_.NumEnqueues(); }
     size_t WorkQueueDequeues() const { return work_queue_.NumDequeues(); }
     size_t WorkQueueLength() const { return work_queue_.Length(); }
-    bool log_all_transitions() { return log_all_transitions_; }
-    void set_log_all_transitions(bool value) { log_all_transitions_ = value; }
 
 private:
     void EnqueueEvent(const sc::event_base &ev);
@@ -167,7 +169,6 @@ private:
     uint64_t last_event_at_;
     int max_connect_wait_interval_ms_;
     int max_response_wait_interval_ms_;
-    bool log_all_transitions_;
 };
 
 #endif /* __IFMAP_STATE_MACHINE_H__ */

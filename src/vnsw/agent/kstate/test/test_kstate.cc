@@ -44,6 +44,13 @@ struct PortInfo input[] = {
     {"test3", 8, vm4_ip, "00:00:00:02:02:04", 3, 4},
     {"test4", 9, vm5_ip, "00:00:00:02:02:05", 3, 5},
 };
+IpamInfo ipam_info[] = {
+    {"1.1.1.0", 24, "1.1.1.10"},
+    {"2.1.1.0", 24, "2.1.1.10"},
+    {"3.1.1.0", 24, "3.1.1.10"},
+    {"4.1.1.0", 24, "4.1.1.10"},
+    {"5.1.1.0", 24, "5.1.1.10"},
+};
 
 std::string analyzer = "TestAnalyzer";
 
@@ -121,12 +128,12 @@ public:
                                     (uint32_t)KSyncSockTypeMap::IfCount()));
             }
             if (nh_count) {
-                //5 interface nexthops get created for each interface
+                //4 interface nexthops get created for each interface
                 //(l2 with policy, l2 without policy, l3 with policy, l3
-                // without policy and 1 multicast - mac as all f's)
+                // without policy)
                 //plus 4 Nexthops for each VRF (1 VRF NH and 3 Composite NHs
                 //i.e. TOR CNH, EVPN CNH, Fabric CNH)
-                WAIT_FOR(1000, 1000, ((nh_count + (num_ports * 5) + 4) ==
+                WAIT_FOR(1000, 1000, ((nh_count + (num_ports * 4) + 4) ==
                                     (uint32_t)KSyncSockTypeMap::NHCount()));
             }
             if (rt_count) {
@@ -207,8 +214,15 @@ public:
         WAIT_FOR(1000, 1000, (Agent::GetInstance()->nexthop_table()->FindActiveEntry(&key) == NULL));
     }
 
-    void SetUp() {
+    virtual void SetUp() {
         agent_ = Agent::GetInstance();
+        AddIPAM("vn3", ipam_info, 5);
+        client->WaitForIdle();
+    }
+
+    virtual void TearDown() {
+        DelIPAM("vn3");
+        client->WaitForIdle();
     }
 
     Agent *agent_;
@@ -258,11 +272,10 @@ TEST_F(KStateTest, NHDumpTest) {
     int max_ports = 2;
 
     CreatePorts(0, nh_count, 0, max_ports);
-    //5 interface nexthops get created for each interface
-    //(l2 with policy, l2 without policy, l3 with policy, l3 without policy
-    // and 1 multicast - mac as all f's )
+    //4 interface nexthops get created for each interface
+    //(l2 with policy, l2 without policy, l3 with policy, l3 without policy)
     //plus 4 Nexthops for each VRF (1 VRF NH and 3 Composite NHs)
-    TestNHKState::Init(-1, true, nh_count + (max_ports * 5) + 4);
+    TestNHKState::Init(-1, true, nh_count + (max_ports * 4) + 4);
     client->WaitForIdle();
     client->KStateResponseWait(1);
 
@@ -392,9 +405,10 @@ TEST_F(KStateTest, RouteDumpTest) {
         //Default
         //Addition of 2 vm ports in a new VN (VRF) will result in the following routes
         // 2 routes corresponding to the addresses of VM
+        // 2 routes corresponding to VN ipam, i.e., gate-way & subnet routes
         // l2 broadcast
-        // 2 - v6 host route for new vrf addition
-        TestRouteKState::Init(true, prev_rt_count + (MAX_TEST_FD * 2) + 3);
+        // 3 - v6 host route for new vrf addition
+        TestRouteKState::Init(true, prev_rt_count + (MAX_TEST_FD * 4) + 4);
         client->WaitForIdle();
         client->KStateResponseWait(1);
         DeletePorts();

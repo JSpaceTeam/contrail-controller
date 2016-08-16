@@ -19,14 +19,11 @@
 #include "stats_query.h"
 #include <base/connection_info.h>
 #include "utils.h"
-#ifdef USE_CASSANDRA_CQL
 #include <database/cassandra/cql/cql_if.h>
-#else // USE_CASSANDRA_CQL
-#include <database/cassandra/thrift/thrift_if.h>
-#endif // !USE_CASSANDRA_CQL
 
 using std::map;
 using std::string;
+using std::vector;
 using boost::assign::map_list_of;
 using boost::system::error_code;
 using process::ConnectionState;
@@ -189,7 +186,8 @@ PostProcessingQuery::PostProcessingQuery(
                     // do some validation checks
                     QE_INVALIDARG_ERROR(name_value.IsString());
                     QE_INVALIDARG_ERROR
-                        ((value_value.IsString() || value_value.IsNumber()));
+                        ((value_value.IsString() || value_value.IsNumber() ||
+                          value_value.IsDouble()));
                     QE_INVALIDARG_ERROR(op_value.IsNumber());
 
                     filter.name = name_value.GetString();
@@ -211,6 +209,12 @@ PostProcessingQuery::PostProcessingQuery(
                               std::ostringstream convert;
                               uint_value = value_value.GetUint();
                               convert << uint_value;
+                              filter.value = convert.str();
+                          } else if (value_value.IsDouble()) {
+                              double dbl_value;
+                              std::ostringstream convert;
+                              dbl_value = value_value.GetDouble();
+                              convert << dbl_value;
                               filter.value = convert.str();
                           }
                       }
@@ -345,7 +349,7 @@ const std::vector<boost::shared_ptr<QEOpServerProxy::BufferT> >& inputs,
 // this is to get parallelization details once the query is parsed
 void AnalyticsQuery::get_query_details(bool& is_merge_needed, bool& is_map_output,
         std::vector<uint64_t>& chunk_sizes,
-        std::string& where,
+        std::string& where, uint32_t& wterms,
         std::string& select,
         std::string& post,
         uint64_t& time_period,
@@ -379,6 +383,7 @@ void AnalyticsQuery::get_query_details(bool& is_merge_needed, bool& is_map_outpu
     }
 
     where = wherequery_->json_string_;
+    wterms = wherequery_->wterms_;
     select = selectquery_->json_string_;
     post = postprocess_->json_string_;
     is_map_output = is_stat_table_query(table_);
@@ -393,7 +398,8 @@ bool AnalyticsQuery::can_parallelize_query() {
 }
 
 void AnalyticsQuery::Init(std::string qid,
-    std::map<std::string, std::string>& json_api_data)
+    std::map<std::string, std::string>& json_api_data,
+    int32_t or_number)
 {
     std::map<std::string, std::string>::iterator iter;
 
@@ -506,7 +512,8 @@ void AnalyticsQuery::Init(std::string qid,
         }
 
         QE_TRACE(DEBUG,  " Initializing Where Query");
-        wherequery_ = new WhereQuery(where_json_string, direction, this);
+        wherequery_ = new WhereQuery(where_json_string, direction,
+                or_number, this);
         this->status_details = wherequery_->status_details;
         if (this->status_details != 0 )
         {
@@ -620,7 +627,6 @@ void AnalyticsQuery::Init(std::string qid,
     }
 
 }
-
 QueryUnit::QueryUnit(QueryUnit *p_query, QueryUnit *m_query):
     parent_query(p_query), main_query(m_query), pending_subqueries(0),
     query_status(QUERY_PROCESSING_NOT_STARTED), status_details(0) 
@@ -638,7 +644,7 @@ QueryUnit::~QueryUnit()
 
 
 // Get UUID from the info field
-void query_result_unit_t::get_uuid(boost::uuids::uuid& u)
+void query_result_unit_t::get_uuid(boost::uuids::uuid& u) const
 {
     try {
         u = boost::get<boost::uuids::uuid>(info.at(0));
@@ -649,41 +655,13 @@ void query_result_unit_t::get_uuid(boost::uuids::uuid& u)
 
 // Get UUID and stats
 void query_result_unit_t::get_uuid_stats(boost::uuids::uuid& u, 
-        flow_stats& stats)
+        flow_stats& stats) const
 {
-#ifdef USE_CASSANDRA_CQL
     QE_ASSERT(info.size() == 1);
     const GenDb::DbDataValue &val(info[0]);
     QE_ASSERT(val.which() == GenDb::DB_VALUE_STRING);
     std::string jsonline(boost::get<std::string>(val));
     get_uuid_stats_8tuple_from_json(jsonline, &u, &stats, NULL);
-#else // USE_CASSANDRA_CQL
-    try {
-        stats.bytes = boost::get<uint64_t>(info.at(0));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    }
-
-    try {
-        stats.pkts = boost::get<uint64_t>(info.at(1));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    }
-
-    try {
-        stats.short_flow = (boost::get<uint8_t>(info.at(2)) == 1)? true : false;
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    }
-
-    try {
-        u = boost::get<boost::uuids::uuid>(info.at(3));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    }
-
-    return;
-#endif // !USE_CASSANDRA_CQL
 }
 
 void query_result_unit_t::set_stattable_info(
@@ -695,7 +673,7 @@ void query_result_unit_t::set_stattable_info(
 
 void  query_result_unit_t::get_stattable_info(
             std::string& attribstr,
-            boost::uuids::uuid& uuid) {
+            boost::uuids::uuid& uuid) const {
 
     int index = 0;
 
@@ -776,30 +754,20 @@ static void get_8tuple_from_json(const rapidjson::Document &dd,
     const std::string &tsource_ip_s(
         frnames[FlowRecordFields::FLOWREC_SOURCEIP]);
     if (dd.HasMember(tsource_ip_s.c_str())) {
-#ifdef USE_CASSANDRA_CQL
         QE_ASSERT(dd[tsource_ip_s.c_str()].IsString());
         std::string ipaddr_s(dd[tsource_ip_s.c_str()].GetString());
         boost::system::error_code ec;
         tuple->source_ip = IpAddress::from_string(ipaddr_s, ec);
         QE_ASSERT(ec == 0);
-#else // USE_CASSANDRA_CQL
-        QE_ASSERT(dd[tsource_ip_s.c_str()].IsUint());
-        tuple->source_ip = dd[tsource_ip_s.c_str()].GetUint();
-#endif // !USE_CASSANDRA_CQL
     }
     const std::string &tdest_ip_s(
         frnames[FlowRecordFields::FLOWREC_DESTIP]);
     if (dd.HasMember(tdest_ip_s.c_str())) {
-#ifdef USE_CASSANDRA_CQL
         QE_ASSERT(dd[tdest_ip_s.c_str()].IsString());
         std::string ipaddr_s(dd[tdest_ip_s.c_str()].GetString());
         boost::system::error_code ec;
         tuple->dest_ip = IpAddress::from_string(ipaddr_s, ec);
         QE_ASSERT(ec == 0);
-#else // USE_CASSANDRA_CQL
-        QE_ASSERT(dd[tdest_ip_s.c_str()].IsUint());
-        tuple->dest_ip = dd[tdest_ip_s.c_str()].GetUint();
-#endif // !USE_CASSANDRA_CQL
     }
     const std::string &tprotocol_s(
         frnames[FlowRecordFields::FLOWREC_PROTOCOL]);
@@ -841,108 +809,13 @@ void get_uuid_stats_8tuple_from_json(const std::string &jsonline,
 
 // Get UUID and stats and 8-tuple
 void query_result_unit_t::get_uuid_stats_8tuple(boost::uuids::uuid& u,
-       flow_stats& stats, flow_tuple& tuple)
+       flow_stats& stats, flow_tuple& tuple) const
 {
-#ifdef USE_CASSANDRA_CQL
     QE_ASSERT(info.size() == 1);
     const GenDb::DbDataValue &val(info[0]);
     QE_ASSERT(val.which() == GenDb::DB_VALUE_STRING);
     std::string jsonline(boost::get<std::string>(val));
     get_uuid_stats_8tuple_from_json(jsonline, &u, &stats, &tuple);
-#else // USE_CASSANDRA_CQL
-    int index = 0;
-    try {
-        stats.bytes = boost::get<uint64_t>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-
-    try {
-        stats.pkts = boost::get<uint64_t>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-
-    try {
-        stats.short_flow = (boost::get<uint8_t>(info.at(index++)) == 1? true : false);
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-
-    try {
-        u = boost::get<boost::uuids::uuid>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-
-    try {
-        tuple.vrouter = boost::get<std::string>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-
-    try {
-        tuple.source_vn = boost::get<std::string>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-
-    try {
-        tuple.dest_vn = boost::get<std::string>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-    try {
-        tuple.source_ip = boost::get<uint32_t>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-    try {
-        tuple.dest_ip = boost::get<uint32_t>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-    try {
-        tuple.protocol = boost::get<uint8_t>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-    try {
-        tuple.source_port = boost::get<uint16_t>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-    try {
-        tuple.dest_port = boost::get<uint16_t>(info.at(index++));
-    } catch (boost::bad_get& ex) {
-        QE_ASSERT(0);
-    } catch (const std::out_of_range& oor) {
-        QE_ASSERT(0);
-    }
-    return;
-#endif // !USE_CASSANDRA_CQL
 }
 
 query_status_t AnalyticsQuery::process_query()
@@ -953,20 +826,6 @@ query_status_t AnalyticsQuery::process_query()
              "No need to process query, as there were errors previously");
         return QUERY_FAILURE;
     }
-
-    QE_TRACE(DEBUG, "Start Where Query Processing");
-    where_start_ = UTCTimestampUsec();
-    query_status = wherequery_->process_query();
-    qperf_.chunk_where_time =
-            static_cast<uint32_t>((UTCTimestampUsec() - where_start_)/1000);
-
-    status_details = wherequery_->status_details;
-    if (query_status != QUERY_SUCCESS) 
-    {
-        QE_LOG(DEBUG, "where processing failed with error:"<< query_status);
-        return query_status;
-    }
-    QE_TRACE(DEBUG, "End Where Query Processing");
 
     QE_TRACE(DEBUG, "Start Select Processing");
     select_start_ = UTCTimestampUsec();
@@ -1006,20 +865,18 @@ query_status_t AnalyticsQuery::process_query()
 }
 
 AnalyticsQuery::AnalyticsQuery(std::string qid, std::map<std::string, 
-        std::string>& json_api_data, const TtlMap& ttlmap,
+        std::string>& json_api_data,
+        int or_number,
+        const std::vector<query_result_unit_t> * where_info,
+        const TtlMap& ttlmap,
         EventManager *evm, std::vector<std::string> cassandra_ips, 
         std::vector<int> cassandra_ports, int batch,
         int total_batches, const std::string& cassandra_user,
         const std::string& cassandra_password):
         QueryUnit(NULL, this),
-#ifndef USE_CASSANDRA_CQL
-        dbif_(new ThriftIf(
-            boost::bind(&AnalyticsQuery::db_err_handler, this),
-            cassandra_ips, cassandra_ports, "QueryEngine", true,
-            cassandra_user, cassandra_password)),
-#endif // !USE_CASSANDRA_CQL
         filter_qe_logs(true),
         json_api_data_(json_api_data),
+        where_info_(where_info),
         ttlmap_(ttlmap),
         where_start_(0),
         select_start_(0),
@@ -1083,18 +940,21 @@ AnalyticsQuery::AnalyticsQuery(std::string qid, std::map<std::string,
             std::string());
     }
     dbif_->Db_SetInitDone(true);
-    Init(qid, json_api_data);
+    Init(qid, json_api_data, or_number);
 }
 
 AnalyticsQuery::AnalyticsQuery(std::string qid, 
     GenDbIfPtr dbif_ptr,
-    std::map<std::string, std::string> json_api_data, 
+    std::map<std::string, std::string> json_api_data,
+    int or_number,
+    const std::vector<query_result_unit_t> * where_info,
     const TtlMap &ttlmap, int batch, int total_batches) :
     QueryUnit(NULL, this),
     dbif_(dbif_ptr),
     query_id(qid),
     filter_qe_logs(true),
     json_api_data_(json_api_data),
+    where_info_(where_info),
     ttlmap_(ttlmap),
     where_start_(0), 
     select_start_(0), 
@@ -1104,7 +964,7 @@ AnalyticsQuery::AnalyticsQuery(std::string qid,
     total_parallel_batches(total_batches),
     processing_needed(true),
     stats_(NULL) {
-    Init(qid, json_api_data);
+    Init(qid, json_api_data, or_number);
 }
 
 QueryEngine::QueryEngine(EventManager *evm,
@@ -1120,7 +980,7 @@ QueryEngine::QueryEngine(EventManager *evm,
         cassandra_password_(cassandra_password)
 {
     max_slice_ =  max_slice;
-    init_vizd_tables(false);
+    init_vizd_tables();
 
     // Initialize database connection
     QE_LOG_NOQID(DEBUG, "Initializing QE without database!");
@@ -1134,34 +994,19 @@ QueryEngine::QueryEngine(EventManager *evm,
             const std::string & redis_ip, unsigned short redis_port,
             const std::string & redis_password, int max_tasks, int max_slice, 
             const std::string & cassandra_user,
-            const std::string & cassandra_password,
-            bool use_cql) :
+            const std::string & cassandra_password) :
         qosp_(new QEOpServerProxy(evm,
             this, redis_ip, redis_port, redis_password, max_tasks)),
         evm_(evm),
         cassandra_ports_(cassandra_ports),
         cassandra_ips_(cassandra_ips),
         cassandra_user_(cassandra_user),
-        cassandra_password_(cassandra_password),
-        use_cql_(use_cql) {
-#ifdef USE_CASSANDRA_CQL
-    if (use_cql) {
+        cassandra_password_(cassandra_password) {
         dbif_.reset(new cass::cql::CqlIf(evm, cassandra_ips,
             cassandra_ports[0], cassandra_user, cassandra_password));
         keyspace_ = g_viz_constants.COLLECTOR_KEYSPACE_CQL;
-    } else {
-#else // USE_CASSANDRA_CQL
-        dbif_.reset(new ThriftIf(
-            boost::bind(&QueryEngine::db_err_handler, this),
-            cassandra_ips, cassandra_ports, "QueryEngine", true,
-            cassandra_user, cassandra_password));
-        keyspace_ = g_viz_constants.COLLECTOR_KEYSPACE;
-#endif // !USE_CASSANDRA_CQL
-#ifdef USE_CASSANDRA_CQL
-    }
-#endif // USE_CASSANDRA_CQL
     max_slice_ = max_slice;
-    init_vizd_tables(use_cql);
+    init_vizd_tables();
 
     // Initialize database connection
     QE_TRACE_NOQID(DEBUG, "Initializing database");
@@ -1318,7 +1163,8 @@ int
 QueryEngine::QueryPrepare(QueryParams qp,
         std::vector<uint64_t> &chunk_size,
         bool & need_merge, bool & map_output,
-        std::string& where, std::string& select, std::string& post,
+        std::string& where, uint32_t& wterms,
+        std::string& select, std::string& post,
         uint64_t& time_period, 
         std::string &table) {
     string& qid = qp.qid;
@@ -1333,17 +1179,11 @@ QueryEngine::QueryPrepare(QueryParams qp,
         table = string("ObjectCollectorInfo");
     } else {
         AnalyticsQuery *q;
-        if (UseGlobalDbHandler()) {
-            q = new AnalyticsQuery(qid, dbif_, qp.terms, ttlmap_, 0,
+        q = new AnalyticsQuery(qid, dbif_, qp.terms, -1, NULL, ttlmap_, 0,
                 qp.maxChunks);
-        } else {
-            q = new AnalyticsQuery(qid, qp.terms, ttlmap_, evm_,
-                cassandra_ips_, cassandra_ports_, 0, qp.maxChunks,
-                cassandra_user_, cassandra_password_);
-        }
         chunk_size.clear();
         q->get_query_details(need_merge, map_output, chunk_size,
-            where, select, post, time_period, ret_code);
+            where, wterms ,select, post, time_period, ret_code);
         table = q->table();
         delete q;
     }
@@ -1357,14 +1197,8 @@ QueryEngine::QueryAccumulate(QueryParams qp,
 
     QE_TRACE_NOQID(DEBUG, "Creating analytics query object for merge_processing");
     AnalyticsQuery *q;
-    if (UseGlobalDbHandler()) {
-        q = new AnalyticsQuery(qp.qid, dbif_, qp.terms, ttlmap_, 1,
+    q = new AnalyticsQuery(qp.qid, dbif_, qp.terms, -1, NULL, ttlmap_, 1,
                 qp.maxChunks);
-    } else {
-        q = new AnalyticsQuery(qp.qid, qp.terms, ttlmap_, evm_,
-                cassandra_ips_, cassandra_ports_, 1, qp.maxChunks,
-                cassandra_user_, cassandra_password_);
-    }
     QE_TRACE_NOQID(DEBUG, "Calling merge_processing");
     bool ret = q->merge_processing(input, output);
     delete q;
@@ -1378,14 +1212,8 @@ QueryEngine::QueryFinalMerge(QueryParams qp,
 
     QE_TRACE_NOQID(DEBUG, "Creating analytics query object for final_merge_processing");
     AnalyticsQuery *q;
-    if (UseGlobalDbHandler()) {
-        q = new AnalyticsQuery(qp.qid, dbif_, qp.terms, ttlmap_, 1,
+    q = new AnalyticsQuery(qp.qid, dbif_, qp.terms, -1, NULL, ttlmap_, 1,
                 qp.maxChunks);
-    } else {
-        q = new AnalyticsQuery(qp.qid, qp.terms, ttlmap_, evm_,
-                cassandra_ips_, cassandra_ports_, 1, qp.maxChunks,
-                cassandra_user_, cassandra_password_);
-    }
     QE_TRACE_NOQID(DEBUG, "Calling final_merge_processing");
     bool ret = q->final_merge_processing(inputs, output);
     delete q;
@@ -1398,14 +1226,8 @@ QueryEngine::QueryFinalMerge(QueryParams qp,
         QEOpServerProxy::OutRowMultimapT& output) {
     QE_TRACE_NOQID(DEBUG, "Creating analytics query object for final_merge_processing");
     AnalyticsQuery *q;
-    if (UseGlobalDbHandler()) {
-        q = new AnalyticsQuery(qp.qid, dbif_, qp.terms, ttlmap_, 1,
+    q = new AnalyticsQuery(qp.qid, dbif_, qp.terms, -1, NULL, ttlmap_, 1,
                 qp.maxChunks);
-    } else {
-        q = new AnalyticsQuery(qp.qid, qp.terms, ttlmap_, evm_,
-                cassandra_ips_, cassandra_ports_, 1, qp.maxChunks,
-                cassandra_user_, cassandra_password_);
-    }
 
     if (!q->is_stat_table_query(q->table())) {
         QE_TRACE_NOQID(DEBUG, "MultiMap merge_final is for Stats only");
@@ -1419,8 +1241,55 @@ QueryEngine::QueryFinalMerge(QueryParams qp,
     return true;   
 }
 
+// Query Execution of WHERE term
+bool
+QueryEngine::QueryExecWhere(void * handle, QueryParams qp, uint32_t chunk,
+        uint32_t or_number)
+{
+    string& qid = qp.qid;
+    QE_TRACE_NOQID(DEBUG,
+             " Got Where Query to execute for QID " << qid << " chunk:"<< chunk);
+    //GenDb::GenDbIf *db_if = dbif_.get();
+    if (cassandra_ports_.size() == 1 && cassandra_ports_[0] == 0) {
+        std::auto_ptr<std::vector<query_result_unit_t> > where_output(
+                new std::vector<query_result_unit_t>());
+        QE_TRACE_NOQID(DEBUG, " Finished NULL query processing for QID " << qid << " chunk:" << chunk);
+        QEOpServerProxy::QPerfInfo qperf(0,0,0);
+        qperf.error = 0;
+
+        qosp_->QueryResult(handle, qperf, where_output);
+        return true;
+    }
+    AnalyticsQuery *q;
+    q = new AnalyticsQuery(qid, dbif_, qp.terms, or_number, NULL,
+                ttlmap_, chunk, qp.maxChunks);
+
+    QE_TRACE_NOQID(DEBUG, " Finished parsing and starting where for QID " << qid << " chunk:" << chunk);
+
+    q->where_start_ = UTCTimestampUsec();
+    q->query_status = q->wherequery_->process_query();
+    q->qperf_.chunk_where_time =
+            static_cast<uint32_t>((UTCTimestampUsec() - q->where_start_)/1000);
+
+    q->status_details = q->wherequery_->status_details;
+    if (q->query_status != QUERY_SUCCESS) 
+    {
+        QE_TRACE_NOQID(DEBUG, "where processing failed with error:"  <<
+                q->query_status);
+        return q->query_status;
+    }
+
+    QE_TRACE_NOQID(DEBUG, " Finished where processing for QID " << qid << " chunk:" << chunk);
+    q->qperf_.error = q->status_details;
+    qosp_->QueryResult(handle, q->qperf_, q->wherequery_->where_result_);
+    delete q;
+    return true;
+}
+
+// Query Execution of SELECT and post-processing
 bool 
-QueryEngine::QueryExec(void * handle, QueryParams qp, uint32_t chunk)
+QueryEngine::QueryExec(void * handle, QueryParams qp, uint32_t chunk,
+        const std::vector<query_result_unit_t> * where_info)
 {
     string& qid = qp.qid;
     QE_TRACE_NOQID(DEBUG,
@@ -1445,14 +1314,8 @@ QueryEngine::QueryExec(void * handle, QueryParams qp, uint32_t chunk)
         return true;
     }
     AnalyticsQuery *q;
-    if (UseGlobalDbHandler()) {
-        q = new AnalyticsQuery(qid, dbif_, qp.terms, ttlmap_, chunk,
+    q = new AnalyticsQuery(qid, dbif_, qp.terms, -1, where_info, ttlmap_, chunk,
                 qp.maxChunks);
-    } else {
-        q = new AnalyticsQuery(qp.qid, qp.terms, ttlmap_, evm_,
-                cassandra_ips_, cassandra_ports_, chunk, qp.maxChunks,
-                cassandra_user_, cassandra_password_);
-    }
 
     QE_TRACE_NOQID(DEBUG, " Finished parsing and starting processing for QID " << qid << " chunk:" << chunk); 
     q->process_query(); 

@@ -49,6 +49,13 @@ class NeutronPluginInterface(object):
         self._contrail_extensions_enabled = exts_enabled
 
         try:
+            strict = conf_sections.getboolean('NEUTRON',
+                'strict_compliance')
+        except (ConfigParser.NoSectionError, ConfigParser.NoOptionError):
+            strict = False
+        self._strict_compliance = strict
+
+        try:
             _vnc_connection_cache_size = int(
                 conf_sections.get("DEFAULTS", "vnc_connection_cache_size"))
         except ConfigParser.NoOptionError:
@@ -57,7 +64,7 @@ class NeutronPluginInterface(object):
         try:
             self._multi_tenancy = conf_sections.get('DEFAULTS', 'multi_tenancy')
         except ConfigParser.NoOptionError:
-            self._multi_tenancy = False
+            self._multi_tenancy = True
 
         try:
             self._list_optimization_enabled = \
@@ -97,7 +104,8 @@ class NeutronPluginInterface(object):
                                       contrail_extensions_enabled=exts_enabled,
                                       list_optimization_enabled=\
                                       self._list_optimization_enabled,
-                                      apply_subnet_host_routes=apply_sn_route)
+                                      apply_subnet_host_routes=apply_sn_route,
+                                      strict_compliance=self._strict_compliance)
     #end _connect_to_db
 
     def _get_user_cfgdb(self, context):
@@ -245,6 +253,7 @@ class NeutronPluginInterface(object):
                'ipv6_address_mode': subnet['ipv6_address_mode'],
                'dns_nameservers': [dns['address']
                                    for dns in subnet['dns_nameservers']],
+               'contrail:dns_server_address':subnet['contrail:dns_server_address'],
                'host_routes': [{'destination': route['destination'],
                                 'nexthop': route['nexthop']}
                                for route in subnet['routes']],

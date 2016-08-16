@@ -42,6 +42,7 @@ void Dns::SetTaskSchedulingPolicy() {
         "dns::Config",
         "dns::BindStatus",
         "db::DBTable",
+        "db::IFMapTable",
         "io::ReaderTask",
         "timer::TimerTask",
         "bgp::Config",
@@ -49,6 +50,7 @@ void Dns::SetTaskSchedulingPolicy() {
         "ifmap::StateMachine",
         "sandesh::RecvQueue",
         "http::RequestHandlerTask",
+        "dns::NamedSndRcv"
     };
     int arraysize = sizeof(config_exclude_list) / sizeof(char *);
     for (int i = 0; i < arraysize; ++i) {

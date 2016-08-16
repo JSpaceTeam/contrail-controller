@@ -10,13 +10,13 @@
 #include "uve/flow_ace_stats_request.h"
 #include "uve/agent_uve_stats.h"
 #include "vrouter/flow_stats/flow_stats_collector.h"
-const string FlowMgmtManager::kFlowMgmtTask = "Flow::Management";
 
 /////////////////////////////////////////////////////////////////////////////
 // FlowMgmtManager methods
 /////////////////////////////////////////////////////////////////////////////
-FlowMgmtManager::FlowMgmtManager(Agent *agent) :
+FlowMgmtManager::FlowMgmtManager(Agent *agent, uint16_t table_index) :
     agent_(agent),
+    table_index_(table_index),
     acl_flow_mgmt_tree_(this),
     interface_flow_mgmt_tree_(this),
     vn_flow_mgmt_tree_(this),
@@ -26,9 +26,17 @@ FlowMgmtManager::FlowMgmtManager(Agent *agent) :
     vrf_flow_mgmt_tree_(this),
     nh_flow_mgmt_tree_(this),
     flow_mgmt_dbclient_(new FlowMgmtDbClient(agent, this)),
-    request_queue_(agent_->task_scheduler()->GetTaskId(kFlowMgmtTask), 1,
-                   boost::bind(&FlowMgmtManager::RequestHandler, this, _1)) {
+    request_queue_(agent_->task_scheduler()->GetTaskId(kTaskFlowMgmt), 0,
+                   boost::bind(&FlowMgmtManager::RequestHandler, this, _1)),
+    db_event_queue_(agent_->task_scheduler()->GetTaskId(kTaskFlowMgmt), 0,
+                    boost::bind(&FlowMgmtManager::DBRequestHandler, this, _1),
+                    db_event_queue_.kMaxSize, 1),
+    log_queue_(agent_->task_scheduler()->GetTaskId(kTaskFlowMgmt), 1,
+               boost::bind(&FlowMgmtManager::LogHandler, this, _1)) {
     request_queue_.set_name("Flow management");
+    request_queue_.set_measure_busy_time(agent->MeasureQueueDelay());
+    db_event_queue_.set_name("Flow DB Event Queue");
+    log_queue_.set_name("Flow Log Queue");
     for (uint8_t count = 0; count < MAX_XMPP_SERVERS; count++) {
         bgp_as_a_service_flow_mgmt_tree_[count].reset(
             new BgpAsAServiceFlowMgmtTree(this));
@@ -52,6 +60,8 @@ void FlowMgmtManager::Init() {
 
 void FlowMgmtManager::Shutdown() {
     request_queue_.Shutdown();
+    db_event_queue_.Shutdown();
+    log_queue_.Shutdown();
     flow_mgmt_dbclient_->Shutdown();
 }
 
@@ -60,18 +70,16 @@ void FlowMgmtManager::Shutdown() {
 /////////////////////////////////////////////////////////////////////////////
 void FlowMgmtManager::BgpAsAServiceNotify(const boost::uuids::uuid &vm_uuid,
                                           uint32_t source_port) {
-    boost::shared_ptr<FlowMgmtRequest>req
-        (new BgpAsAServiceFlowMgmtRequest(vm_uuid, source_port));
+    FlowMgmtRequestPtr req(new BgpAsAServiceFlowMgmtRequest(vm_uuid,
+                                                            source_port));
     request_queue_.Enqueue(req);
 }
 
 void FlowMgmtManager::ControllerNotify(uint8_t index) {
-    boost::shared_ptr<FlowMgmtRequest>req
-        (new BgpAsAServiceFlowMgmtRequest(index));
+    FlowMgmtRequestPtr req(new BgpAsAServiceFlowMgmtRequest(index));
     request_queue_.Enqueue(req);
 }
 
-/////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////
 // Introspect routines
 /////////////////////////////////////////////////////////////////////////////
@@ -104,24 +112,30 @@ void FlowMgmtManager::SetAclFlowSandeshData(const AclDBEntry *acl,
 // Utility methods to enqueue events into work-queue
 /////////////////////////////////////////////////////////////////////////////
 void FlowMgmtManager::AddEvent(FlowEntry *flow) {
-    FlowEntryPtr flow_ptr(flow);
-    boost::shared_ptr<FlowMgmtRequest>
-        req(new FlowMgmtRequest(FlowMgmtRequest::ADD_FLOW, flow_ptr));
-    request_queue_.Enqueue(req);
+    // Check if there is a flow-mgmt request already pending
+    // Flow mgmt takes care of current state of flow. So, there is no need to
+    // enqueue duplicate requests
+    FlowMgmtRequest *req = flow->flow_mgmt_request();
+    if (req == NULL) {
+        req = new FlowMgmtRequest(FlowMgmtRequest::UPDATE_FLOW, flow);
+        flow->set_flow_mgmt_request(req);
+        request_queue_.Enqueue(FlowMgmtRequestPtr(req));
+    }
 }
 
-void FlowMgmtManager::DeleteEvent(FlowEntry *flow) {
-    FlowEntryPtr flow_ptr(flow);
-    boost::shared_ptr<FlowMgmtRequest>
-        req(new FlowMgmtRequest(FlowMgmtRequest::DELETE_FLOW, flow_ptr));
-    request_queue_.Enqueue(req);
-}
+void FlowMgmtManager::DeleteEvent(FlowEntry *flow,
+                                  const RevFlowDepParams &params) {
+    // Check if there is a flow-mgmt request already pending
+    // Flow mgmt takes care of current state of flow. So, there is no need to
+    // enqueue duplicate requests
+    FlowMgmtRequest *req = flow->flow_mgmt_request();
+    if (req == NULL) {
+        req = new FlowMgmtRequest(FlowMgmtRequest::UPDATE_FLOW, flow);
+        flow->set_flow_mgmt_request(req);
+        request_queue_.Enqueue(FlowMgmtRequestPtr(req));
+    }
 
-void FlowMgmtManager::FlowIndexUpdateEvent(FlowEntry *flow) {
-    FlowEntryPtr flow_ptr(flow);
-    boost::shared_ptr<FlowMgmtRequest>
-        req(new FlowMgmtRequest(FlowMgmtRequest::UPDATE_FLOW_INDEX, flow_ptr));
-    request_queue_.Enqueue(req);
+    req->set_params(params);
 }
 
 void FlowMgmtManager::FlowStatsUpdateEvent(FlowEntry *flow, uint32_t bytes,
@@ -131,55 +145,85 @@ void FlowMgmtManager::FlowStatsUpdateEvent(FlowEntry *flow, uint32_t bytes,
         return;
     }
 
-    FlowEntryPtr flow_ptr(flow);
-    boost::shared_ptr<FlowMgmtRequest>
-        req(new FlowMgmtRequest(FlowMgmtRequest::UPDATE_FLOW_STATS, flow_ptr,
-                                bytes, packets, oflow_bytes));
-    request_queue_.Enqueue(req);
-}
-
-void FlowMgmtManager::AddEvent(const DBEntry *entry, uint32_t gen_id) {
-    boost::shared_ptr<FlowMgmtRequest>
-        req(new FlowMgmtRequest(FlowMgmtRequest::ADD_DBENTRY, entry, gen_id));
-    request_queue_.Enqueue(req);
-}
-
-void FlowMgmtManager::ChangeEvent(const DBEntry *entry, uint32_t gen_id) {
-    boost::shared_ptr<FlowMgmtRequest>
-        req(new FlowMgmtRequest(FlowMgmtRequest::CHANGE_DBENTRY, entry,
-                                gen_id));
-    request_queue_.Enqueue(req);
-}
-void FlowMgmtManager::DeleteEvent(const DBEntry *entry, uint32_t gen_id) {
-    boost::shared_ptr<FlowMgmtRequest>req
-        (new FlowMgmtRequest(FlowMgmtRequest::DELETE_DBENTRY, entry, gen_id));
+    /* Ignore StatsUpdate request in TSN mode as we don't export flows */
+    if (agent_->tsn_enabled()) {
+        return;
+    }
+    FlowMgmtRequestPtr req(new FlowMgmtRequest
+                           (FlowMgmtRequest::UPDATE_FLOW_STATS, flow,
+                            bytes, packets, oflow_bytes));
     request_queue_.Enqueue(req);
 }
 
 void FlowMgmtManager::RetryVrfDeleteEvent(const VrfEntry *vrf) {
-    boost::shared_ptr<FlowMgmtRequest>
-        req(new FlowMgmtRequest(FlowMgmtRequest::RETRY_DELETE_VRF, vrf, 0));
+    FlowMgmtRequestPtr req(new FlowMgmtRequest
+                           (FlowMgmtRequest::RETRY_DELETE_VRF, vrf, 0));
     request_queue_.Enqueue(req);
 }
 
 void FlowMgmtManager::DummyEvent() {
-    boost::shared_ptr<FlowMgmtRequest>req
-        (new FlowMgmtRequest(FlowMgmtRequest::DUMMY));
+    FlowMgmtRequestPtr req(new FlowMgmtRequest(FlowMgmtRequest::DUMMY));
     request_queue_.Enqueue(req);
+}
+
+void FlowMgmtManager::AddDBEntryEvent(const DBEntry *entry, uint32_t gen_id) {
+    FlowMgmtRequestPtr req(new FlowMgmtRequest(FlowMgmtRequest::ADD_DBENTRY,
+                                               entry, gen_id));
+    db_event_queue_.Enqueue(req);
+}
+
+void FlowMgmtManager::ChangeDBEntryEvent(const DBEntry *entry,
+                                         uint32_t gen_id) {
+    FlowMgmtRequestPtr req(new FlowMgmtRequest(FlowMgmtRequest::CHANGE_DBENTRY,
+                                               entry, gen_id));
+    db_event_queue_.Enqueue(req);
+}
+void FlowMgmtManager::DeleteDBEntryEvent(const DBEntry *entry,
+                                         uint32_t gen_id) {
+    FlowMgmtRequestPtr req(new FlowMgmtRequest(FlowMgmtRequest::DELETE_DBENTRY,
+                                               entry, gen_id));
+    db_event_queue_.Enqueue(req);
 }
 
 void FlowMgmtManager::EnqueueFlowEvent(FlowEvent *event) {
     agent_->pkt()->get_flow_proto()->EnqueueFlowEvent(event);
 }
 
+void FlowMgmtManager::NonOperEntryEvent(FlowEvent::Event event,
+                                        FlowEntry *flow) {
+    FlowEvent *flow_resp = new FlowEvent(event, flow->key(), true,
+                                         FlowTable::kPortNatFlowTableInstance);
+    flow_resp->set_flow(flow);
+    EnqueueFlowEvent(flow_resp);
+}
+
+void FlowMgmtManager::DBEntryEvent(FlowEvent::Event event, FlowMgmtKey *key,
+                                   FlowEntry *flow) {
+    FlowEvent *flow_resp = new FlowEvent(event, NULL, key->db_entry());
+    key->KeyToFlowRequest(flow_resp);
+    flow_resp->set_flow(flow);
+    EnqueueFlowEvent(flow_resp);
+}
+
+void FlowMgmtManager::FreeDBEntryEvent(FlowEvent::Event event, FlowMgmtKey *key,
+                                       uint32_t gen_id) {
+    FlowEvent *flow_resp = new FlowEvent(event, table_index_, key->db_entry(),
+                                         gen_id);
+    EnqueueFlowEvent(flow_resp);
+}
+
 void FlowMgmtManager::FlowUpdateQueueDisable(bool disabled) {
     request_queue_.set_disable(disabled);
+    db_event_queue_.set_disable(disabled);
 }
 
 size_t FlowMgmtManager::FlowUpdateQueueLength() {
     return request_queue_.Length();
 }
 
+size_t FlowMgmtManager::FlowDBQueueLength() {
+    return db_event_queue_.Length();
+}
 /////////////////////////////////////////////////////////////////////////////
 // Handlers for events from the work-queue
 /////////////////////////////////////////////////////////////////////////////
@@ -206,8 +250,8 @@ static bool ProcessEvent(FlowMgmtRequest *req, FlowMgmtKey *key,
     return true;
 }
 
-bool FlowMgmtManager::DBEntryRequestHandler(FlowMgmtRequest *req,
-                                            const DBEntry *entry) {
+bool FlowMgmtManager::DBRequestHandler(FlowMgmtRequest *req,
+                                       const DBEntry *entry) {
     const Interface *intf = dynamic_cast<const Interface *>(entry);
     if (intf) {
         InterfaceFlowMgmtKey key(intf);
@@ -273,11 +317,10 @@ bool BgpAsAServiceFlowMgmtEntry::NonOperEntryDelete(FlowMgmtManager *mgr,
     if (event == FlowEvent::INVALID)
         return false;
 
-    Tree::iterator it = tree_.begin();
-    while (it != tree_.end()) {
-        FlowEvent *flow_resp = new FlowEvent(event, (*it)->key(), true);
-        flow_resp->set_flow(*it);
-        mgr->EnqueueFlowEvent(flow_resp);
+    FlowList::iterator it = flow_list_.begin();
+    while (it != flow_list_.end()) {
+        FlowMgmtKeyNode *node = &(*it);
+        mgr->NonOperEntryEvent(event, node->flow_entry());
         it++;
     }
     return true;
@@ -298,7 +341,8 @@ void BgpAsAServiceFlowMgmtTree::ExtractKeys(FlowEntry *flow,
 
     BgpAsAServiceFlowMgmtKey *key =
         new BgpAsAServiceFlowMgmtKey(vm_intf->GetUuid(),
-                                     flow->bgp_as_a_service_port());
+                                 flow->bgp_as_a_service_port(),
+                                 BgpAsAServiceFlowMgmtTree::GetCNIndex(flow));
     AddFlowMgmtKey(tree, key);
 }
 
@@ -327,16 +371,33 @@ void BgpAsAServiceFlowMgmtTree::DeleteAll() {
     }
 }
 
+uint8_t BgpAsAServiceFlowMgmtTree::GetCNIndex(const FlowEntry *flow) {
+    IpAddress dest_ip = IpAddress();
+    if (flow->is_flags_set(FlowEntry::ReverseFlow)) {
+        dest_ip = flow->key().src_addr;
+    } else {
+        dest_ip = flow->reverse_flow_entry()->key().src_addr;
+    }
+    for (uint8_t count = 0; count < MAX_XMPP_SERVERS; count++) {
+        if (flow->flow_table()->agent()->controller_ifmap_xmpp_server(count) ==
+            dest_ip.to_string()) {
+            return count;
+        }
+    }
+    return 0;
+}
+
 bool
 FlowMgmtManager::BgpAsAServiceRequestHandler(FlowMgmtRequest *req) {
 
     BgpAsAServiceFlowMgmtRequest *bgp_as_a_service_request =
         dynamic_cast<BgpAsAServiceFlowMgmtRequest *>(req);
     if (bgp_as_a_service_request->type() == BgpAsAServiceFlowMgmtRequest::VMI) {
-        BgpAsAServiceFlowMgmtKey key(bgp_as_a_service_request->vm_uuid(),
-                                     bgp_as_a_service_request->source_port());
         //Delete it for for all CN trees
         for (uint8_t count = 0; count < MAX_XMPP_SERVERS; count++) {
+            BgpAsAServiceFlowMgmtKey key(bgp_as_a_service_request->vm_uuid(),
+                                         bgp_as_a_service_request->source_port(),
+                                         count);
             bgp_as_a_service_flow_mgmt_tree_[count].get()->
                 BgpAsAServiceDelete(key, req);
         }
@@ -348,23 +409,33 @@ FlowMgmtManager::BgpAsAServiceRequestHandler(FlowMgmtRequest *req) {
     return true;
 }
 
-bool FlowMgmtManager::RequestHandler(boost::shared_ptr<FlowMgmtRequest> req) {
+bool FlowMgmtManager::RequestHandler(FlowMgmtRequestPtr req) {
     switch (req->event()) {
-    case FlowMgmtRequest::ADD_FLOW: {
-        //Handle the Add request for flow-mgmt
-        AddFlow(req->flow());
-        break;
-    }
+    case FlowMgmtRequest::UPDATE_FLOW: {
+        FlowEntry *flow = req->flow().get();
+        {
+            // Before processing event, set the request pointer in flow to
+            // NULL. This ensures flow-entry enqueues new request from now
+            // onwards
+            tbb::mutex::scoped_lock mutex(flow->mutex());
+            flow->set_flow_mgmt_request(NULL);
+        }
 
-    case FlowMgmtRequest::DELETE_FLOW: {
-        //Handle the Delete request for flow-mgmt
-        DeleteFlow(req->flow());
-        break;
-    }
+        // Update flow-mgmt information based on flow-state
+        if (req->flow()->deleted() == false) {
+            FlowMgmtRequestPtr log_req(new FlowMgmtRequest
+                                       (FlowMgmtRequest::ADD_FLOW,
+                                        req->flow().get()));
+            log_queue_.Enqueue(log_req);
+            AddFlow(req->flow());
 
-    case FlowMgmtRequest::UPDATE_FLOW_INDEX: {
-        //Handle Flow index update for flow-mgmt
-        UpdateFlowIndex(req->flow());
+        } else {
+            FlowMgmtRequestPtr log_req(new FlowMgmtRequest
+                                       (FlowMgmtRequest::DELETE_FLOW,
+                                        req->flow().get(), req->params()));
+            log_queue_.Enqueue(log_req);
+            DeleteFlow(req->flow(), req->params());
+        }
         break;
     }
 
@@ -372,13 +443,6 @@ bool FlowMgmtManager::RequestHandler(boost::shared_ptr<FlowMgmtRequest> req) {
         //Handle Flow stats update for flow-mgmt
         UpdateFlowStats(req->flow(), req->bytes(), req->packets(),
                         req->oflow_bytes());
-        break;
-    }
-
-    case FlowMgmtRequest::ADD_DBENTRY:
-    case FlowMgmtRequest::CHANGE_DBENTRY:
-    case FlowMgmtRequest::DELETE_DBENTRY: {
-        DBEntryRequestHandler(req.get(), req->db_entry());
         break;
     }
 
@@ -400,8 +464,57 @@ bool FlowMgmtManager::RequestHandler(boost::shared_ptr<FlowMgmtRequest> req) {
 
     }
 
-    if (req->flow().get()) {
-        agent_->pkt()->get_flow_proto()->EnqueueFreeFlowReference(req->flow());
+    return true;
+}
+
+bool FlowMgmtManager::DBRequestHandler(FlowMgmtRequestPtr req) {
+    switch (req->event()) {
+    case FlowMgmtRequest::ADD_DBENTRY:
+    case FlowMgmtRequest::CHANGE_DBENTRY:
+    case FlowMgmtRequest::DELETE_DBENTRY: {
+        DBRequestHandler(req.get(), req->db_entry());
+        break;
+    }
+
+    default:
+         assert(0);
+
+    }
+
+    return true;
+}
+
+bool FlowMgmtManager::LogHandler(FlowMgmtRequestPtr req) {
+    FlowEntry *flow = req->flow().get();
+    tbb::mutex::scoped_lock mutex(flow->mutex());
+    switch (req->event()) {
+    case FlowMgmtRequest::ADD_FLOW: {
+        LogFlowUnlocked(flow, "ADD");
+
+        //Enqueue Add request to flow-stats-collector
+        agent_->flow_stats_manager()->AddEvent(req->flow());
+
+        //Enqueue Add request to UVE module for ACE stats
+        EnqueueUveAddEvent(flow);
+
+        break;
+    }
+
+    case FlowMgmtRequest::DELETE_FLOW: {
+        LogFlowUnlocked(flow, "DEL");
+
+        //Enqueue Delete request to flow-stats-collector
+        agent_->flow_stats_manager()->DeleteEvent(flow, req->params());
+
+        //Enqueue Delete request to UVE module for ACE stats
+        EnqueueUveDeleteEvent(flow);
+
+        break;
+    }
+
+    default:
+         assert(0);
+
     }
 
     return true;
@@ -412,9 +525,10 @@ void FlowMgmtManager::RetryVrfDelete(uint32_t vrf_id) {
 }
 
 // Extract all the FlowMgmtKey for a flow
-void FlowMgmtManager::LogFlow(FlowEntry *flow, const std::string &op) {
+void FlowMgmtManager::LogFlowUnlocked(FlowEntry *flow, const std::string &op) {
+    if (flow->trace() == false)
+        return;
     FlowInfo trace;
-    tbb::mutex::scoped_lock mutex(flow->mutex());
     flow->FillFlowInfo(trace);
     FLOW_TRACE(Trace, op, trace);
 }
@@ -430,7 +544,8 @@ void FlowMgmtManager::MakeFlowMgmtKeyTree(FlowEntry *flow,
     ip6_route_flow_mgmt_tree_.ExtractKeys(flow, tree);
     bridge_route_flow_mgmt_tree_.ExtractKeys(flow, tree);
     nh_flow_mgmt_tree_.ExtractKeys(flow, tree);
-    for (uint8_t count = 0; count < MAX_XMPP_SERVERS; count++) {
+    if (flow->is_flags_set(FlowEntry::BgpRouterService)) {
+        uint8_t count = BgpAsAServiceFlowMgmtTree::GetCNIndex(flow);
         bgp_as_a_service_flow_mgmt_tree_[count].get()->
             ExtractKeys(flow, tree);
     }
@@ -464,15 +579,6 @@ void FlowMgmtManager::EnqueueUveDeleteEvent(const FlowEntry *flow) const {
 }
 
 void FlowMgmtManager::AddFlow(FlowEntryPtr &flow) {
-    LogFlow(flow.get(), "ADD");
-
-    //Enqueue Add request to flow-stats-collector
-    agent_->flow_stats_manager()->AddEvent(flow);
-
-    //Enqueue Add request to UVE module for ACE stats
-    EnqueueUveAddEvent(flow.get());
-
-    // Trace the flow add/change
     FlowMgmtKeyTree new_tree;
     MakeFlowMgmtKeyTree(flow.get(), &new_tree);
 
@@ -487,17 +593,20 @@ void FlowMgmtManager::AddFlow(FlowEntryPtr &flow) {
     FlowMgmtKeyTree::iterator old_it = old_tree->begin();
 
     while (new_it != new_tree.end() && old_it != old_tree->end()) {
-        FlowMgmtKey *new_key = *new_it;
-        FlowMgmtKey *old_key = *old_it;
+        FlowMgmtKey *new_key = new_it->first;
+        FlowMgmtKey *old_key = old_it->first;
         if (new_key->IsLess(old_key)) {
             AddFlowMgmtKey(flow.get(), old_info, new_key, NULL);
             new_it++;
         } else if (old_key->IsLess(new_key)) {
-            DeleteFlowMgmtKey(flow.get(), old_info, old_key);
+            FlowMgmtKeyNode *node = old_it->second;
+            DeleteFlowMgmtKey(flow.get(), old_info, old_key,
+                              node);
             FlowMgmtKeyTree::iterator tmp = old_it++;
-            FlowMgmtKey *key = *tmp;
+            FlowMgmtKey *key = tmp->first;
             old_tree->erase(tmp);
             delete key;
+            delete node;
         } else {
             AddFlowMgmtKey(flow.get(), old_info, new_key, old_key);
             old_it++;
@@ -506,43 +615,39 @@ void FlowMgmtManager::AddFlow(FlowEntryPtr &flow) {
     }
 
     while (new_it != new_tree.end()) {
-        FlowMgmtKey *new_key = *new_it;
+        FlowMgmtKey *new_key = new_it->first;
         AddFlowMgmtKey(flow.get(), old_info, new_key, NULL);
         new_it++;
     }
 
     while (old_it != old_tree->end()) {
-        FlowMgmtKey *old_key = *old_it;
-        DeleteFlowMgmtKey(flow.get(), old_info, old_key);
+        FlowMgmtKey *old_key = old_it->first;
+        FlowMgmtKeyNode *node = old_it->second;
+        DeleteFlowMgmtKey(flow.get(), old_info, old_key, node);
         FlowMgmtKeyTree::iterator tmp = old_it++;
-        FlowMgmtKey *key = *tmp;
+        FlowMgmtKey *key = tmp->first;
         old_tree->erase(tmp);
         delete key;
+        delete node;
     }
 
     new_it = new_tree.begin();
     while (new_it != new_tree.end()) {
         FlowMgmtKeyTree::iterator tmp = new_it++;
-        FlowMgmtKey *key = *tmp;
+        FlowMgmtKey *key = tmp->first;
+        FlowMgmtKeyNode *node = tmp->second;
         new_tree.erase(tmp);
         delete key;
+        delete node;
     }
-
 }
 
-void FlowMgmtManager::DeleteFlow(FlowEntryPtr &flow) {
-    LogFlow(flow.get(), "DEL");
-
-    //Enqueue Delete request to flow-stats-collector
-    agent_->flow_stats_manager()->DeleteEvent(flow.get());
-
+void FlowMgmtManager::DeleteFlow(FlowEntryPtr &flow,
+                                 const RevFlowDepParams &params) {
     // Delete entries for flow from the tree
     FlowEntryInfo *old_info = FindFlowEntryInfo(flow);
     if (old_info == NULL)
         return;
-
-    //Enqueue Add request to UVE module for ACE stats
-    EnqueueUveDeleteEvent(flow.get());
 
     FlowMgmtKeyTree *old_tree = &old_info->tree_;
     assert(old_tree);
@@ -550,20 +655,17 @@ void FlowMgmtManager::DeleteFlow(FlowEntryPtr &flow) {
 
     FlowMgmtKeyTree::iterator old_it = old_tree->begin();
     while (old_it != old_tree->end()) {
-        DeleteFlowMgmtKey(flow.get(), old_info, *old_it);
+        FlowMgmtKeyNode *node = old_it->second;
+        DeleteFlowMgmtKey(flow.get(), old_info, old_it->first, node);
         FlowMgmtKeyTree::iterator tmp = old_it++;
-        FlowMgmtKey *key = *tmp;
+        FlowMgmtKey *key = tmp->first;
         old_tree->erase(tmp);
         delete key;
+        delete node;
     }
 
     assert(old_tree->size() == 0);
     DeleteFlowEntryInfo(flow);
-}
-
-void FlowMgmtManager::UpdateFlowIndex(FlowEntryPtr &flow) {
-    //Enqueue Flow Index Update Event request to flow-stats-collector
-    agent_->flow_stats_manager()->FlowIndexUpdateEvent(flow);
 }
 
 void FlowMgmtManager::UpdateFlowStats(FlowEntryPtr &flow, uint32_t bytes,
@@ -595,33 +697,28 @@ void FlowMgmtManager::VnFlowCounters(const VnEntry *vn, uint32_t *ingress_flow_c
                                       egress_flow_count);
 }
 
-FlowMgmtManager::FlowEntryInfo *
+FlowEntryInfo *
 FlowMgmtManager::FindFlowEntryInfo(const FlowEntryPtr &flow) {
-    FlowEntryTree::iterator it = flow_tree_.find(flow);
-    if (it == flow_tree_.end()) {
-        return NULL;
-    }
-
-    return &it->second;
+    return flow->flow_mgmt_info();
 }
 
-FlowMgmtManager::FlowEntryInfo *
+FlowEntryInfo *
 FlowMgmtManager::LocateFlowEntryInfo(FlowEntryPtr &flow) {
     FlowEntryInfo *info = FindFlowEntryInfo(flow);
     if (info != NULL)
         return info;
-
-    flow_tree_.insert(make_pair(flow, FlowEntryInfo()));
-    return FindFlowEntryInfo(flow);
+    info = new FlowEntryInfo(flow.get());
+    flow->set_flow_mgmt_info(info);
+    return info;
 }
 
 void FlowMgmtManager::DeleteFlowEntryInfo(FlowEntryPtr &flow) {
-    FlowEntryTree::iterator it = flow_tree_.find(flow);
-    if (it == flow_tree_.end())
+    FlowEntryInfo *info = flow->flow_mgmt_info();
+    if (info == NULL)
         return;
 
-    assert(it->second.tree_.size() == 0);
-    flow_tree_.erase(it);
+    assert(info->tree_.size() == 0);
+    flow->set_flow_mgmt_info(NULL);
     return;
 }
 
@@ -634,12 +731,16 @@ void FlowMgmtManager::DeleteFlowEntryInfo(FlowEntryPtr &flow) {
 void FlowMgmtManager::AddFlowMgmtKey(FlowEntry *flow, FlowEntryInfo *info,
                                      FlowMgmtKey *key, FlowMgmtKey *old_key) {
     FlowMgmtKey *tmp = key->Clone();
-    std::pair<FlowMgmtKeyTree::iterator, bool> ret = info->tree_.insert(tmp);
+    FlowMgmtKeyNode *node = new FlowMgmtKeyNode(flow);
+
+    std::pair<FlowMgmtKeyTree::iterator, bool> ret = info->tree_.insert(
+                                                     make_pair(tmp, node));
     if (ret.second == false) {
         delete tmp;
+        delete node;
         if (key->type() == FlowMgmtKey::ACL) {
             /* Copy the ACE Id list to existing key from new Key */
-            FlowMgmtKey *existing_key = *(ret.first);
+            FlowMgmtKey *existing_key = ret.first->first;
             AclFlowMgmtKey *akey = static_cast<AclFlowMgmtKey *>(existing_key);
             AclFlowMgmtKey *new_key = static_cast<AclFlowMgmtKey *>(key);
             akey->set_ace_id_list(new_key->ace_id_list());
@@ -648,15 +749,18 @@ void FlowMgmtManager::AddFlowMgmtKey(FlowEntry *flow, FlowEntryInfo *info,
 
     switch (key->type()) {
     case FlowMgmtKey::INTERFACE:
-        interface_flow_mgmt_tree_.Add(key, flow);
+        interface_flow_mgmt_tree_.Add(key, flow,
+                                      (ret.second)? node : NULL);
         break;
 
     case FlowMgmtKey::ACL:
-        acl_flow_mgmt_tree_.Add(key, flow, old_key);
+        acl_flow_mgmt_tree_.Add(key, flow, old_key,
+                                (ret.second)? node : NULL);
         break;
 
     case FlowMgmtKey::VN: {
-        bool new_flow = vn_flow_mgmt_tree_.Add(key, flow);
+        bool new_flow = vn_flow_mgmt_tree_.Add(key, flow,
+                                               (ret.second)? node : NULL);
         VnFlowMgmtEntry *entry = static_cast<VnFlowMgmtEntry *>
             (vn_flow_mgmt_tree_.Find(key));
         entry->UpdateCounterOnAdd(flow, new_flow, info->local_flow_,
@@ -667,25 +771,31 @@ void FlowMgmtManager::AddFlowMgmtKey(FlowEntry *flow, FlowEntryInfo *info,
     }
 
     case FlowMgmtKey::INET4:
-        ip4_route_flow_mgmt_tree_.Add(key, flow);
+        ip4_route_flow_mgmt_tree_.Add(key, flow,
+                                      (ret.second)? node : NULL);
         break;
 
     case FlowMgmtKey::INET6:
-        ip6_route_flow_mgmt_tree_.Add(key, flow);
+        ip6_route_flow_mgmt_tree_.Add(key, flow,
+                                      (ret.second)? node : NULL);
         break;
 
     case FlowMgmtKey::BRIDGE:
-        bridge_route_flow_mgmt_tree_.Add(key, flow);
+        bridge_route_flow_mgmt_tree_.Add(key, flow,
+                                         (ret.second)? node : NULL);
         break;
 
     case FlowMgmtKey::NH:
-        nh_flow_mgmt_tree_.Add(key, flow);
+        nh_flow_mgmt_tree_.Add(key, flow,
+                               (ret.second)? node : NULL);
         break;
 
-    case FlowMgmtKey::BGPASASERVICE:
-        for (uint8_t count = 0; count < MAX_XMPP_SERVERS; count++)
-            bgp_as_a_service_flow_mgmt_tree_[count].get()->Add(key, flow);
+    case FlowMgmtKey::BGPASASERVICE: {
+        uint8_t count = BgpAsAServiceFlowMgmtTree::GetCNIndex(flow);
+        bgp_as_a_service_flow_mgmt_tree_[count].get()->Add(key, flow,
+                                                  (ret.second)? node : NULL);
         break;
+    }
 
     default:
         assert(0);
@@ -694,22 +804,24 @@ void FlowMgmtManager::AddFlowMgmtKey(FlowEntry *flow, FlowEntryInfo *info,
 
 // Delete a FlowMgmtKey from FlowMgmtKeyTree for an object
 // The FlowMgmtKeyTree for object is passed as argument
-void FlowMgmtManager::DeleteFlowMgmtKey(FlowEntry *flow, FlowEntryInfo *info,
-                                        FlowMgmtKey *key) {
+void FlowMgmtManager::DeleteFlowMgmtKey(
+    FlowEntry *flow, FlowEntryInfo *info, FlowMgmtKey *key,
+    FlowMgmtKeyNode *node) {
+
     FlowMgmtKeyTree::iterator it = info->tree_.find(key);
     assert(it != info->tree_.end());
 
     switch (key->type()) {
     case FlowMgmtKey::INTERFACE:
-        interface_flow_mgmt_tree_.Delete(key, flow);
+        interface_flow_mgmt_tree_.Delete(key, flow, node);
         break;
 
     case FlowMgmtKey::ACL:
-        acl_flow_mgmt_tree_.Delete(key, flow);
+        acl_flow_mgmt_tree_.Delete(key, flow, node);
         break;
 
     case FlowMgmtKey::VN: {
-        vn_flow_mgmt_tree_.Delete(key, flow);
+        vn_flow_mgmt_tree_.Delete(key, flow, node);
         VnFlowMgmtEntry *entry = static_cast<VnFlowMgmtEntry *>
             (vn_flow_mgmt_tree_.Find(key));
         if (entry)
@@ -720,25 +832,28 @@ void FlowMgmtManager::DeleteFlowMgmtKey(FlowEntry *flow, FlowEntryInfo *info,
     }
 
     case FlowMgmtKey::INET4:
-        ip4_route_flow_mgmt_tree_.Delete(key, flow);
+        ip4_route_flow_mgmt_tree_.Delete(key, flow, node);
         break;
 
     case FlowMgmtKey::INET6:
-        ip6_route_flow_mgmt_tree_.Delete(key, flow);
+        ip6_route_flow_mgmt_tree_.Delete(key, flow, node);
         break;
 
     case FlowMgmtKey::BRIDGE:
-        bridge_route_flow_mgmt_tree_.Delete(key, flow);
+        bridge_route_flow_mgmt_tree_.Delete(key, flow, node);
         break;
 
     case FlowMgmtKey::NH:
-        nh_flow_mgmt_tree_.Delete(key, flow);
+        nh_flow_mgmt_tree_.Delete(key, flow, node);
         break;
 
-    case FlowMgmtKey::BGPASASERVICE:
-        for (uint8_t count = 0; count < MAX_XMPP_SERVERS; count++)
-            bgp_as_a_service_flow_mgmt_tree_[count].get()->Delete(key, flow);
+    case FlowMgmtKey::BGPASASERVICE: {
+        BgpAsAServiceFlowMgmtKey *bgp_service_key =
+            static_cast<BgpAsAServiceFlowMgmtKey *>(key);
+        uint8_t count = bgp_service_key->cn_index();
+        bgp_as_a_service_flow_mgmt_tree_[count].get()->Delete(key, flow, node);
         break;
+    }
 
     default:
         assert(0);
@@ -830,31 +945,37 @@ bool FlowMgmtTree::TryDelete(FlowMgmtKey *key, FlowMgmtEntry *entry) {
 // Generic Event handler on tree for add/delete of a flow
 /////////////////////////////////////////////////////////////////////////////
 bool FlowMgmtTree::AddFlowMgmtKey(FlowMgmtKeyTree *tree, FlowMgmtKey *key) {
-    std::pair<FlowMgmtKeyTree::iterator, bool> ret = tree->insert(key);
-    if (ret.second == false)
+    FlowMgmtKeyNode *node = new FlowMgmtKeyNode();
+    std::pair<FlowMgmtKeyTree::iterator, bool> ret;
+    ret = tree->insert(make_pair(key, node));
+    if (ret.second == false) {
         delete key;
+        delete node;
+    }
     return ret.second;
 }
 
 // Adds Flow to a FlowMgmtEntry defined by key. Does not allocate FlowMgmtEntry
 // if its not already present
-bool FlowMgmtTree::Add(FlowMgmtKey *key, FlowEntry *flow) {
+bool FlowMgmtTree::Add(FlowMgmtKey *key, FlowEntry *flow,
+                       FlowMgmtKeyNode *node) {
     FlowMgmtEntry *entry = Locate(key);
     if (entry == NULL) {
         return false;
     }
 
-    return entry->Add(flow);
+    return entry->Add(flow, node);
 }
 
-bool FlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow) {
+bool FlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow,
+                          FlowMgmtKeyNode *node) {
     Tree::iterator it = tree_.find(key);
     if (it == tree_.end()) {
         return false;
     }
 
     FlowMgmtEntry *entry = it->second;
-    bool ret = entry->Delete(flow);
+    bool ret = entry->Delete(flow, node);
 
     TryDelete(it->first, entry);
     return ret;
@@ -864,13 +985,13 @@ bool FlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow) {
 // Event handler for add/delete/change of an object
 /////////////////////////////////////////////////////////////////////////////
 
-// Send DELETE Entry message to FlowTable module
+// Send DBEntry Free message to DB Client module
 void FlowMgmtTree::FreeNotify(FlowMgmtKey *key, uint32_t gen_id) {
     assert(key->db_entry() != NULL);
     FlowEvent::Event event = key->FreeDBEntryEvent();
     if (event == FlowEvent::INVALID)
         return;
-    mgr_->EnqueueFlowEvent(new FlowEvent(event, key->db_entry(), gen_id));
+    mgr_->FreeDBEntryEvent(event, key, gen_id);
 }
 
 // An object is added/updated. Enqueue REVALUATE for flows dependent on it
@@ -889,6 +1010,7 @@ bool FlowMgmtTree::OperEntryChange(const FlowMgmtRequest *req,
     return true;
 }
 
+// Send DELETE Entry message to FlowTable module
 bool FlowMgmtTree::OperEntryDelete(const FlowMgmtRequest *req,
                                    FlowMgmtKey *key) {
     FlowMgmtEntry *entry = Find(key);
@@ -914,14 +1036,17 @@ bool FlowMgmtTree::RetryDelete(FlowMgmtKey *key) {
 /////////////////////////////////////////////////////////////////////////////
 // Object Entry code
 /////////////////////////////////////////////////////////////////////////////
-bool FlowMgmtEntry::Add(FlowEntry *flow) {
-    std::pair<Tree::iterator, bool> ret = tree_.insert(flow);
-    return ret.second;
+bool FlowMgmtEntry::Add(FlowEntry *flow, FlowMgmtKeyNode *node) {
+    if (node) {
+        flow_list_.push_back(*node);
+        return true;
+    }
+    return false;
 }
 
-bool FlowMgmtEntry::Delete(FlowEntry *flow) {
-    tree_.erase(flow);
-    return tree_.size();
+bool FlowMgmtEntry::Delete(FlowEntry *flow, FlowMgmtKeyNode *node) {
+    flow_list_.erase(flow_list_.iterator_to(*node));
+    return flow_list_.size();
 }
 
 // An entry *cannot* be deleted if 
@@ -929,13 +1054,13 @@ bool FlowMgmtEntry::Delete(FlowEntry *flow) {
 //    - It has seen ADD but not seen any DELETE
 bool FlowMgmtEntry::CanDelete() const {
     assert(oper_state_ != INVALID);
-    if (tree_.size())
+    if (flow_list_.size())
         return false;
 
     return (oper_state_ != OPER_ADD_SEEN);
 }
 
-// Handle Add/Change event for the object
+// Handle Add/Change event for DBEntry
 bool FlowMgmtEntry::OperEntryAdd(FlowMgmtManager *mgr,
                                  const FlowMgmtRequest *req, FlowMgmtKey *key) {
     oper_state_ = OPER_ADD_SEEN;
@@ -943,12 +1068,10 @@ bool FlowMgmtEntry::OperEntryAdd(FlowMgmtManager *mgr,
     if (event == FlowEvent::INVALID)
         return false;
 
-    Tree::iterator it = tree_.begin();
-    while (it != tree_.end()) {
-        FlowEvent *flow_resp = new FlowEvent(event, NULL, key->db_entry());
-        key->KeyToFlowRequest(flow_resp);
-        flow_resp->set_flow(*it);
-        mgr->EnqueueFlowEvent(flow_resp);
+    FlowList::iterator it = flow_list_.begin();
+    while (it != flow_list_.end()) {
+        FlowMgmtKeyNode *node = &(*it);
+        mgr->DBEntryEvent(event, key, node->flow_entry());
         it++;
     }
 
@@ -961,7 +1084,7 @@ bool FlowMgmtEntry::OperEntryChange(FlowMgmtManager *mgr,
     return OperEntryAdd(mgr, req, key);
 }
 
-// Handle Delete event for the object
+// Handle Delete event for DBEntry
 bool FlowMgmtEntry::OperEntryDelete(FlowMgmtManager *mgr,
                                     const FlowMgmtRequest *req,
                                     FlowMgmtKey *key) {
@@ -971,12 +1094,10 @@ bool FlowMgmtEntry::OperEntryDelete(FlowMgmtManager *mgr,
     if (event == FlowEvent::INVALID)
         return false;
 
-    Tree::iterator it = tree_.begin();
-    while (it != tree_.end()) {
-        FlowEvent *flow_resp = new FlowEvent(event, NULL, key->db_entry());
-        key->KeyToFlowRequest(flow_resp);
-        flow_resp->set_flow(*it);
-        mgr->EnqueueFlowEvent(flow_resp);
+    FlowList::iterator it = flow_list_.begin();
+    while (it != flow_list_.end()) {
+        FlowMgmtKeyNode *node = &(*it);
+        mgr->DBEntryEvent(event, key, node->flow_entry());
         it++;
     }
 
@@ -1040,23 +1161,25 @@ void AclFlowMgmtEntry::FillAclFlowSandeshInfo(const AclDBEntry *acl,
                                               Agent *agent) {
     int count = 0;
     bool key_set = false;
-    FlowMgmtEntry::Tree::iterator fe_tree_it = tree_.begin();
-    while (fe_tree_it != tree_.end() && (count + 1) < last_count) {
+    FlowList::iterator fe_tree_it = flow_list_.begin();
+    while (fe_tree_it != flow_list_.end() && (count + 1) < last_count) {
         fe_tree_it++;
         count++;
     }
     data.set_flow_count(Size());
     data.set_flow_miss(flow_miss_);
     std::vector<FlowSandeshData> flow_entries_l;
-    while(fe_tree_it != tree_.end()) {
-        const FlowEntry *fe = *fe_tree_it;
+    while(fe_tree_it != flow_list_.end()) {
+        FlowMgmtKeyNode *node = &(*fe_tree_it);
+        const FlowEntry *fe = node->flow_entry();
         FlowSandeshData fe_sandesh_data;
         fe->SetAclFlowSandeshData(acl, fe_sandesh_data, agent);
 
         flow_entries_l.push_back(fe_sandesh_data);
         count++;
         ++fe_tree_it;
-        if (count == (MaxResponses + last_count) && fe_tree_it != tree_.end()) {
+        if (count == (MaxResponses + last_count) &&
+            fe_tree_it != flow_list_.end()) {
             data.set_iteration_key(GetAclFlowSandeshDataKey(acl, count));
             key_set = true;
             break;
@@ -1076,7 +1199,8 @@ void AclFlowMgmtEntry::DecrementAceIdCountMap(const AclEntryIDList *id_list) {
 }
 
 bool AclFlowMgmtEntry::Add(const AclEntryIDList *id_list, FlowEntry *flow,
-                           const AclEntryIDList *old_id_list) {
+                           const AclEntryIDList *old_id_list,
+                           FlowMgmtKeyNode *node) {
     if (old_id_list) {
         DecrementAceIdCountMap(old_id_list);
     }
@@ -1088,14 +1212,15 @@ bool AclFlowMgmtEntry::Add(const AclEntryIDList *id_list, FlowEntry *flow,
     } else {
         flow_miss_++;
     }
-    return FlowMgmtEntry::Add(flow);
+    return FlowMgmtEntry::Add(flow, node);
 }
 
-bool AclFlowMgmtEntry::Delete(const AclEntryIDList *id_list, FlowEntry *flow) {
+bool AclFlowMgmtEntry::Delete(const AclEntryIDList *id_list, FlowEntry *flow,
+                              FlowMgmtKeyNode *node) {
     if (id_list->size()) {
         DecrementAceIdCountMap(id_list);
     }
-    return FlowMgmtEntry::Delete(flow);
+    return FlowMgmtEntry::Delete(flow, node);
 }
 
 void AclFlowMgmtTree::ExtractKeys(FlowEntry *flow, FlowMgmtKeyTree *tree,
@@ -1125,7 +1250,7 @@ FlowMgmtEntry *AclFlowMgmtTree::Allocate(const FlowMgmtKey *key) {
 }
 
 bool AclFlowMgmtTree::Add(FlowMgmtKey *key, FlowEntry *flow,
-                          FlowMgmtKey *old_key) {
+                          FlowMgmtKey *old_key, FlowMgmtKeyNode *node) {
     AclFlowMgmtEntry *entry = static_cast<AclFlowMgmtEntry *>(Locate(key));
     if (entry == NULL) {
         return false;
@@ -1137,10 +1262,11 @@ bool AclFlowMgmtTree::Add(FlowMgmtKey *key, FlowEntry *flow,
         AclFlowMgmtKey *old_acl_key = static_cast<AclFlowMgmtKey *>(old_key);
         old_ace_id_list = old_acl_key->ace_id_list();
     }
-    return entry->Add(acl_key->ace_id_list(), flow, old_ace_id_list);
+    return entry->Add(acl_key->ace_id_list(), flow, old_ace_id_list, node);
 }
 
-bool AclFlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow) {
+bool AclFlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow,
+                             FlowMgmtKeyNode *node) {
     Tree::iterator it = tree_.find(key);
     if (it == tree_.end()) {
         return false;
@@ -1148,7 +1274,7 @@ bool AclFlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow) {
 
     AclFlowMgmtKey *acl_key = static_cast<AclFlowMgmtKey *>(key);
     AclFlowMgmtEntry *entry = static_cast<AclFlowMgmtEntry *>(it->second);
-    bool ret = entry->Delete(acl_key->ace_id_list(), flow);
+    bool ret = entry->Delete(acl_key->ace_id_list(), flow, node);
 
     TryDelete(it->first, entry);
     return ret;
@@ -1213,14 +1339,16 @@ void VnFlowMgmtEntry::UpdateCounterOnDel(FlowEntry *flow, bool local_flow,
     }
 }
 
-bool VnFlowMgmtTree::Add(FlowMgmtKey *key, FlowEntry *flow) {
+bool VnFlowMgmtTree::Add(FlowMgmtKey *key, FlowEntry *flow,
+                         FlowMgmtKeyNode *node) {
     tbb::mutex::scoped_lock mutex(mutex_);
-    return FlowMgmtTree::Add(key, flow);
+    return FlowMgmtTree::Add(key, flow, node);
 }
 
-bool VnFlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow) {
+bool VnFlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow,
+                            FlowMgmtKeyNode *node) {
     tbb::mutex::scoped_lock mutex(mutex_);
-    return FlowMgmtTree::Delete(key, flow);
+    return FlowMgmtTree::Delete(key, flow, node);
 }
 
 bool VnFlowMgmtTree::OperEntryAdd(const FlowMgmtRequest *req,
@@ -1239,13 +1367,11 @@ void VnFlowMgmtTree::VnFlowCounters(const VnEntry *vn,
                                     uint32_t *ingress_flow_count,
                                     uint32_t *egress_flow_count) {
     tbb::mutex::scoped_lock mutex(mutex_);
-    *ingress_flow_count = 0;
-    *egress_flow_count = 0;
     VnFlowMgmtKey key(vn);
     VnFlowMgmtEntry *entry = static_cast<VnFlowMgmtEntry *>(Find(&key));
     if (entry) {
-        *ingress_flow_count = entry->ingress_flow_count();
-        *egress_flow_count = entry->egress_flow_count();
+        *ingress_flow_count += entry->ingress_flow_count();
+        *egress_flow_count += entry->egress_flow_count();
     }
 }
 
@@ -1282,8 +1408,9 @@ FlowMgmtEntry *NhFlowMgmtTree::Allocate(const FlowMgmtKey *key) {
 /////////////////////////////////////////////////////////////////////////////
 // Route Flow Management
 /////////////////////////////////////////////////////////////////////////////
-bool RouteFlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow) {
-    bool ret = FlowMgmtTree::Delete(key, flow);
+bool RouteFlowMgmtTree::Delete(FlowMgmtKey *key, FlowEntry *flow,
+                               FlowMgmtKeyNode *node) {
+    bool ret = FlowMgmtTree::Delete(key, flow, node);
     RouteFlowMgmtKey *route_key = static_cast<RouteFlowMgmtKey *>(key);
     mgr_->RetryVrfDelete(route_key->vrf_id());
     return ret;
@@ -1528,7 +1655,10 @@ void VrfFlowMgmtTree::RetryDelete(uint32_t vrf_id) {
         return;
 
     VrfFlowMgmtKey key(it->second);
-    FlowMgmtTree::RetryDelete(&key);
+    const VrfEntry *vrf = dynamic_cast<const VrfEntry *>(key.db_entry());
+    if (vrf && vrf->AllRouteTablesEmpty()) {
+        FlowMgmtTree::RetryDelete(&key);
+    }
 }
 
 VrfFlowMgmtEntry::VrfFlowMgmtEntry(VrfFlowMgmtTree *vrf_tree,
@@ -1569,7 +1699,5 @@ VrfFlowMgmtEntry::Data::~Data() {
 
 void VrfFlowMgmtEntry::Data::ManagedDelete() {
     deleted_ = true;
-    if (vrf_mgmt_entry_->CanDelete()) {
-        vrf_mgmt_entry_->vrf_tree()->mgr()->RetryVrfDeleteEvent(vrf_);
-    }
+    vrf_mgmt_entry_->vrf_tree()->mgr()->RetryVrfDeleteEvent(vrf_);
 }

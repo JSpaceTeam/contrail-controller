@@ -73,6 +73,7 @@ public:
     virtual bool EcmpDeletePath(AgentPath *path);
     void AppendEcmpPath(Agent *agent, AgentPath *path);
     void DeleteComponentNH(Agent *agent, AgentPath *path);
+    bool UpdateComponentNH(Agent *agent, AgentPath *ecmp_path, AgentPath *path);
 
     AgentPath *AllocateEcmpPath(Agent *agent, const AgentPath *path1,
                                 const AgentPath *path2);
@@ -126,6 +127,7 @@ public:
     const NextHop* GetLocalNextHop() const;
     bool IsHostRoute() const;
     bool IpamSubnetRouteAvailable() const;
+    InetUnicastRouteEntry *GetIpamSuperNetRoute() const;
     bool ipam_subnet_route() const {return ipam_subnet_route_;}
     void set_ipam_subnet_route(bool ipam_subnet_route) {
         ipam_subnet_route_ = ipam_subnet_route;}
@@ -191,10 +193,6 @@ public:
     }
 
     static DBTableBase *CreateTable(DB *db, const std::string &name);
-    static void ReEvaluatePaths(const Agent *agent,
-                                const string &vrf_name,
-                                const IpAddress &ip,
-                                uint8_t plen);
     static void DeleteReq(const Peer *peer, const string &vrf_name,
                           const IpAddress &addr, uint8_t plen,
                           AgentRouteData *data);
@@ -202,7 +200,8 @@ public:
                        const IpAddress &addr, uint8_t plen);
     static void AddHostRoute(const string &vrf_name,
                              const IpAddress &addr, uint8_t plen,
-                             const std::string &dest_vn_name);
+                             const std::string &dest_vn_name,
+                             bool relaxed_policy);
     void AddLocalVmRouteReq(const Peer *peer, const string &vm_vrf,
                             const IpAddress &addr, uint8_t plen,
                             LocalVmRoute *data);
@@ -216,7 +215,8 @@ public:
                             bool force_policy,
                             const PathPreference &path_preference,
                             const IpAddress &subnet_service_ip,
-                            const EcmpLoadBalance &ecmp_load_balance);
+                            const EcmpLoadBalance &ecmp_load_balance,
+                            bool is_local);
     static void AddLocalVmRoute(const Peer *peer, const string &vm_vrf,
                                 const IpAddress &addr, uint8_t plen,
                                 const uuid &intf_uuid,
@@ -227,7 +227,8 @@ public:
                                 bool force_policy,
                                 const PathPreference &path_preference,
                                 const IpAddress &subnet_service_ip,
-                                const EcmpLoadBalance &ecmp_load_balance);
+                                const EcmpLoadBalance &ecmp_load_balance,
+                                bool is_local);
     static void AddRemoteVmRouteReq(const Peer *peer, const string &vm_vrf,
                                     const IpAddress &vm_addr,uint8_t plen,
                                     AgentRouteData *data);
@@ -330,6 +331,14 @@ public:
                                uint8_t plen, ClonedLocalPath *data);
     bool ResyncSubnetRoutes(const InetUnicastRouteEntry *rt,
                             bool add_change);
+    uint8_t GetHostPlen(const IpAddress &ip_addr) const;
+    void AddEvpnRoute(const AgentRoute *evpn_entry);
+    void DeleteEvpnRoute(const AgentRoute *rt);
+    void TraverseHostRoutesInSubnet(InetUnicastRouteEntry *rt,
+                                    const Peer *peer);
+    IpAddress GetSubnetAddress(const IpAddress &addr,
+                               uint16_t plen) const;
+    InetUnicastRouteEntry *GetSuperNetRoute(const IpAddress &addr);
 
 private:
     Agent::RouteTableType type_;

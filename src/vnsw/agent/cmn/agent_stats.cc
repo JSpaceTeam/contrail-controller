@@ -65,8 +65,12 @@ void AgentStatsReq::HandleRequest() const {
                 stats->flow_drop_due_to_linklocal_limit());
         flow->set_flow_max_system_flows(agent->flow_table_size());
         flow->set_flow_max_vm_flows(agent->max_vm_flows());
-        flow->set_flow_export_msg_drops(
-                agent->flow_stats_manager()->flow_export_msg_drops());
+        flow->set_flow_export_disable_drops(
+                agent->flow_stats_manager()->flow_export_disable_drops());
+        flow->set_flow_export_sampling_drops(
+                agent->flow_stats_manager()->flow_export_sampling_drops());
+        flow->set_flow_export_drops(
+                agent->flow_stats_manager()->flow_export_drops());
         flow->set_context(context());
         flow->set_more(true);
         flow->Response();
@@ -89,6 +93,7 @@ void AgentStatsReq::HandleRequest() const {
             peer.set_reconnect(stats->xmpp_reconnects(count));
             peer.set_in_msgs(stats->xmpp_in_msgs(count));
             peer.set_out_msgs(stats->xmpp_out_msgs(count));
+            peer.set_config_in_msgs(stats->xmpp_config_in_msgs(count));
             list.push_back(peer);
         }
     }

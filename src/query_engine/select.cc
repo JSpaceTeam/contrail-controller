@@ -274,13 +274,14 @@ query_status_t SelectQuery::process_query() {
      *    a series of rows of
      *     T, <x-tuple>, pkts...
      *    it's expected that aggregation and binning will be done by
-     *    the next level
+     *bn
+    the next level
      *
      *  message related queries
      */
     AnalyticsQuery *m_query = (AnalyticsQuery *)main_query;
-    std::vector<query_result_unit_t>& query_result =
-        m_query->wherequery_->query_result;
+    const std::vector<query_result_unit_t>& query_result =
+        *m_query->where_info_;
     boost::shared_ptr<QueryResultMetaData> nullmetadata;
 
     if (m_query->table() == g_viz_constants.FLOW_SERIES_TABLE) {
@@ -304,7 +305,7 @@ query_status_t SelectQuery::process_query() {
             QE_IO_ERROR_RETURN(0, QUERY_FAILURE);
         }
 
-        for (std::vector<query_result_unit_t>::iterator it = query_result.begin();
+        for (std::vector<query_result_unit_t>::const_iterator it = query_result.begin();
                 it != query_result.end(); it++) {
             boost::uuids::uuid u;
             flow_stats stats;
@@ -432,7 +433,7 @@ query_status_t SelectQuery::process_query() {
         //uint64_t parset=0;
         //uint64_t loadt=0;
         //uint64_t jsont=0;
-        for (std::vector<query_result_unit_t>::iterator it = query_result.begin();
+        for (std::vector<query_result_unit_t>::const_iterator it = query_result.begin();
                 it != query_result.end(); it++) {
 
             string json_string;
@@ -472,10 +473,7 @@ query_status_t SelectQuery::process_query() {
                             se.value = (uint64_t)itr->value.GetUint64();
                         }
                     } else if (tname == 'd') {
-                        if (itr->value.IsDouble())
-                            se.value = (double) itr->value.GetDouble();
-                        else
-                            se.value = (double) itr->value.GetUint64();
+                        se.value = (double) itr->value.GetDouble();
                     } else {
                         QE_ASSERT(0);
                     }
@@ -567,7 +565,7 @@ query_status_t SelectQuery::process_query() {
             QE_IO_ERROR_RETURN(0, QUERY_FAILURE);
         }
 
-        for (std::vector<query_result_unit_t>::iterator it = query_result.begin();
+        for (std::vector<query_result_unit_t>::const_iterator it = query_result.begin();
                 it != query_result.end(); it++) {
             boost::uuids::uuid u;
 

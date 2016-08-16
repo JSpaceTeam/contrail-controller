@@ -19,6 +19,7 @@
 #include <base/cpuinfo.h>
 #include <base/util.h>
 #include <cmn/agent_cmn.h>
+#include <vrouter/flow_stats/flow_stats_manager.h>
 
 using namespace std;
 
@@ -116,6 +117,29 @@ bool VrouterUveEntry::SendVrouterMsg() {
         prev_stats_.set_aged_flows(agent_->stats()->flow_aged());
         change = true;
     }
+    uint64_t disable_drops =
+        agent_->flow_stats_manager()->flow_export_disable_drops();
+    if ((prev_stats_.get_flow_export_disable_drops() != disable_drops) ||
+        first) {
+        stats.set_flow_export_disable_drops(disable_drops);
+        prev_stats_.set_flow_export_disable_drops(disable_drops);
+        change = true;
+    }
+    uint64_t sampling_drops =
+        agent_->flow_stats_manager()->flow_export_sampling_drops();
+    if ((prev_stats_.get_flow_export_sampling_drops() != sampling_drops) ||
+        first) {
+        stats.set_flow_export_sampling_drops(sampling_drops);
+        prev_stats_.set_flow_export_sampling_drops(sampling_drops);
+        change = true;
+    }
+    uint64_t flow_drops =
+        agent_->flow_stats_manager()->flow_export_drops();
+    if ((prev_stats_.get_flow_export_drops() != flow_drops) || first) {
+        stats.set_flow_export_drops(flow_drops);
+        prev_stats_.set_flow_export_drops(flow_drops);
+        change = true;
+    }
 
     vector<AgentIfStats> phy_if_list;
     BuildPhysicalInterfaceList(phy_if_list);
@@ -134,10 +158,12 @@ bool VrouterUveEntry::SendVrouterMsg() {
     if (bandwidth_count_ && ((bandwidth_count_ % bandwidth_mod_1min) == 0)) {
         vector<AgentIfBandwidth> phy_if_blist;
         double in_util = 0, out_util = 0;
-        BuildPhysicalInterfaceBandwidth(phy_if_blist, 1, &in_util, &out_util);
+        map<string,uint64_t> inb,outb;
+        BuildPhysicalInterfaceBandwidth(inb, outb, 1, in_util, out_util);
         /* One minute bandwidth has 'tags' annotation and has to be sent
          * always regardless of change in bandwidth or not */
-        stats.set_phy_if_band(phy_if_blist);
+        stats.set_phy_band_in_bps(inb);
+        stats.set_phy_band_out_bps(outb);
         change = true;
         if (in_util != prev_stats_.get_total_in_bandwidth_utilization()) {
             stats.set_total_in_bandwidth_utilization(in_util);
@@ -152,7 +178,7 @@ bool VrouterUveEntry::SendVrouterMsg() {
     // 5 minute bandwidth
     if (bandwidth_count_ && ((bandwidth_count_ % bandwidth_mod_5min) == 0)) {
         vector<AgentIfBandwidth> phy_if_blist;
-        BuildPhysicalInterfaceBandwidth(phy_if_blist, 5, NULL, NULL);
+        BuildPhysicalInterfaceBandwidth(phy_if_blist, 5);
         if (prev_stats_.get_phy_if_5min_usage() != phy_if_blist) {
             stats.set_phy_if_5min_usage(phy_if_blist);
             prev_stats_.set_phy_if_5min_usage(phy_if_blist);
@@ -160,18 +186,6 @@ bool VrouterUveEntry::SendVrouterMsg() {
         }
     }
 
-    // 10 minute bandwidth
-    if (bandwidth_count_ && ((bandwidth_count_ % bandwidth_mod_10min) == 0)) {
-        vector<AgentIfBandwidth> phy_if_blist;
-        BuildPhysicalInterfaceBandwidth(phy_if_blist, 10, NULL, NULL);
-        if (prev_stats_.get_phy_if_10min_usage() != phy_if_blist) {
-            stats.set_phy_if_10min_usage(phy_if_blist);
-            prev_stats_.set_phy_if_10min_usage(phy_if_blist);
-            change = true;
-        }
-        //The following avoids handling of count overflow cases.
-        bandwidth_count_ = 0;
-    }
     InetInterfaceKey key(agent_->vhost_interface_name());
     const Interface *vhost = static_cast<const Interface *>
         (agent_->interface_table()->FindActiveEntry(&key));
@@ -198,11 +212,13 @@ bool VrouterUveEntry::SendVrouterMsg() {
         change = true;
     }
 
-    AgentDropStats drop_stats;
-    FetchDropStats(drop_stats);
-    if (prev_stats_.get_drop_stats() != drop_stats) {
-        stats.set_drop_stats(drop_stats);
-        prev_stats_.set_drop_stats(drop_stats);
+    DerivedStatsMap ds;
+    FetchDropStats(ds);
+    if (prev_stats_.get_drop_stats_agg().get_counters() != ds) {
+        CategoryResult cr;
+        cr.set_counters(ds);
+        stats.set_drop_stats_agg(cr);
+        prev_stats_.set_drop_stats_agg(cr);
         change = true;
     }
     if (first) {
@@ -257,7 +273,7 @@ bool VrouterUveEntry::SendVrouterMsg() {
 uint64_t VrouterUveEntry::CalculateBandwitdh(uint64_t bytes, int speed_mbps,
                                              int diff_seconds,
                                              double *utilization_bps) const {
-    *utilization_bps = 0;
+    if (utilization_bps) *utilization_bps = 0;
     if (bytes == 0 || speed_mbps == 0) {
         return 0;
     }
@@ -271,7 +287,7 @@ uint64_t VrouterUveEntry::CalculateBandwitdh(uint64_t bytes, int speed_mbps,
     /* Compute network utilization in percentage */
     uint64_t speed_bps = speed_mbps * 1024 * 1024;
     double bps_double = bits/diff_seconds;
-    *utilization_bps = (bps_double * 100)/speed_bps;
+    if (utilization_bps) *utilization_bps = (bps_double * 100)/speed_bps;
     return bps;
 }
 
@@ -286,13 +302,9 @@ uint64_t VrouterUveEntry::GetBandwidthUsage(StatsManager::InterfaceStats *s,
                 bytes = s->in_bytes - s->prev_in_bytes;
                 s->prev_in_bytes = s->in_bytes;
                 break;
-            case 5:
+            default:
                 bytes = s->in_bytes - s->prev_5min_in_bytes;
                 s->prev_5min_in_bytes = s->in_bytes;
-                break;
-            default:
-                bytes = s->in_bytes - s->prev_10min_in_bytes;
-                s->prev_10min_in_bytes = s->in_bytes;
                 break;
         }
     } else {
@@ -301,13 +313,9 @@ uint64_t VrouterUveEntry::GetBandwidthUsage(StatsManager::InterfaceStats *s,
                 bytes = s->out_bytes - s->prev_out_bytes;
                 s->prev_out_bytes = s->out_bytes;
                 break;
-            case 5:
+            default:
                 bytes = s->out_bytes - s->prev_5min_out_bytes;
                 s->prev_5min_out_bytes = s->out_bytes;
-                break;
-            default:
-                bytes = s->out_bytes - s->prev_10min_out_bytes;
-                s->prev_10min_out_bytes = s->out_bytes;
                 break;
         }
     }
@@ -342,18 +350,41 @@ bool VrouterUveEntry::BuildPhysicalInterfaceList(vector<AgentIfStats> &list)
 }
 
 bool VrouterUveEntry::BuildPhysicalInterfaceBandwidth
-    (vector<AgentIfBandwidth> &phy_if_list, uint8_t mins, double *in_avg_util,
-     double *out_avg_util) const {
+    (vector<AgentIfBandwidth> &phy_if_list, uint8_t mins) const {
+    uint64_t in_band, out_band;
+    bool changed = false;
+
+    PhysicalInterfaceSet::const_iterator it = phy_intf_set_.begin();
+    while (it != phy_intf_set_.end()) {
+        const Interface *intf = *it;
+        AgentUveStats *uve = static_cast<AgentUveStats *>(agent_->uve());
+        StatsManager::InterfaceStats *s =
+              uve->stats_manager()->GetInterfaceStats(intf);
+        if (s == NULL) {
+            continue;
+        }
+        AgentIfBandwidth phy_stat_entry;
+        phy_stat_entry.set_name(intf->name());
+        in_band = GetBandwidthUsage(s, true, mins, NULL);
+        out_band = GetBandwidthUsage(s, false, mins, NULL);
+        phy_stat_entry.set_in_bandwidth_usage(in_band);
+        phy_stat_entry.set_out_bandwidth_usage(out_band);
+        phy_if_list.push_back(phy_stat_entry);
+        changed = true;
+        ++it;
+    }
+    return changed;
+}
+bool VrouterUveEntry::BuildPhysicalInterfaceBandwidth
+    (map<string,uint64_t> &imp, map<string,uint64_t> &omp,
+     uint8_t mins, double &in_avg_util,
+     double &out_avg_util) const {
     uint64_t in_band, out_band;
     double in_util, out_util;
     bool changed = false;
     int num_intfs = 0;
-    if (in_avg_util != NULL) {
-        *in_avg_util = 0;
-    }
-    if (out_avg_util != NULL) {
-        *out_avg_util = 0;
-    }
+    in_avg_util = 0;
+    out_avg_util = 0;
 
     PhysicalInterfaceSet::const_iterator it = phy_intf_set_.begin();
     while (it != phy_intf_set_.end()) {
@@ -368,24 +399,17 @@ bool VrouterUveEntry::BuildPhysicalInterfaceBandwidth
         phy_stat_entry.set_name(intf->name());
         in_band = GetBandwidthUsage(s, true, mins, &in_util);
         out_band = GetBandwidthUsage(s, false, mins, &out_util);
-        phy_stat_entry.set_in_bandwidth_usage(in_band);
-        phy_stat_entry.set_out_bandwidth_usage(out_band);
-        phy_if_list.push_back(phy_stat_entry);
+        imp.insert(make_pair(intf->name(),in_band));
+        omp.insert(make_pair(intf->name(),out_band));
         changed = true;
-        if (in_avg_util != NULL) {
-            *in_avg_util += in_util;
-        }
-        if (out_avg_util != NULL) {
-            *out_avg_util += out_util;
-        }
+        in_avg_util += in_util;
+        out_avg_util += out_util;
         ++it;
         num_intfs++;
     }
-    if ((in_avg_util != NULL) && num_intfs) {
-        *in_avg_util /= num_intfs;
-    }
-    if ((out_avg_util != NULL) && num_intfs) {
-        *out_avg_util /= num_intfs;
+    if (num_intfs) {
+        in_avg_util /= num_intfs;
+        out_avg_util /= num_intfs;
     }
     return changed;
 }
@@ -402,17 +426,61 @@ void VrouterUveEntry::InitPrevStats() const {
         }
         s->prev_in_bytes = s->in_bytes;
         s->prev_5min_in_bytes = s->in_bytes;
-        s->prev_10min_in_bytes = s->in_bytes;
         s->prev_out_bytes = s->out_bytes;
         s->prev_5min_out_bytes = s->out_bytes;
-        s->prev_10min_out_bytes = s->out_bytes;
         ++it;
     }
 }
 
-void VrouterUveEntry::FetchDropStats(AgentDropStats &ds) const {
+void VrouterUveEntry::FetchDropStats(DerivedStatsMap &ds) const {
     AgentUveStats *uve = static_cast<AgentUveStats *>(agent_->uve());
-    ds = uve->stats_manager()->drop_stats();
+    const vr_drop_stats_req req = uve->stats_manager()->drop_stats();
+    ds.insert(DerivedStatsPair("discard", req.get_vds_discard()));
+    ds.insert(DerivedStatsPair("pull", req.get_vds_pull()));
+    ds.insert(DerivedStatsPair("invalid_if", req.get_vds_invalid_if()));
+    ds.insert(DerivedStatsPair("garp_from_vm", req.get_vds_garp_from_vm()));
+    ds.insert(DerivedStatsPair("invalid_arp",req.get_vds_invalid_arp()));
+    ds.insert(DerivedStatsPair("trap_no_if", req.get_vds_trap_no_if()));
+    ds.insert(DerivedStatsPair("nowhere_to_go", req.get_vds_nowhere_to_go()));
+    ds.insert(DerivedStatsPair("flow_queue_limit_exceeded", req.get_vds_flow_queue_limit_exceeded()));
+    ds.insert(DerivedStatsPair("flow_no_memory", req.get_vds_flow_no_memory()));
+    ds.insert(DerivedStatsPair("flow_invalid_protocol", req.get_vds_flow_invalid_protocol()));
+    ds.insert(DerivedStatsPair("flow_nat_no_rflow", req.get_vds_flow_nat_no_rflow()));
+    ds.insert(DerivedStatsPair("flow_action_drop", req.get_vds_flow_action_drop()));
+    ds.insert(DerivedStatsPair("flow_action_invalid", req.get_vds_flow_action_invalid()));
+    ds.insert(DerivedStatsPair("flow_unusable", req.get_vds_flow_unusable()));
+    ds.insert(DerivedStatsPair("flow_table_full", req.get_vds_flow_table_full()));
+    ds.insert(DerivedStatsPair("interface_tx_discard", req.get_vds_interface_tx_discard()));
+    ds.insert(DerivedStatsPair("interface_drop", req.get_vds_interface_drop()));
+    ds.insert(DerivedStatsPair("duplicated", req.get_vds_duplicated()));
+    ds.insert(DerivedStatsPair("push", req.get_vds_push()));
+    ds.insert(DerivedStatsPair("ttl_exceeded", req.get_vds_ttl_exceeded()));
+    ds.insert(DerivedStatsPair("invalid_nh", req.get_vds_invalid_nh()));
+    ds.insert(DerivedStatsPair("invalid_label", req.get_vds_invalid_label()));
+    ds.insert(DerivedStatsPair("invalid_protocol", req.get_vds_invalid_protocol()));
+    ds.insert(DerivedStatsPair("interface_rx_discard", req.get_vds_interface_rx_discard()));
+    ds.insert(DerivedStatsPair("invalid_mcast_source", req.get_vds_invalid_mcast_source()));
+    ds.insert(DerivedStatsPair("head_alloc_fail", req.get_vds_head_alloc_fail()));
+    ds.insert(DerivedStatsPair("head_space_reserve_fail", req.get_vds_head_space_reserve_fail()));
+    ds.insert(DerivedStatsPair("pcow_fail", req.get_vds_pcow_fail()));
+    ds.insert(DerivedStatsPair("flood", req.get_vds_flood()));
+    ds.insert(DerivedStatsPair("mcast_clone_fail", req.get_vds_mcast_clone_fail()));
+    ds.insert(DerivedStatsPair("rewrite_fail", req.get_vds_rewrite_fail()));
+    ds.insert(DerivedStatsPair("misc", req.get_vds_misc()));
+    ds.insert(DerivedStatsPair("invalid_packet", req.get_vds_invalid_packet()));
+    ds.insert(DerivedStatsPair("cksum_err", req.get_vds_cksum_err()));
+    ds.insert(DerivedStatsPair("clone_fail", req.get_vds_clone_fail()));
+    ds.insert(DerivedStatsPair("no_fmd", req.get_vds_no_fmd()));
+    ds.insert(DerivedStatsPair("cloned_original", req.get_vds_cloned_original()));
+    ds.insert(DerivedStatsPair("invalid_vnid", req.get_vds_invalid_vnid()));
+    ds.insert(DerivedStatsPair("frag_err", req.get_vds_frag_err()));
+    ds.insert(DerivedStatsPair("invalid_source", req.get_vds_invalid_source()));
+    ds.insert(DerivedStatsPair("mcast_df_bit", req.get_vds_mcast_df_bit()));
+    ds.insert(DerivedStatsPair("arp_no_where_to_go", req.get_vds_arp_no_where_to_go()));
+    ds.insert(DerivedStatsPair("arp_no_route", req.get_vds_arp_no_route()));
+    ds.insert(DerivedStatsPair("l2_no_route", req.get_vds_l2_no_route()));
+    ds.insert(DerivedStatsPair("vlan_fwd_tx", req.get_vds_vlan_fwd_tx()));
+    ds.insert(DerivedStatsPair("vlan_fwd_enq", req.get_vds_vlan_fwd_enq()));
 }
 
 void VrouterUveEntry::BuildXmppStatsList(vector<AgentXmppStats> &list) const {

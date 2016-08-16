@@ -9,6 +9,7 @@
 #include <boost/foreach.hpp>
 #include <boost/assign/list_of.hpp>
 
+#include "base/task_annotations.h"
 #include "base/test/task_test_util.h"
 #include "bgp/bgp_common.h"
 #include "bgp/bgp_config_ifmap.h"
@@ -18,6 +19,9 @@
 #include "bgp/bgp_peer.h"
 #include "bgp/bgp_server.h"
 #include "bgp/inet/inet_table.h"
+#include "bgp/routing-instance/iroute_aggregator.h"
+#include "bgp/routing-instance/iservice_chain_mgr.h"
+#include "bgp/routing-instance/istatic_route_mgr.h"
 #include "bgp/routing-instance/peer_manager.h"
 #include "bgp/routing-instance/routing_instance.h"
 #include "bgp/routing-policy/routing_policy.h"
@@ -41,7 +45,8 @@ static string FileRead(const string &filename) {
 class BgpConfigTest : public ::testing::Test {
 protected:
     BgpConfigTest()
-        : server_(&evm_), parser_(&config_db_) {
+        : config_db_(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable")),
+          server_(&evm_), parser_(&config_db_) {
     }
 
     virtual void SetUp() {
@@ -65,6 +70,28 @@ protected:
         db_util::Clear(&config_db_);
     }
 
+    void DisableRoutingInstanceConfigProcessing() {
+        RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+        mgr->DisableInstanceConfigListProcessing();
+    }
+
+    void EnableRoutingInstanceConfigProcessing() {
+        RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+        mgr->EnableInstanceConfigListProcessing();
+        task_util::WaitForIdle();
+    }
+
+    void DisableInstanceNeighborConfigProcessing() {
+        RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+        mgr->DisableNeighborConfigListProcessing();
+    }
+
+    void EnableInstanceNeighborConfigProcessing() {
+        RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+        mgr->EnableNeighborConfigListProcessing();
+        task_util::WaitForIdle();
+    }
+
     const StateMachine *GetPeerStateMachine(BgpPeer *peer) {
         return peer->state_machine();
     }
@@ -78,9 +105,9 @@ protected:
     bool GetPeerAsOverride(BgpPeer *peer) { return peer->as_override_; }
 
     EventManager evm_;
-    BgpServer server_;
     DB config_db_;
     DBGraph db_graph_;
+    BgpServer server_;
     BgpConfigParser parser_;
 };
 
@@ -254,7 +281,7 @@ TEST_F(BgpConfigTest, BgpRouterHoldTimeChange) {
     RoutingInstance *rti = server_.routing_instance_mgr()->GetRoutingInstance(
         BgpConfigManager::kMasterInstance);
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager_size());
     string name = rti->name() + ":" + "remote";
 
     BgpPeer *peer;
@@ -300,7 +327,7 @@ TEST_F(BgpConfigTest, MasterNeighbors) {
     RoutingInstance *rti = server_.routing_instance_mgr()->GetRoutingInstance(
         BgpConfigManager::kMasterInstance);
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(3, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(3, rti->peer_manager_size());
 
     const char config_update[] = "\
 <config>\
@@ -313,7 +340,7 @@ TEST_F(BgpConfigTest, MasterNeighbors) {
 
     EXPECT_TRUE(parser_.Parse(config_update));
     task_util::WaitForIdle();
-    TASK_UTIL_EXPECT_EQ(3, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(3, rti->peer_manager_size());
 
     const char config_delete[] = "\
 <delete>\
@@ -324,7 +351,7 @@ TEST_F(BgpConfigTest, MasterNeighbors) {
 
     EXPECT_TRUE(parser_.Parse(config_delete));
     task_util::WaitForIdle();
-    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
 }
 
 TEST_F(BgpConfigTest, BGPaaSNeighbors1) {
@@ -336,7 +363,9 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors1) {
     RoutingInstance *rti =
         server_.routing_instance_mgr()->GetRoutingInstance("test");
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(2, server_.num_bgpaas_peer());
 
     TASK_UTIL_EXPECT_TRUE(
         rti->peer_manager()->PeerLookup("test:vm1:0") != NULL);
@@ -379,6 +408,8 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors1) {
     // Ensure that the instance is deleted
     TASK_UTIL_EXPECT_EQ(static_cast<RoutingInstance *>(NULL),
             server_.routing_instance_mgr()->GetRoutingInstance("test"));
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
 }
 
 TEST_F(BgpConfigTest, BGPaaSNeighbors2) {
@@ -390,7 +421,9 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors2) {
     RoutingInstance *rti =
         server_.routing_instance_mgr()->GetRoutingInstance("test");
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(2, server_.num_bgpaas_peer());
 
     TASK_UTIL_EXPECT_TRUE(
         rti->peer_manager()->PeerLookup("test:vm1:0") != NULL);
@@ -428,6 +461,8 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors2) {
     // Ensure that the instance is deleted
     TASK_UTIL_EXPECT_EQ(static_cast<RoutingInstance *>(NULL),
             server_.routing_instance_mgr()->GetRoutingInstance("test"));
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
 }
 
 TEST_F(BgpConfigTest, BGPaaSNeighbors3) {
@@ -439,7 +474,9 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors3) {
     RoutingInstance *rti =
         server_.routing_instance_mgr()->GetRoutingInstance("test");
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(2, server_.num_bgpaas_peer());
 
     // Verify that the port is set for test:vm1.
     TASK_UTIL_EXPECT_TRUE(
@@ -498,6 +535,8 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors3) {
     // Ensure that the instance is deleted
     TASK_UTIL_EXPECT_EQ(static_cast<RoutingInstance *>(NULL),
             server_.routing_instance_mgr()->GetRoutingInstance("test"));
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
 }
 
 //
@@ -531,6 +570,7 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors4) {
     task_util::WaitForIdle();
 
     TASK_UTIL_EXPECT_EQ(1, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
 
     // Remove peering between local and remote.
     router1 = master_instance + ":" + string("local");
@@ -547,6 +587,7 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors4) {
     task_util::WaitForIdle();
 
     TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
 
     // Cleanup.
     boost::replace_all(content, "<config>", "<delete>");
@@ -585,7 +626,8 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors5) {
         new autogen::BgpPeeringAttributes());
     task_util::WaitForIdle();
 
-    TASK_UTIL_EXPECT_EQ(1, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(1, server_.num_bgpaas_peer());
 
     // Remove peering between server and client.
     router1 = test_instance + ":" + string("server");
@@ -602,6 +644,7 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors5) {
     task_util::WaitForIdle();
 
     TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
 
     // Cleanup.
     boost::replace_all(content, "<config>", "<delete>");
@@ -639,7 +682,8 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors6) {
         new autogen::BgpPeeringAttributes());
     task_util::WaitForIdle();
 
-    TASK_UTIL_EXPECT_EQ(1, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(1, server_.num_bgpaas_peer());
 
     // Remove peering between server and client in same instance.
     router1 = string("test1") + ":" + string("server");
@@ -656,6 +700,7 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors6) {
     task_util::WaitForIdle();
 
     TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
 
     // Cleanup.
     boost::replace_all(content, "<config>", "<delete>");
@@ -673,7 +718,7 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors7) {
     RoutingInstance *rti =
         server_.routing_instance_mgr()->GetRoutingInstance("test");
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
 
     TASK_UTIL_EXPECT_TRUE(
         rti->peer_manager()->PeerLookup("test:vm1:0") != NULL);
@@ -734,7 +779,7 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors8) {
     RoutingInstance *rti =
         server_.routing_instance_mgr()->GetRoutingInstance("test");
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
 
     TASK_UTIL_EXPECT_TRUE(
         rti->peer_manager()->PeerLookup("test:vm1:0") != NULL);
@@ -772,6 +817,380 @@ TEST_F(BgpConfigTest, BGPaaSNeighbors8) {
             server_.routing_instance_mgr()->GetRoutingInstance("test"));
 }
 
+//
+// Config for neighbor is re-added before the previous incarnation has been
+// destroyed. The peer should get resurrected after the old incarnation has
+// been destroyed.
+//
+TEST_F(BgpConfigTest, BGPaaSNeighbors9) {
+    string content;
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    RoutingInstance *rti =
+        server_.routing_instance_mgr()->GetRoutingInstance("test");
+    TASK_UTIL_ASSERT_TRUE(rti != NULL);
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(2, server_.num_bgpaas_peer());
+
+    // Verify that peers got created.
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm1:0") != NULL);
+    BgpPeer *peer1 = rti->peer_manager()->PeerLookup("test:vm1:0");
+    TASK_UTIL_EXPECT_EQ(1024, peer1->peer_port());
+    TASK_UTIL_EXPECT_EQ(peer1, server_.FindPeer(peer1->endpoint()));
+
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm2:0") != NULL);
+    BgpPeer *peer2 = rti->peer_manager()->PeerLookup("test:vm2:0");
+    TASK_UTIL_EXPECT_EQ(1025, peer2->peer_port());
+    TASK_UTIL_EXPECT_EQ(peer2, server_.FindPeer(peer2->endpoint()));
+
+    // Pause deletion of both peers.
+    PauseDelete(peer1->deleter());
+    PauseDelete(peer2->deleter());
+    task_util::WaitForIdle();
+
+    // Delete the neighbor config - this should trigger peer deletion.
+    // The peers can't get destroyed because deletion has been paused.
+    content = FileRead("controller/src/bgp/testdata/config_test_36e.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_TRUE(peer1->IsDeleted());
+    TASK_UTIL_EXPECT_TRUE(peer1->config() == NULL);
+    TASK_UTIL_EXPECT_TRUE(server_.FindPeer(peer1->endpoint()) == NULL);
+    TASK_UTIL_EXPECT_TRUE(peer2->IsDeleted());
+    TASK_UTIL_EXPECT_TRUE(peer2->config() == NULL);
+    TASK_UTIL_EXPECT_TRUE(server_.FindPeer(peer2->endpoint()) == NULL);
+
+    // Recreate neighbor config. The old peers should still be around
+    // but should not be in the BgpServer::EndpointToBgpPeerList.
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_TRUE(peer1->IsDeleted());
+    TASK_UTIL_EXPECT_TRUE(peer1->config() == NULL);
+    TASK_UTIL_EXPECT_TRUE(server_.FindPeer(peer1->endpoint()) == NULL);
+    TASK_UTIL_EXPECT_TRUE(peer2->IsDeleted());
+    TASK_UTIL_EXPECT_TRUE(peer2->config() == NULL);
+    TASK_UTIL_EXPECT_TRUE(server_.FindPeer(peer2->endpoint()) == NULL);
+
+    // Resume deletion of the peers.
+    ResumeDelete(peer1->deleter());
+    ResumeDelete(peer2->deleter());
+    task_util::WaitForIdle();
+
+    // Make sure the peers got resurrected.
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm1:0") != NULL);
+    peer1 = rti->peer_manager()->PeerLookup("test:vm1:0");
+    TASK_UTIL_EXPECT_EQ(1024, peer1->peer_port());
+    TASK_UTIL_EXPECT_EQ(peer1, server_.FindPeer(peer1->endpoint()));
+
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm2:0") != NULL);
+    peer2 = rti->peer_manager()->PeerLookup("test:vm2:0");
+    TASK_UTIL_EXPECT_EQ(1025, peer2->peer_port());
+    TASK_UTIL_EXPECT_EQ(peer2, server_.FindPeer(peer2->endpoint()));
+
+    // Get rid of the peers.
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    TASK_UTIL_EXPECT_EQ(0, db_graph_.edge_count());
+    TASK_UTIL_EXPECT_EQ(0, db_graph_.vertex_count());
+}
+
+//
+// Delay creation of routing instance and verify that neighbors get created
+// when the routing instance itself is created.
+//
+TEST_F(BgpConfigTest, BGPaaSNeighbors10) {
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+
+    DisableRoutingInstanceConfigProcessing();
+
+    string content;
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") == NULL);
+
+    EnableRoutingInstanceConfigProcessing();
+
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") != NULL);
+    RoutingInstance *rti = mgr->GetRoutingInstance("test");
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(2, server_.num_bgpaas_peer());
+
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm1:0") != NULL);
+    BgpPeer *peer1 = rti->peer_manager()->PeerLookup("test:vm1:0");
+    TASK_UTIL_EXPECT_EQ(64512, peer1->local_as());
+    TASK_UTIL_EXPECT_EQ("192.168.1.1", peer1->local_bgp_identifier_string());
+
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm2:0") != NULL);
+    BgpPeer *peer2 = rti->peer_manager()->PeerLookup("test:vm2:0");
+    TASK_UTIL_EXPECT_EQ(64512, peer2->local_as());
+    TASK_UTIL_EXPECT_EQ("192.168.1.1", peer2->local_bgp_identifier_string());
+
+    // Cleanup.
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    // Ensure that the instance is deleted
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") == NULL);
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
+}
+
+//
+// Delay creation of routing instance and verify that neighbors get created
+// when the routing instance itself is created.
+// Neighbor configs are updated before they neighbors get created. Verify that
+// the latest config is applied.
+//
+TEST_F(BgpConfigTest, BGPaaSNeighbors11) {
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+
+    DisableRoutingInstanceConfigProcessing();
+
+    string content;
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") == NULL);
+
+    // Change asn and identifier for master.
+    content = FileRead("controller/src/bgp/testdata/config_test_36b.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") == NULL);
+
+    EnableRoutingInstanceConfigProcessing();
+
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") != NULL);
+    RoutingInstance *rti = mgr->GetRoutingInstance("test");
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(2, server_.num_bgpaas_peer());
+
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm1:0") != NULL);
+    BgpPeer *peer1 = rti->peer_manager()->PeerLookup("test:vm1:0");
+    TASK_UTIL_EXPECT_EQ(64513, peer1->local_as());
+    TASK_UTIL_EXPECT_EQ("192.168.1.2", peer1->local_bgp_identifier_string());
+
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm2:0") != NULL);
+    BgpPeer *peer2 = rti->peer_manager()->PeerLookup("test:vm2:0");
+    TASK_UTIL_EXPECT_EQ(64513, peer2->local_as());
+    TASK_UTIL_EXPECT_EQ("192.168.1.2", peer2->local_bgp_identifier_string());
+
+    // Cleanup.
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    // Ensure that the instance is deleted
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") == NULL);
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
+}
+
+//
+// Disable processing of instance neighbor configs when instance is created.
+// Neighbor configs are then updated - this causes neighbors to get created
+// even though instance neighbor config processing is disabled.
+// There should not be any issues when instance neighbor config processing
+// is later enabled.
+//
+TEST_F(BgpConfigTest, BGPaaSNeighbors12) {
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+
+    DisableInstanceNeighborConfigProcessing();
+
+    DisableRoutingInstanceConfigProcessing();
+    string content;
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    EnableRoutingInstanceConfigProcessing();
+
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") != NULL);
+    RoutingInstance *rti = mgr->GetRoutingInstance("test");
+    TASK_UTIL_EXPECT_EQ(0, rti->peer_manager_size());
+
+    // Change asn and identifier for master.
+    content = FileRead("controller/src/bgp/testdata/config_test_36b.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    TASK_UTIL_EXPECT_EQ(2, rti->peer_manager_size());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(2, server_.num_bgpaas_peer());
+
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm1:0") != NULL);
+    BgpPeer *peer1 = rti->peer_manager()->PeerLookup("test:vm1:0");
+    TASK_UTIL_EXPECT_EQ(64513, peer1->local_as());
+    TASK_UTIL_EXPECT_EQ("192.168.1.2", peer1->local_bgp_identifier_string());
+
+    TASK_UTIL_EXPECT_TRUE(
+        rti->peer_manager()->PeerLookup("test:vm2:0") != NULL);
+    BgpPeer *peer2 = rti->peer_manager()->PeerLookup("test:vm2:0");
+    TASK_UTIL_EXPECT_EQ(64513, peer2->local_as());
+    TASK_UTIL_EXPECT_EQ("192.168.1.2", peer2->local_bgp_identifier_string());
+
+    EnableInstanceNeighborConfigProcessing();
+
+    // Cleanup.
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    // Ensure that the instance is deleted
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") == NULL);
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
+}
+
+//
+// Disable processing of instance neighbor configs when instance is created.
+// Neighbor configs are then deleted with instance neighbor config processing
+// still disabled.
+// There should not be any issues when instance neighbor config processing
+// is later enabled.
+//
+TEST_F(BgpConfigTest, BGPaaSNeighbors13) {
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+
+    DisableInstanceNeighborConfigProcessing();
+
+    DisableRoutingInstanceConfigProcessing();
+    string content;
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    EnableRoutingInstanceConfigProcessing();
+
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") != NULL);
+    RoutingInstance *rti = mgr->GetRoutingInstance("test");
+    TASK_UTIL_EXPECT_EQ(0, rti->peer_manager_size());
+
+    // Delete the neighbor config.
+    content = FileRead("controller/src/bgp/testdata/config_test_36e.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    TASK_UTIL_EXPECT_EQ(0, rti->peer_manager_size());
+    EnableInstanceNeighborConfigProcessing();
+
+    // Cleanup.
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    // Ensure that the instance is deleted
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") == NULL);
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgp_peer());
+    TASK_UTIL_EXPECT_EQ(0, server_.num_bgpaas_peer());
+}
+
+//
+// Disable processing of instance neighbor configs when instance is created.
+// Delete the routing instance with instance neighbor config processing still
+// disabled i.e. before the instance neighbors can be created.
+// There should not be any issues when instance neighbor config processing
+// is later enabled.
+//
+TEST_F(BgpConfigTest, BGPaaSNeighbors14) {
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+
+    DisableInstanceNeighborConfigProcessing();
+
+    DisableRoutingInstanceConfigProcessing();
+    string content;
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    EnableRoutingInstanceConfigProcessing();
+
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") != NULL);
+    RoutingInstance *rti = mgr->GetRoutingInstance("test");
+    TASK_UTIL_EXPECT_EQ(0, rti->peer_manager_size());
+
+    // Cleanup.
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") == NULL);
+
+    EnableInstanceNeighborConfigProcessing();
+}
+
+//
+// Disable processing of instance neighbor configs when instance is created.
+// Delete the routing instance with instance neighbor config processing still
+// disabled i.e. before the instance neighbors can be created. Make sure the
+// instance does not get destroyed by pausing it's delet actor's deletion.
+// There should not be any issues when instance neighbor config processing
+// is later enabled.
+//
+TEST_F(BgpConfigTest, BGPaaSNeighbors15) {
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+
+    DisableInstanceNeighborConfigProcessing();
+
+    DisableRoutingInstanceConfigProcessing();
+    string content;
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    EnableRoutingInstanceConfigProcessing();
+
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") != NULL);
+    RoutingInstance *rti = mgr->GetRoutingInstance("test");
+    TASK_UTIL_EXPECT_EQ(0, rti->peer_manager_size());
+
+    // Pause deletion of the routing instance.
+    PauseDelete(rti->deleter());
+    task_util::WaitForIdle();
+
+    // Cleanup.
+    content = FileRead("controller/src/bgp/testdata/config_test_36a.xml");
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    // Verify that the instance still exists and is marked deleted.
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("test") == rti);
+    TASK_UTIL_EXPECT_TRUE(rti->deleted());
+
+    EnableInstanceNeighborConfigProcessing();
+
+    // Resume deletion of the routing instance.
+    ResumeDelete(rti->deleter());
+}
+
 TEST_F(BgpConfigTest, MasterNeighborAttributes) {
     string content_a = FileRead("controller/src/bgp/testdata/config_test_35a.xml");
     EXPECT_TRUE(parser_.Parse(content_a));
@@ -780,7 +1199,7 @@ TEST_F(BgpConfigTest, MasterNeighborAttributes) {
     RoutingInstance *rti = server_.routing_instance_mgr()->GetRoutingInstance(
         BgpConfigManager::kMasterInstance);
     TASK_UTIL_EXPECT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager_size());
     string name = rti->name() + ":" + "remote:100";
 
     TASK_UTIL_EXPECT_TRUE(rti->peer_manager()->PeerLookup(name) != NULL);
@@ -841,7 +1260,7 @@ TEST_F(BgpConfigTest, DelayDeletedNeighbor) {
     RoutingInstance *rti = server_.routing_instance_mgr()->GetRoutingInstance(
         BgpConfigManager::kMasterInstance);
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager_size());
     string name = rti->name() + ":" + "remote";
 
     // Make sure the peer exists.
@@ -891,7 +1310,7 @@ TEST_F(BgpConfigTest, CreateDeletedNeighbor) {
     RoutingInstance *rti = server_.routing_instance_mgr()->GetRoutingInstance(
         BgpConfigManager::kMasterInstance);
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager_size());
     string name = rti->name() + ":" + "remote";
 
     // Make sure the peer exists.
@@ -953,7 +1372,7 @@ TEST_F(BgpConfigTest, UpdateDeletedNeighbor) {
     RoutingInstance *rti = server_.routing_instance_mgr()->GetRoutingInstance(
         BgpConfigManager::kMasterInstance);
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager_size());
     string name = rti->name() + ":" + "remote";
 
     // Make sure the peer exists.
@@ -1025,7 +1444,7 @@ TEST_F(BgpConfigTest, DeleteDeletedNeighbor) {
     RoutingInstance *rti = server_.routing_instance_mgr()->GetRoutingInstance(
         BgpConfigManager::kMasterInstance);
     TASK_UTIL_ASSERT_TRUE(rti != NULL);
-    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager()->size());
+    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager_size());
     string name = rti->name() + ":" + "remote";
 
     // Make sure the peer exists.
@@ -1688,6 +2107,646 @@ TEST_F(BgpConfigTest, DeletePendingDelete) {
 }
 
 //
+// Create instance and update multiple times with config processing disabled.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate1) {
+    string content;
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    DisableRoutingInstanceConfigProcessing();
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") == NULL);
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42b.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") == NULL);
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42c.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") == NULL);
+
+    EnableRoutingInstanceConfigProcessing();
+    TASK_UTIL_EXPECT_EQ(2, mgr->count());
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") != NULL);
+    RoutingInstance *red = mgr->GetRoutingInstance("red");
+    TASK_UTIL_EXPECT_EQ(103, red->virtual_network_index());
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create instance.
+// Update multiple times with config processing disabled.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate2) {
+    string content;
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") != NULL);
+    RoutingInstance *red = mgr->GetRoutingInstance("red");
+    TASK_UTIL_EXPECT_EQ(101, red->virtual_network_index());
+
+    DisableRoutingInstanceConfigProcessing();
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42b.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(101, red->virtual_network_index());
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42c.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(101, red->virtual_network_index());
+
+    EnableRoutingInstanceConfigProcessing();
+    TASK_UTIL_EXPECT_EQ(103, red->virtual_network_index());
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create and delete instance with config processing disabled.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate3) {
+    string content;
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    DisableRoutingInstanceConfigProcessing();
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") == NULL);
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    EnableRoutingInstanceConfigProcessing();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") == NULL);
+}
+
+//
+// Create, delete and update instance multiple times with config processing
+// disabled.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate4) {
+    string content;
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    DisableRoutingInstanceConfigProcessing();
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42a.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") == NULL);
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42b.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") == NULL);
+
+    content = FileRead("controller/src/bgp/testdata/config_test_42c.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") == NULL);
+
+    EnableRoutingInstanceConfigProcessing();
+    TASK_UTIL_EXPECT_EQ(2, mgr->count());
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("red") != NULL);
+    RoutingInstance *red = mgr->GetRoutingInstance("red");
+    TASK_UTIL_EXPECT_EQ(103, red->virtual_network_index());
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create multiple instances.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate5) {
+    static const int kInstanceCount = 128;
+
+    ostringstream oss;
+    oss << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss << "  <network-id>" << idx << "</network-id>\n";
+        oss << "</virtual-network>\n";
+        oss << "<routing-instance name=\"red" << idx << "\">\n";
+        oss << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss << "</routing-instance>\n";
+    }
+    oss << "</config>\n";
+
+    string content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 1, mgr->count());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create multiple instances with config processing disabled and then enable
+// config processing.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate6) {
+    static const int kInstanceCount = 128;
+
+    ostringstream oss;
+    oss << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss << "  <network-id>" << idx << "</network-id>\n";
+        oss << "</virtual-network>\n";
+        oss << "<routing-instance name=\"red" << idx << "\">\n";
+        oss << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss << "</routing-instance>\n";
+    }
+    oss << "</config>\n";
+
+    DisableRoutingInstanceConfigProcessing();
+
+    string content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+
+    EnableRoutingInstanceConfigProcessing();
+
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 1, mgr->count());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create, delete and create multiple instances with config processing
+// disabled.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate7) {
+    static const int kInstanceCount = 128;
+
+    ostringstream oss;
+    oss << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss << "  <network-id>" << idx << "</network-id>\n";
+        oss << "</virtual-network>\n";
+        oss << "<routing-instance name=\"red" << idx << "\">\n";
+        oss << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss << "</routing-instance>\n";
+    }
+    oss << "</config>\n";
+
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    DisableRoutingInstanceConfigProcessing();
+
+    string content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+
+    content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+
+    EnableRoutingInstanceConfigProcessing();
+
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 1, mgr->count());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create multiple instances with each pair of consecutive instances importing
+// each other's target.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate8) {
+    static const int kInstanceCount = 128;
+
+    ostringstream oss;
+    oss << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss << "  <network-id>" << idx << "</network-id>\n";
+        oss << "</virtual-network>\n";
+        oss << "<routing-instance name=\"red" << idx << "\">\n";
+        oss << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        string rtarget("target:1:");
+        if (idx % 2 == 1) {
+            rtarget += integerToString(idx + 1);
+        } else {
+            rtarget += integerToString(idx - 1);
+        }
+        oss << "  <vrf-target>\n";
+        oss << "      " << rtarget << "\n";
+        oss << "      <import-export>import</import-export>\n";
+        oss << "  </vrf-target>\n";
+        oss << "</routing-instance>\n";
+    }
+    oss << "</config>\n";
+
+    string content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 1, mgr->count());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+        TASK_UTIL_EXPECT_EQ(2, rtinstance->GetImportList().size());
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create multiple instances with a shared route target, a la logical-router.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate9) {
+    static const int kInstanceCount = 32;
+
+    ostringstream oss;
+    oss << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss << "  <network-id>" << idx << "</network-id>\n";
+        oss << "</virtual-network>\n";
+        oss << "<routing-instance name=\"red" << idx << "\">\n";
+        oss << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss << "  <vrf-target>target:1:0" << idx << "</vrf-target>\n";
+        oss << "</routing-instance>\n";
+    }
+    oss << "</config>\n";
+
+    string content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 1, mgr->count());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create multiple instances with service chaining to a common instance.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate10) {
+    static const int kInstanceCount = 32;
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    IServiceChainMgr *sc_mgr = server_.service_chain_mgr(Address::INET);
+
+    ostringstream oss1;
+    oss1 << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss1 << "<config>\n";
+    oss1 << "<virtual-network name=\"common-vn\">\n";
+    oss1 << "  <network-id>" << kInstanceCount + 1 << "</network-id>\n";
+    oss1 << "</virtual-network>\n";
+    oss1 << "<routing-instance name=\"common\">\n";
+    oss1 << "  <virtual-network>common-vn</virtual-network>\n";
+    oss1 << "  <vrf-target>target:1:" << kInstanceCount + 1 << "</vrf-target>\n";
+    oss1 << "</routing-instance>\n";
+    oss1 << "</config>\n";
+
+    string content1 = oss1.str();
+    EXPECT_TRUE(parser_.Parse(content1));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(2, mgr->count());
+    TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance("common") != NULL);
+
+    ostringstream oss2;
+    oss2 << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss2 << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss2 << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss2 << "  <network-id>" << idx << "</network-id>\n";
+        oss2 << "</virtual-network>\n";
+        oss2 << "<routing-instance name=\"red" << idx << "\">\n";
+        oss2 << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss2 << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss2 << "  <service-chain-info>\n";
+        oss2 << "    <routing-instance>common</routing-instance>\n";
+        oss2 << "    <prefix>10.1.1.0/24</prefix>\n";
+        oss2 << "    <service-chain-address>10.1.1.5</service-chain-address>\n";
+        oss2 << "  </service-chain-info>\n";
+        oss2 << "</routing-instance>\n";
+    }
+    oss2 << "</config>\n";
+
+    string content2 = oss2.str();
+    EXPECT_TRUE(parser_.Parse(content2));
+    task_util::WaitForIdle();
+
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 2, mgr->count());
+    TASK_UTIL_EXPECT_EQ(kInstanceCount, sc_mgr->ResolvedQueueSize());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+        TASK_UTIL_EXPECT_FALSE(sc_mgr->IsPending(rtinstance));
+    }
+
+    boost::replace_all(content1, "<config>", "<delete>");
+    boost::replace_all(content1, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content1));
+    boost::replace_all(content2, "<config>", "<delete>");
+    boost::replace_all(content2, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content2));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create multiple instances with static route configuration.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate11) {
+    static const int kInstanceCount = 32;
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+
+    ostringstream oss;
+    oss << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss << "  <network-id>" << idx << "</network-id>\n";
+        oss << "</virtual-network>\n";
+        oss << "<routing-instance name=\"red" << idx << "\">\n";
+        oss << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss << "  <static-route-entries>\n";
+        oss << "    <route>\n";
+        oss << "      <prefix>192.168.1.0/24</prefix>\n";
+        oss << "      <next-hop>192.168.1.254</next-hop>\n";
+        oss << "      <route-target>target:2:" << idx << "</route-target>\n";
+        oss << "      <route-target>target:3:" << idx << "</route-target>\n";
+        oss << "    </route>\n";
+        oss << "    <route>\n";
+        oss << "      <prefix>192.168.2.0/24</prefix>\n";
+        oss << "      <next-hop>192.168.1.254</next-hop>\n";
+        oss << "      <route-target>target:2:" << idx << "</route-target>\n";
+        oss << "      <route-target>target:4:" << idx << "</route-target>\n";
+        oss << "    </route>\n";
+        oss << "  </static-route-entries>\n";
+        oss << "</routing-instance>\n";
+    }
+    oss << "</config>\n";
+
+    string content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 1, mgr->count());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+        IStaticRouteMgr *srt_mgr = rtinstance->static_route_mgr(Address::INET);
+        ConcurrencyScope scope("bgp::Uve");
+        TASK_UTIL_EXPECT_EQ(2, srt_mgr->GetRouteCount());
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create multiple instances with route aggregate configuration.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate12) {
+    static const int kInstanceCount = 32;
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+
+    ostringstream oss;
+    oss << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss << "  <network-id>" << idx << "</network-id>\n";
+        oss << "</virtual-network>\n";
+        oss << "<routing-instance name=\"red" << idx << "\">\n";
+        oss << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss << "  <route-aggregate to=\"red-aggregate" << idx << "\"/>\n";
+        oss << "</routing-instance>\n";
+        oss << "<route-aggregate name=\"red-aggregate" << idx << "\">\n";
+        oss << "  <aggregate-route-entries>\n";
+        oss << "    <route>192.168.1.0/24</route>\n";
+        oss << "    <route>192.168.2.0/24</route>\n";
+        oss << "  </aggregate-route-entries>\n";
+        oss << "  <nexthop>192.168.1.254</nexthop>\n";
+        oss << "</route-aggregate>\n";
+    }
+    oss << "</config>\n";
+
+    string content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 1, mgr->count());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+        IRouteAggregator *aggr = rtinstance->route_aggregator(Address::INET);
+        TASK_UTIL_EXPECT_EQ(2, aggr->GetAggregateRouteCount());
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
+// Create multiple instances with routing-instance-has-pnf enabled.
+//
+TEST_F(BgpConfigTest, InstanceCreateUpdate13) {
+    static const int kInstanceCount = 32;
+
+    ostringstream oss1;
+    oss1 << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss1 << "<config>\n";
+    oss1 << "  <bgp-router name=\'local\'>\n";
+    oss1 << "  <address>192.168.1.1</address>\n";
+    oss1 << "  <identifier>192.168.1.1</identifier>\n";
+    oss1 << "  <autonomous-system>64512</autonomous-system>\n";
+    oss1 << "</bgp-router>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss1 << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss1 << "  <network-id>" << idx << "</network-id>\n";
+        oss1 << "</virtual-network>\n";
+        oss1 << "<routing-instance name=\"red" << idx << "\">\n";
+        oss1 << "  <routing-instance-has-pnf>true</routing-instance-has-pnf>\n";
+        oss1 << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss1 << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss1 << "</routing-instance>\n";
+    }
+    oss1 << "</config>\n";
+
+    string content = oss1.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    RoutingInstanceMgr *mgr = server_.routing_instance_mgr();
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 1, mgr->count());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_TRUE(rtinstance->always_subscribe());
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+        TASK_UTIL_EXPECT_EQ(1, rtinstance->GetImportList().size());
+        TASK_UTIL_EXPECT_EQ(1, rtinstance->GetExportList().size());
+    }
+
+    ostringstream oss2;
+    oss2 << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss2 << "<config>\n";
+    oss2 << "  <bgp-router name=\'local\'>\n";
+    oss2 << "  <address>192.168.1.1</address>\n";
+    oss2 << "  <identifier>192.168.1.1</identifier>\n";
+    oss2 << "  <autonomous-system>64512</autonomous-system>\n";
+    oss2 << "</bgp-router>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss2 << "<virtual-network name=\"red-vn" << idx << "\">\n";
+        oss2 << "  <network-id>" << idx << "</network-id>\n";
+        oss2 << "</virtual-network>\n";
+        oss2 << "<routing-instance name=\"red" << idx << "\">\n";
+        oss2 << "  <routing-instance-has-pnf>true</routing-instance-has-pnf>\n";
+        oss2 << "  <virtual-network>red-vn" << idx << "</virtual-network>\n";
+        oss2 << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss2 << "  <vrf-target>target:2:" << idx << "</vrf-target>\n";
+        oss2 << "</routing-instance>\n";
+    }
+    oss2 << "</config>\n";
+
+    content = oss2.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    TASK_UTIL_EXPECT_EQ(kInstanceCount + 1, mgr->count());
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string name = "red" + integerToString(idx);
+        TASK_UTIL_EXPECT_TRUE(mgr->GetRoutingInstance(name) != NULL);
+        RoutingInstance *rtinstance = mgr->GetRoutingInstance(name);
+        TASK_UTIL_EXPECT_TRUE(rtinstance->always_subscribe());
+        TASK_UTIL_EXPECT_EQ(idx, rtinstance->virtual_network_index());
+        TASK_UTIL_EXPECT_EQ(2, rtinstance->GetImportList().size());
+        TASK_UTIL_EXPECT_EQ(2, rtinstance->GetExportList().size());
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+    TASK_UTIL_EXPECT_EQ(1, mgr->count());
+}
+
+//
 // The per session address-families config should be used if present.
 //
 TEST_F(BgpConfigTest, AddressFamilies1) {
@@ -2175,6 +3234,76 @@ TEST_F(BgpConfigTest, RoutePolicy_9) {
     EXPECT_TRUE(parser_.Parse(content_a));
     task_util::WaitForIdle();
 
+    TASK_UTIL_EXPECT_EQ(0, db_graph_.vertex_count());
+}
+
+
+TEST_F(BgpConfigTest, BgpRouterGracefulRestartTimeChange) {
+    string content_a =
+        FileRead("controller/src/bgp/testdata/config_test_gr_a.xml");
+    EXPECT_TRUE(parser_.Parse(content_a));
+    task_util::WaitForIdle();
+
+    RoutingInstance *rti = server_.routing_instance_mgr()->GetRoutingInstance(
+        BgpConfigManager::kMasterInstance);
+    TASK_UTIL_ASSERT_TRUE(rti != NULL);
+    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager()->size());
+    string name = rti->name() + ":" + "remote";
+
+    TASK_UTIL_EXPECT_EQ(0, server_.GetGracefulRestartTime());
+
+    // Graceful Restart time should change to 100.
+    string content_b =
+        FileRead("controller/src/bgp/testdata/config_test_gr_b.xml");
+    EXPECT_TRUE(parser_.Parse(content_b));
+    TASK_UTIL_EXPECT_EQ(100, server_.GetGracefulRestartTime());
+
+    // GracefulRestart time should change to 200.
+    string content_c =
+        FileRead("controller/src/bgp/testdata/config_test_gr_c.xml");
+    EXPECT_TRUE(parser_.Parse(content_c));
+
+    boost::replace_all(content_c, "<config>", "<delete>");
+    boost::replace_all(content_c, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content_c));
+    task_util::WaitForIdle();
+
+    TASK_UTIL_EXPECT_EQ(0, db_graph_.edge_count());
+    TASK_UTIL_EXPECT_EQ(0, db_graph_.vertex_count());
+}
+
+TEST_F(BgpConfigTest, BgpRouterLongLivedGracefulRestartTimeChange) {
+    string content_a =
+        FileRead("controller/src/bgp/testdata/config_test_llgr_a.xml");
+    EXPECT_TRUE(parser_.Parse(content_a));
+    task_util::WaitForIdle();
+
+    RoutingInstance *rti = server_.routing_instance_mgr()->GetRoutingInstance(
+        BgpConfigManager::kMasterInstance);
+    TASK_UTIL_ASSERT_TRUE(rti != NULL);
+    TASK_UTIL_EXPECT_EQ(1, rti->peer_manager()->size());
+    string name = rti->name() + ":" + "remote";
+
+    TASK_UTIL_EXPECT_EQ(0, server_.GetLongLivedGracefulRestartTime());
+
+    // Long Lived Graceful Restart time should change to 100.
+    string content_b =
+        FileRead("controller/src/bgp/testdata/config_test_llgr_b.xml");
+    EXPECT_TRUE(parser_.Parse(content_b));
+    TASK_UTIL_EXPECT_EQ(100, server_.GetLongLivedGracefulRestartTime());
+
+    // LongLivedGracefulRestart time should change to 200.
+    string content_c =
+        FileRead("controller/src/bgp/testdata/config_test_llgr_c.xml");
+    EXPECT_TRUE(parser_.Parse(content_c));
+    TASK_UTIL_EXPECT_EQ(200, server_.GetLongLivedGracefulRestartTime());
+
+    boost::replace_all(content_c, "<config>", "<delete>");
+    boost::replace_all(content_c, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content_c));
+    task_util::WaitForIdle();
+
+    TASK_UTIL_EXPECT_EQ(0, db_graph_.edge_count());
     TASK_UTIL_EXPECT_EQ(0, db_graph_.vertex_count());
 }
 

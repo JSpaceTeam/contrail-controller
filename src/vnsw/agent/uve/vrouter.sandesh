@@ -12,6 +12,8 @@
  */
 include "base/sandesh/cpuinfo.sandesh"
 include "base/sandesh/process_info.sandesh"
+include "sandesh/library/common/derived_stats_results.sandesh"
+include "vnsw/agent/oper/agent.sandesh"
 
 /**
  * Sandesh definition for agent's xen server config
@@ -122,6 +124,7 @@ struct VrouterAgent {  // Agent info
    49: optional list<string> unmanaged_if_list;
    50: optional u32 vn_count; //being sent for UI dashboard optimization
    51: optional string platform;
+   52: optional agent.VrouterObjectLimits vr_limits;
 }
 
 /**
@@ -130,58 +133,6 @@ struct VrouterAgent {  // Agent info
  */
 uve sandesh UveVrouterAgent {
     1: VrouterAgent data;
-}
-
-/**
- * Sandesh definition for agent drop stats
- */
-struct AgentDropStats {
-    1:  u64   ds_discard;
-    2:  u64   ds_pull;
-    3:  u64   ds_invalid_if;
-    5:  u64   ds_garp_from_vm;
-    6:  u64   ds_invalid_arp;
-    7:  u64   ds_trap_no_if;
-    8:  u64   ds_nowhere_to_go;
-    9:  u64   ds_flow_queue_limit_exceeded;
-    10: u64   ds_flow_no_memory;
-    11: u64   ds_flow_invalid_protocol;
-    12: u64   ds_flow_nat_no_rflow;
-    13: u64   ds_flow_action_drop;
-    14: u64   ds_flow_action_invalid;
-    15: u64   ds_flow_unusable;
-    16: u64   ds_flow_table_full;
-    17: u64   ds_interface_tx_discard;
-    18: u64   ds_interface_drop;
-    19: u64   ds_duplicated;
-    20: u64   ds_push;
-    21: u64   ds_ttl_exceeded;
-    22: u64   ds_invalid_nh;
-    23: u64   ds_invalid_label;
-    24: u64   ds_invalid_protocol;
-    25: u64   ds_interface_rx_discard;
-    26: u64   ds_invalid_mcast_source;
-    27: u64   ds_head_alloc_fail;
-    28: u64   ds_head_space_reserve_fail;
-    29: u64   ds_pcow_fail;
-    30: u64   ds_flood;
-    31: u64   ds_mcast_clone_fail;
-    32: u64   ds_composite_invalid_interface;
-    33: u64   ds_rewrite_fail;
-    34: u64   ds_misc;
-    35: u64   ds_invalid_packet;
-    36: u64   ds_cksum_err;
-    37: u64   ds_clone_fail;
-    38: u64   ds_no_fmd;
-    39: u64   ds_cloned_original;
-    40: u64   ds_invalid_vnid;
-    41: u64   ds_frag_err;
-    42: u64   ds_invalid_source;
-    43: u64   ds_mcast_df_bit;
-    44: u64   ds_arp_no_where_to_go;
-    45: u64   ds_arp_no_route;
-    46: u64   ds_l2_no_route;
-    47: u64   ds_arp_reply_no_route;
 }
 
 /**
@@ -261,6 +212,9 @@ struct VrouterStatsAgent {  // Agent stats
     22: optional u64 aged_flows; 
     23: optional u64 aged_flows_dp; 
     24: optional u64 active_flows_dp; 
+    47: optional u64 flow_export_disable_drops; /* Number of flow samples dropped because of disable of flow exports */ 
+    48: optional u64 flow_export_sampling_drops; /* Number of flow samples dropped after subjecting them to sampling algorithm */
+    49: optional u64 flow_export_drops; /* Number of flows which are never exported */
 
         //Dataplane stats
     25: optional u64 in_kernel_ipc_msgs; 
@@ -274,16 +228,22 @@ struct VrouterStatsAgent {  // Agent stats
     33: optional list<AgentIfStats> phy_if_stats_list;
     34: optional AgentIfStats vhost_stats;
     36: optional list<AgentIfBandwidth> phy_if_5min_usage; 
-    37: optional list<AgentIfBandwidth> phy_if_10min_usage; 
     38: optional list<u32>   udp_sport_bitmap;
     39: optional list<u32>   udp_dport_bitmap;
     40: optional list<u32>   tcp_sport_bitmap;
     41: optional list<u32>   tcp_dport_bitmap;
-    42: optional AgentDropStats drop_stats;
     43: optional double total_in_bandwidth_utilization;
     44: optional double total_out_bandwidth_utilization;
+    /** @display_name:Vrouter Flow Setup Statistics*/
     45: optional VrouterFlowRate flow_rate (tags="")
-    46: optional list<AgentIfBandwidth> phy_if_band (tags="name:.name")
+    /** @display_name:Vrouter Physical Interface Input bandwidth Statistics*/
+    50: optional map<string,u64> phy_band_in_bps  (tags="name:.__key")
+    /** @display_name:Vrouter Physical Interface Output bandwidth Statistics*/
+    51: optional map<string,u64> phy_band_out_bps (tags="name:.__key")
+    52: optional map<string,derived_stats_results.EWMResult> in_bps_ewm (mstats="phy_band_in_bps:DSEWM:0.2")
+    53: optional map<string,derived_stats_results.EWMResult> out_bps_ewm (mstats="phy_band_out_bps:DSEWM:0.2")
+    54: optional derived_stats_results.CategoryResult drop_stats_agg (hidden="yes")
+    55: optional derived_stats_results.CategoryResult drop_stats_diff (stats="drop_stats_agg:DSCategoryCount:", tags="")
 }
 
 /**
@@ -310,6 +270,7 @@ struct VrouterCpuInfo {
 struct ComputeCpuState {
     1: string                         name (key="ObjectVRouter")
     2: optional bool                  deleted
+    /** @display_name:Compute CPU Information*/
     3: optional list<VrouterCpuInfo>  cpu_info (tags=".mem_virt,.cpu_share,.mem_res", aggtype="union")
 }
 
@@ -320,27 +281,3 @@ struct ComputeCpuState {
 uve sandesh ComputeCpuStateTrace {
     1: ComputeCpuState data
 }
-
-/**
- * Sandesh definition for compute node
- */
-struct NodeStatus {
-    1: string name (key="ObjectVRouter")
-    2: optional bool deleted
-    3: optional string status
-    // Sent by process
-    4: optional list<process_info.ProcessStatus> process_status (aggtype="union")
-    // Sent by node manager
-    5: optional list<process_info.ProcessInfo> process_info (aggtype="union")
-    6: optional list<process_info.DiskPartitionUsageStats> disk_usage_info (tags="")
-    7: optional string description
-    8: optional list<string> all_core_file_list
-}
-
-/**
- * Compute node uve
- */
-uve sandesh NodeStatusUVE {
-    1: NodeStatus data
-}
-

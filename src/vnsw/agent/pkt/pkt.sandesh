@@ -45,26 +45,24 @@ struct FlowAclInfo {
  */
 struct SandeshFlowIndexTrace {
     1: i64 timestamp;
-    2: i32 index;
-    3: i32 flow_handle;
-    4: string state;
-    5: string event;
-    6: bool skip_delete;
-    7: bool delete_in_progress;
-    8: bool vrouter_flow_handle;
+    2: u32 flow_handle;
+    3: u16 flow_gen_id;
+    4: string event;
+    5: u32 ksync_hash_id;
+    6: u16 ksync_gen_id;
+    7: u32 vrouter_flow_handle;
+    8: u16 vrouter_gen_id;
 }
 
 struct SandeshFlowIndexInfo {
-    1: i32 index;
-    2: string state;
-    3: bool delete_in_progress;
-    4: i32 trace_count;
-    5: list<SandeshFlowIndexTrace> flow_index_trace;
+    1: i32 trace_index;
+    2: list<SandeshFlowIndexTrace> flow_index_trace;
 }
 /**
  * Sandesh definition for flow
  */
 struct SandeshFlowData {
+    61: u16 gen_id;
     16: i32 flow_handle;
     39: i32 nh;
     2: string sip;
@@ -223,6 +221,7 @@ trace sandesh PktErr {
  * Sandesh definition for flow
  */
 struct FlowInfo {
+    45: u16 gen_id;
     1: u32 flow_index;
    30: u16 nh_id;
     2: ipv4 source_ip;
@@ -265,6 +264,7 @@ struct FlowInfo {
    38: optional u64 dip_lower;
    43: string drop_reason;
    44: u16 table_id;
+   46: string short_flow_reason;
 }
 
 /**
@@ -352,6 +352,17 @@ trace sandesh PktFlowErr {
 }
 
 /**
+ * @description: Trace message for flow route table listener
+ * @severity: DEBUG
+ */
+traceobject sandesh FlowRouteTableListener {
+   1: string message;
+   2: string vrf;
+   3: string route_table;
+   4: u32 listener_id;
+}
+
+/**
  * @description: Trace message for flow route update
  * @severity: DEBUG
  */
@@ -372,8 +383,6 @@ traceobject sandesh FlowRouteUpdate {
 response sandesh FlowAgeTimeResp {
    1: u32 old_age_time;
    2: u32 new_age_time;
-   3: u32 old_tcp_age_time;
-   4: u32 new_tcp_age_time;
 }
 
 /**
@@ -405,4 +414,95 @@ request sandesh NextFlowStatsRecordsSet {
 response sandesh FlowStatsCollectorRecordsResp {
     1: list<SandeshFlowData> flow_list;
     2: string flow_key (link="NextFlowStatsRecordsSet");
+}
+
+/**
+ * Request message to get summary of flow tables
+ */
+request sandesh SandeshFlowTableInfoRequest{
+}
+
+/**
+ * Sandesh definition for every flow-table
+ */
+struct SandeshFlowTableInfo {
+    1: u32 index;
+    2: u32 count;
+    3: u64 total_add;
+    4: u64 total_del;
+    5: u64 freelist_count;
+}
+
+/**
+ * Response message for flow tables
+ */
+response sandesh SandeshFlowTableInfoResp {
+    1: u64 flow_count;
+    2: u64 total_added;
+    3: u64 total_deleted;
+    4: u64 max_flows;
+    5: list<SandeshFlowTableInfo> table_list;
+}
+
+/**
+ * Request message to set filters for IPv4 Flow logging
+ */
+request sandesh SandeshIPv4FlowFilterRequest {
+    1: bool enabled;
+    2: string src_address;
+    3: u16 src_prefix_len;
+    4: string dst_address;
+    5: u16 dst_prefix_len;
+    6: u16 proto_start;
+    7: u16 proto_end;
+    8: u16 src_port_start;
+    9: u16 src_port_end;
+   10: u16 dst_port_start;
+   11: u16 dst_port_end;
+}
+
+/**
+ * Request message to set filters for IPv6 Flow logging
+ */
+request sandesh SandeshIPv6FlowFilterRequest {
+    1: bool enabled;
+    2: string src_address;
+    3: u16 src_prefix_len;
+    4: string dst_address;
+    5: u16 dst_prefix_len;
+    6: u16 proto_start;
+    7: u16 proto_end;
+    8: u16 src_port_start;
+    9: u16 src_port_end;
+   10: u16 dst_port_start;
+   11: u16 dst_port_end;
+}
+
+/**
+ * Request message to show flow logging filters
+ */
+request sandesh SandeshShowFlowFilterRequest {
+}
+
+/**
+ * Response message showing flow logging filters
+ */
+struct SandeshFlowFilterInfo {
+    1: bool enabled;
+    2: string src_address;
+    3: string src_mask;
+    4: string dst_address;
+    5: string dst_mask;
+    6: u16 proto_start;
+    7: u16 proto_end;
+    8: u16 src_port_start;
+    9: u16 src_port_end;
+   10: u16 dst_port_start;
+   11: u16 dst_port_end;
+   12: u64 flow_hit;
+}
+
+response sandesh SandeshFlowFilterResponse {
+    1: SandeshFlowFilterInfo ipv4_filter;
+    2: SandeshFlowFilterInfo ipv6_filter;
 }

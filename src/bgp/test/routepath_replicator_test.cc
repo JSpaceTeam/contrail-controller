@@ -18,6 +18,7 @@
 #include "bgp/test/bgp_test_util.h"
 #include "control-node/control_node.h"
 #include "db/test/db_test_util.h"
+#include "db/db_table_walk_mgr.h"
 #include "ifmap/ifmap_link_table.h"
 #include "ifmap/ifmap_server_parser.h"
 #include "ifmap/test/ifmap_test_util.h"
@@ -44,6 +45,7 @@ public:
     virtual BgpServer *server() {
         return NULL;
     }
+    virtual BgpServer *server() const { return NULL; }
     virtual IPeerClose *peer_close() {
         return NULL;
     }
@@ -57,8 +59,7 @@ public:
         return true;
     }
     virtual bool IsXmppPeer() const { return false; }
-    virtual void Close() {
-    }
+    virtual void Close(bool non_graceful) { }
     BgpProto::BgpPeerType PeerType() const {
         return BgpProto::IBGP;
     }
@@ -68,14 +69,15 @@ public:
     virtual const std::string GetStateName() const {
         return "";
     }
-    virtual void UpdateRefCount(int count) const { }
-    virtual tbb::atomic<int> GetRefCount() const {
-        tbb::atomic<int> count;
-        count = 0;
-        return count;
-    }
+    virtual void UpdateTotalPathCount(int count) const { }
+    virtual int GetTotalPathCount() const { return 0; }
     virtual void UpdatePrimaryPathCount(int count) const { }
     virtual int GetPrimaryPathCount() const { return 0; }
+    virtual bool IsRegistrationRequired() const { return true; }
+    virtual void MembershipRequestCallback(BgpTable *table) { }
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+        BgpRoute *route, BgpPath *path) { return false; }
+    virtual bool CanUseMembershipManager() const { return true; }
 
 private:
     Ip4Address address_;
@@ -96,7 +98,9 @@ static const char *bgp_server_config = "\
 
 class ReplicationTest : public ::testing::Test {
 protected:
-    ReplicationTest() : bgp_server_(new BgpServer(&evm_)) {
+    ReplicationTest()
+      : config_db_(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable")),
+        bgp_server_(new BgpServer(&evm_)) {
         IFMapLinkTable_Init(&config_db_, &config_graph_);
         vnc_cfg_Server_ModuleInit(&config_db_, &config_graph_);
         bgp_schema_Server_ModuleInit(&config_db_, &config_graph_);
@@ -378,6 +382,14 @@ protected:
         return NULL;
     }
 
+    string GetInstanceRD(const string &instance) {
+        TASK_UTIL_EXPECT_NE(static_cast<RoutingInstance *>(NULL),
+            bgp_server_->routing_instance_mgr()->GetRoutingInstance(instance));
+        const RoutingInstance *rti =
+            bgp_server_->routing_instance_mgr()->GetRoutingInstance(instance);
+        return rti->GetRD()->ToString();
+    }
+
     vector<string> GetInstanceRouteTargetList(const string &instance,
         bool import = false) {
         TASK_UTIL_EXPECT_NE(static_cast<RoutingInstance *>(NULL),
@@ -519,15 +531,13 @@ protected:
     }
 
     void DisableBulkSync() {
-        RoutePathReplicator *replicator =
-            bgp_server_->replicator(Address::INETVPN);
-        replicator->walk_trigger_->set_disable();
+        DBTableWalkMgr *walk_mgr = bgp_server_->database()->GetWalkMgr();
+        walk_mgr->DisableWalkProcessing();
     }
 
     void EnableBulkSync() {
-        RoutePathReplicator *replicator =
-            bgp_server_->replicator(Address::INETVPN);
-        replicator->walk_trigger_->set_enable();
+        DBTableWalkMgr *walk_mgr = bgp_server_->database()->GetWalkMgr();
+        walk_mgr->EnableWalkProcessing();
     }
 
     EventManager evm_;
@@ -619,6 +629,35 @@ TEST_F(ReplicationTest, NoExtCommunities) {
     BgpRoute *rt = VPNRouteLookup("192.168.0.1:1:10.0.1.1/32");
     VERIFY_EQ(1, rt->count());
     VERIFY_EQ(0, RouteCount("blue"));
+
+    DeleteVPNRoute(peers_[0], "192.168.0.1:1:10.0.1.1/32");
+    task_util::WaitForIdle();
+    VERIFY_EQ(0, RouteCount("blue"));
+    VERIFY_EQ(0, RouteCount("red"));
+}
+
+//
+// Verify that when route is replicated form vpn table, source RD attribute
+// is added to replicated route with RouteDistinguisher of the vpn prefix
+//
+TEST_F(ReplicationTest, SourceRD) {
+    vector<string> instance_names = list_of("blue")("red")("green");
+    multimap<string, string> connections = map_list_of("blue", "red");
+    NetworkConfig(instance_names, connections);
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+
+    // VPN route with target "blue".
+    AddVPNRoute(peers_[0], "192.168.0.1:1:10.0.1.1/32", 100, list_of("blue"));
+    task_util::WaitForIdle();
+    VERIFY_EQ(1, RouteCount("blue"));
+
+    BgpRoute *rt = InetRouteLookup("blue", "10.0.1.1/32");
+    TASK_UTIL_EXPECT_TRUE(RouteDistinguisher::FromString("192.168.0.1:1") ==
+              rt->BestPath()->GetAttr()->source_rd());
 
     DeleteVPNRoute(peers_[0], "192.168.0.1:1:10.0.1.1/32");
     task_util::WaitForIdle();
@@ -944,7 +983,8 @@ TEST_F(ReplicationTest, ResurrectInetRoute) {
         new BgpPeerMock(Ip4Address::from_string("192.168.0.2", ec)));
 
     // VPN route with same RD as exported inet route
-    AddVPNRoute(peers_[0], "192.168.0.100:1:10.0.1.1/32", 80, list_of("blue"));
+    string vpn_prefix_str = GetInstanceRD("blue") + ":10.0.1.1/32";
+    AddVPNRoute(peers_[0], vpn_prefix_str, 80, list_of("blue"));
     task_util::WaitForIdle();
 
     // Imported in both blue and red.
@@ -957,10 +997,8 @@ TEST_F(ReplicationTest, ResurrectInetRoute) {
     ASSERT_TRUE(rt != NULL);
     VERIFY_EQ(peers_[1], rt->BestPath()->GetPeer());
 
-    //
-    // Update local-pref inorder to make the path ecmp eligible
-    //
-    AddVPNRoute(peers_[0], "192.168.0.100:1:10.0.1.1/32", 100, list_of("blue"));
+    // Update local-pref in order to make the path ecmp eligible
+    AddVPNRoute(peers_[0], vpn_prefix_str, 100, list_of("blue"));
 
     // Two paths.. One replicated from bgp.l3vpn.0 from peer[0]
     // other one from blue.inet.0 from peer[1]
@@ -973,7 +1011,7 @@ TEST_F(ReplicationTest, ResurrectInetRoute) {
     BgpRoute *rt_current = InetRouteLookup("blue", "10.0.1.1/32");
     VERIFY_EQ(peers_[0], rt_current->BestPath()->GetPeer());
 
-    DeleteVPNRoute(peers_[0], "192.168.0.100:1:10.0.1.1/32");
+    DeleteVPNRoute(peers_[0], vpn_prefix_str);
     task_util::WaitForIdle();
 
     VERIFY_EQ(0, RouteCount("blue"));
@@ -1057,28 +1095,27 @@ TEST_F(ReplicationTest, ResurrectVPNRoute) {
         new BgpPeerMock(Ip4Address::from_string("192.168.0.2", ec)));
 
     // VPN route with same RD as exported inet route
-    AddVPNRoute(peers_[0], "192.168.0.100:1:10.0.1.1/32", 100, list_of("blue"));
+    string vpn_prefix_str = GetInstanceRD("blue") + ":10.0.1.1/32";
+    AddVPNRoute(peers_[0], vpn_prefix_str, 100, list_of("blue"));
     task_util::WaitForIdle();
 
     // The inet route is secondary and thus should not be exported.
     AddInetRoute(peers_[1], "blue", "10.0.1.1/32", 80);
     task_util::WaitForIdle();
 
-    BgpRoute *rt_vpn = VPNRouteLookup("192.168.0.100:1:10.0.1.1/32");
+    BgpRoute *rt_vpn = VPNRouteLookup(vpn_prefix_str);
     VERIFY_EQ(1, rt_vpn->count());
     VERIFY_EQ(peers_[0], rt_vpn->BestPath()->GetPeer());
 
-    //
     // Update local-pref so that the path becomes ecmp eligible
-    //
     AddInetRoute(peers_[1], "blue", "10.0.1.1/32", 100);
     VERIFY_EQ(2, rt_vpn->count());
 
     // Delete the VPN route. This causes the inet route to be exported to
     // the l3vpn table.
-    DeleteVPNRoute(peers_[0], "192.168.0.100:1:10.0.1.1/32");
+    DeleteVPNRoute(peers_[0], vpn_prefix_str);
     task_util::WaitForIdle();
-    rt_vpn = VPNRouteLookup("192.168.0.100:1:10.0.1.1/32");
+    rt_vpn = VPNRouteLookup(vpn_prefix_str);
     VERIFY_EQ(peers_[1], rt_vpn->BestPath()->GetPeer());
 
     // Delete the INET route

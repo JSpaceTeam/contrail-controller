@@ -77,6 +77,10 @@ static uint16_t GetDropReason(uint16_t dr) {
         return VR_FLOW_DR_FLOW_LIMIT;
     case FlowEntry::SHORT_LINKLOCAL_SRC_NAT:
         return VR_FLOW_DR_LINKLOCAL_SRC_NAT;
+    case FlowEntry::SHORT_NO_MIRROR_ENTRY:
+        return VR_FLOW_DR_NO_MIRROR_ENTRY;
+    case FlowEntry::SHORT_SAME_FLOW_RFLOW_KEY:
+        return VR_FLOW_DR_SAME_FLOW_RFLOW_KEY;
     case FlowEntry::DROP_POLICY:
         return VR_FLOW_DR_POLICY;
     case FlowEntry::DROP_OUT_POLICY:
@@ -114,6 +118,9 @@ void FlowTableKSyncEntry::Reset() {
     KSyncEntry::Reset();
     flow_entry_ = NULL;
     hash_id_ = FlowEntry::kInvalidFlowHandle;
+    gen_id_ = 0;
+    evict_gen_id_ = 0;
+    vrouter_gen_id_ = 0;
     old_reverse_flow_id_ = FlowEntry::kInvalidFlowHandle;
     old_action_ = 0;
     old_component_nh_idx_ = 0xFFFF;
@@ -123,15 +130,25 @@ void FlowTableKSyncEntry::Reset() {
     old_drop_reason_ = 0;
     ecmp_ = false;
     src_nh_id_ = NextHopTable::kRpfDiscardIndex;
+    last_event_ = FlowEvent::INVALID;
+    token_.reset();
+    ksync_response_info_.Reset();
+    qos_config_idx = AgentQosConfigTable::kInvalidIndex;
 }
 
 void FlowTableKSyncEntry::Reset(FlowEntry *flow, uint32_t hash_id) {
     flow_entry_ = flow;
     hash_id_ = hash_id;
+    gen_id_ = flow->gen_id();
 }
 
 KSyncObject *FlowTableKSyncEntry::GetObject() {
     return ksync_obj_;
+}
+
+void FlowTableKSyncEntry::ReleaseToken() {
+    if (token_.get())
+        token_.reset();
 }
 
 void FlowTableKSyncEntry::SetPcapData(FlowEntryPtr fe, 
@@ -177,9 +194,21 @@ int FlowTableKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
     uint16_t action = 0;
     uint16_t drop_reason = VR_FLOW_DR_UNKNOWN;
 
+    // currently vrouter doesnot guarantee gen id to always start from 0
+    // on vrouter-agent restart
+    // TODO(prabhjot) need to move last gen id seen by vrouter in KSync
+    // Index Manager
+    if (gen_id_ != evict_gen_id_) {
+        // skip sending update to vrouter for evicted entry
+        flow_entry_->LogFlow(FlowEventLog::FLOW_MSG_SKIP_EVICTED, this,
+                             hash_id_, evict_gen_id_);
+        return 0;
+    }
+
     req.set_fr_op(flow_op::FLOW_SET);
     req.set_fr_rid(0);
     req.set_fr_index(hash_id_);
+    req.set_fr_gen_id(gen_id_);
     const FlowKey *fe_key = &flow_entry_->key();
     req.set_fr_flow_ip(IpToVector(fe_key->src_addr, fe_key->dst_addr,
                                   flow_entry_->key().family));
@@ -199,11 +228,10 @@ int FlowTableKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
             return 0;
         }
 
-        if (flow_entry_->ksync_index_entry()->skip_delete() == true) {
-            return 0;
-        }
-
         req.set_fr_flags(0);
+        // Sync() is not called in case of delete. Copy the event to use
+        // the right token
+        last_event_ = (FlowEvent::Event)flow_entry_->last_event();
     } else {
         FlowEntry *rev_flow = flow_entry_->reverse_flow_entry();
         if (rev_flow &&
@@ -303,19 +331,24 @@ int FlowTableKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
             if (nat_flow->is_flags_set(FlowEntry::LinkLocalBindLocalSrcPort) ||
                 nat_flow->is_flags_set(FlowEntry::BgpRouterService)) {
                 flags |= VR_FLOW_FLAG_LINK_LOCAL;
+                if (nat_flow->is_flags_set(FlowEntry::BgpRouterService)) {
+                    flags |= VR_FLOW_BGP_SERVICE;
+                }
             }
 
+            flags |= VR_FLOW_FLAG_VRFT;
+            req.set_fr_flow_dvrf(flow_entry_->data().dest_vrf);
+        } else if (flow_entry_->is_flags_set(FlowEntry::AliasIpFlow)) {
             flags |= VR_FLOW_FLAG_VRFT;
             req.set_fr_flow_dvrf(flow_entry_->data().dest_vrf);
         }
 
         if (fe_action & (1 << TrafficAction::VRF_TRANSLATE)) {
             flags |= VR_FLOW_FLAG_VRFT;
-            req.set_fr_flow_dvrf(flow_entry_->acl_assigned_vrf_index());
+            req.set_fr_flow_dvrf(flow_entry_->data().dest_vrf);
         }
 
         if (flow_entry_->is_flags_set(FlowEntry::Trap)) {
-            flags |= VR_FLOW_FLAG_TRAP_ECMP;
             action = VR_FLOW_ACTION_HOLD;
         }
 
@@ -335,8 +368,11 @@ int FlowTableKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
         req.set_fr_flags(flags);
         req.set_fr_action(action);
         req.set_fr_drop_reason(drop_reason);
+        req.set_fr_qos_id(qos_config_idx);
     }
 
+    FlowProto *proto = ksync_obj_->ksync()->agent()->pkt()->get_flow_proto();
+    token_ = proto->GetToken(last_event_);
     encode_len = req.WriteBinary((uint8_t *)buf, buf_len, &error);
     return encode_len;
 }
@@ -344,6 +380,7 @@ int FlowTableKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
 bool FlowTableKSyncEntry::Sync() {
     bool changed = false;
     
+    last_event_ = (FlowEvent::Event)flow_entry_->last_event();
     FlowEntry *rev_flow = flow_entry_->reverse_flow_entry();   
     if (rev_flow) {
         if (old_reverse_flow_id_ != rev_flow->flow_handle()) {
@@ -366,20 +403,33 @@ bool FlowTableKSyncEntry::Sync() {
         changed = true;
     }
 
+    if (vrouter_gen_id_ != gen_id_) {
+        vrouter_gen_id_ = gen_id_;
+        changed = true;
+    }
+
     MirrorKSyncObject* obj = ksync_obj_->ksync()->mirror_ksync_obj();
     // Lookup for fist and second mirror entries
     std::vector<MirrorActionSpec>::const_iterator it;
     it = flow_entry_->match_p().action_info.mirror_l.begin();
-    if (it != flow_entry_->match_p().action_info.mirror_l.end()) { 
+    if (it != flow_entry_->match_p().action_info.mirror_l.end()) {
         uint16_t idx = obj->GetIdx((*it).analyzer_name);
-        if (old_first_mirror_index_ != idx) {
+        if (!((*it).analyzer_name.empty()) &&
+            (idx == MirrorTable::kInvalidIndex)) {
+            // runn timer to update flow entry
+            ksync_obj_->UpdateUnresolvedFlowEntry(flow_entry_);
+        } else if (old_first_mirror_index_ != idx) {
             old_first_mirror_index_ = idx;
             changed = true;
         }
         ++it;
         if (it != flow_entry_->match_p().action_info.mirror_l.end()) {
             idx = obj->GetIdx((*it).analyzer_name);
-            if (old_second_mirror_index_ != idx) {
+            if (!((*it).analyzer_name.empty()) && 
+                (idx == MirrorTable::kInvalidIndex)) {
+                // run time and to update  flow entry;
+                ksync_obj_->UpdateUnresolvedFlowEntry(flow_entry_);
+            } else if (old_second_mirror_index_ != idx) {
                 old_second_mirror_index_ = idx;
                 changed = true;
             }
@@ -408,6 +458,11 @@ bool FlowTableKSyncEntry::Sync() {
     }
     if (src_nh_id_ != nh_id) {
         src_nh_id_ = nh_id;
+        changed = true;
+    }
+
+    if (qos_config_idx != flow_entry_->data().qos_config_idx) {
+        qos_config_idx = flow_entry_->data().qos_config_idx;
         changed = true;
     }
 
@@ -461,18 +516,19 @@ bool FlowTableKSyncEntry::IsLess(const KSyncEntry &rhs) const {
     return flow_entry_ < entry.flow_entry_;
 }
 
-void FlowTableKSyncEntry::ErrorHandler(int err, uint32_t seq_no) const {
+void FlowTableKSyncEntry::ErrorHandler(int err, uint32_t seq_no,
+                                       KSyncEvent event) const {
     if (err == ENOSPC || err == EBADF) {
         KSYNC_ERROR(VRouterError, "VRouter operation failed. Error <", err,
                     ":", VrouterError(err), ">. Object <", ToString(),
-                    ">. Operation <", OperationString(), ">. Message number :",
-                    seq_no);
+                    ">. Operation <", AckOperationString(event),
+                    ">. Message number :", seq_no);
         return;
     }
     if (err == EINVAL && IgnoreVrouterError()) {
         return;
     }
-    KSyncEntry::ErrorHandler(err, seq_no);
+    KSyncEntry::ErrorHandler(err, seq_no, event);
 }
 
 bool FlowTableKSyncEntry::IgnoreVrouterError() const {
@@ -484,14 +540,65 @@ bool FlowTableKSyncEntry::IgnoreVrouterError() const {
 
 std::string FlowTableKSyncEntry::VrouterError(uint32_t error) const {
     if (error == EBADF)
-        return "Flow Key Mismatch";
+        return "Flow gen id Mismatch";
     else if (error == ENOSPC)
         return "Flow Table bucket full";
+    else if (error == EFAULT)
+        return "Flow Key Mismatch with same gen id";
     else return KSyncEntry::VrouterError(error);
 }
 
-FlowTableKSyncObject::FlowTableKSyncObject(KSync *ksync) : 
-    KSyncObject("KSync FlowTable"), ksync_(ksync), free_list_(this) {
+void FlowTableKSyncObject::UpdateUnresolvedFlowEntry(FlowEntryPtr flowptr) {
+    FlowEntry *flow_entry = flowptr.get();
+    if (!flow_entry->IsShortFlow() && !flow_entry->IsOnUnresolvedList()) {
+        unresolved_flow_list_.push_back(flow_entry);
+        flow_entry->SetUnResolvedList(true);
+        StartTimer();
+    }
+}
+/*
+ * timer will be triggred once after adding unresolved entry.
+ *  will be stoped once after list becomes empty.
+ */
+void FlowTableKSyncObject::StartTimer() {
+    if (timer_ == NULL) {
+        timer_ = TimerManager::CreateTimer(
+                *(ksync_->agent()->event_manager())->io_service(),
+                "flow dep sync timer",
+                 ksync_->agent()->task_scheduler()->GetTaskId(kTaskFlowEvent),
+                 flow_table()->table_index());
+    }
+    timer_->Start(kFlowDepSyncTimeout,
+                  boost::bind(&FlowTableKSyncObject::TimerExpiry, this));
+}
+
+/*
+ * This fuction will be triggred on 1 sec delay
+ * if the entry marked deleted will not call the ksync update
+ * if the number attempts are more than 4 times will mark the flow as shortflow
+ */
+
+bool FlowTableKSyncObject::TimerExpiry() {
+    uint16_t count = 0;
+    while (!unresolved_flow_list_.empty() && count < KFlowUnresolvedListYield) {
+        FlowEntryPtr flow = unresolved_flow_list_.front();
+        FlowEntry *flow_entry = flow.get();
+        unresolved_flow_list_.pop_front();
+        flow_entry->SetUnResolvedList(false);
+        count++;
+        if (!flow_entry->deleted()) {
+            FlowProto *proto = ksync()->agent()->pkt()->get_flow_proto();
+            proto->EnqueueUnResolvedFlowEntry(flow.get());
+        }
+    }
+    if (!unresolved_flow_list_.empty())
+        return true;
+    return false;
+}
+
+FlowTableKSyncObject::FlowTableKSyncObject(KSync *ksync) :
+    KSyncObject("KSync FlowTable"), ksync_(ksync), free_list_(this),
+    timer_(NULL) {
 }
 
 FlowTableKSyncObject::FlowTableKSyncObject(KSync *ksync, int max_index) :
@@ -499,12 +606,7 @@ FlowTableKSyncObject::FlowTableKSyncObject(KSync *ksync, int max_index) :
 }
 
 FlowTableKSyncObject::~FlowTableKSyncObject() {
-}
-
-void FlowTableKSyncObject::PreFree(KSyncEntry *entry) {
-    FlowTableKSyncEntry *flow_ksync = static_cast<FlowTableKSyncEntry *>(entry);
-    FlowEntry *flow = flow_ksync->flow_entry().get();
-    ksync_->ksync_flow_index_manager()->Release(flow);
+    TimerManager::DeleteTimer(timer_);
 }
 
 KSyncEntry *FlowTableKSyncObject::Alloc(const KSyncEntry *key, uint32_t index) {
@@ -526,6 +628,10 @@ FlowTableKSyncEntry *FlowTableKSyncObject::Find(FlowEntry *key) {
 
 void FlowTableKSyncObject::UpdateKey(KSyncEntry *entry, uint32_t flow_handle) {
     static_cast<FlowTableKSyncEntry *>(entry)->set_hash_id(flow_handle);
+}
+
+uint32_t FlowTableKSyncObject::GetKey(KSyncEntry *entry) {
+    return static_cast<FlowTableKSyncEntry *>(entry)->hash_id();
 }
 
 void FlowTableKSyncObject::UpdateFlowHandle(FlowTableKSyncEntry *entry,
@@ -575,8 +681,6 @@ void KSyncFlowEntryFreeList::Grow() {
 }
 
 FlowTableKSyncEntry *KSyncFlowEntryFreeList::Allocate(const KSyncEntry *key) {
-    object_->flow_table()->ConcurrencyCheck();
-
     const FlowTableKSyncEntry *flow_key  =
         static_cast<const FlowTableKSyncEntry *>(key);
     FlowTableKSyncEntry *flow = NULL;
@@ -592,17 +696,17 @@ FlowTableKSyncEntry *KSyncFlowEntryFreeList::Allocate(const KSyncEntry *key) {
     if (grow_pending_ == false && free_list_.size() < kMinThreshold) {
         grow_pending_ = true;
         FlowProto *proto = object_->ksync()->agent()->pkt()->get_flow_proto();
-        proto->GrowFreeListRequest(flow_key->flow_entry()->key());
+        proto->GrowFreeListRequest(flow_key->flow_entry()->flow_table());
     }
 
     // Do post allocation initialization
     flow->Reset(flow_key->flow_entry().get(), flow_key->hash_id());
+    flow->set_evict_gen_id(flow_key->evict_gen_id_);
     total_alloc_++;
     return flow;
 }
 
 void KSyncFlowEntryFreeList::Free(FlowTableKSyncEntry *flow) {
-    object_->flow_table()->ConcurrencyCheck();
     total_free_++;
     flow->Reset();
     free_list_.push_back(*flow);
@@ -613,10 +717,18 @@ void FlowTableKSyncObject::GrowFreeList() {
     free_list_.Grow();
 }
 
+// We want to handle KSync transitions for flow from Flow task context.
+// KSync allows the NetlinkAck API to be over-ridden for custom handling.
+// Provide an implementation to enqueue an request
 void FlowTableKSyncObject::NetlinkAck(KSyncEntry *entry,
                                       KSyncEntry::KSyncEvent event) {
     FlowProto *proto = ksync()->agent()->pkt()->get_flow_proto();
-    proto->KSyncEventRequest(entry, event);
+    const FlowKSyncResponseInfo *resp =
+        static_cast<const FlowTableKSyncEntry *>(entry)->ksync_response_info();
+    proto->KSyncEventRequest(entry, event, resp->flow_handle_,
+                             resp->gen_id_, resp->ksync_error_,
+                             resp->evict_flow_bytes_, resp->evict_flow_packets_,
+                             resp->evict_flow_oflow_);
 }
 
 void FlowTableKSyncObject::GenerateKSyncEvent(FlowTableKSyncEntry *entry,

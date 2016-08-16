@@ -126,6 +126,60 @@ TEST_F(OvsBaseTest, PhysicalDeviceVnWithNullDevice) {
     WAIT_FOR(100, 10000, (VnGet(1) == NULL));
 }
 
+TEST_F(OvsBaseTest, LogicalSwitchUuidChange) {
+    DBRequest device_req(DBRequest::DB_ENTRY_ADD_CHANGE);
+    device_req.key.reset(new PhysicalDeviceKey(MakeUuid(1)));
+    device_req.data.reset(new PhysicalDeviceData(agent_, "test-router",
+                                                 "test-router", "",
+                                                 Ip4Address::from_string("1.1.1.1"),
+                                                 Ip4Address::from_string("2.2.2.2"),
+                                                 "OVS", NULL));
+    agent_->physical_device_table()->Enqueue(&device_req);
+    VrfAddReq("vrf1");
+    client->WaitForIdle();
+    VnAddReq(1, "vn1", "vrf1");
+    VnEntry *vn;
+    WAIT_FOR(100, 10000, ((vn = VnGet(1)) != NULL));
+    client->WaitForIdle();
+
+    VrfAddReq("vrf1", vn->GetUuid());
+    client->WaitForIdle();
+
+    AddPhysicalDeviceVn(agent_, 1, 1, true);
+    client->WaitForIdle();
+
+    VnAddReq(2, "vn1", "vrf1");
+    WAIT_FOR(100, 10000, ((vn = VnGet(2)) != NULL));
+    client->WaitForIdle();
+
+    AddPhysicalDeviceVn(agent_, 1, 2, true);
+    client->WaitForIdle();
+
+    VrfAddReq("vrf1", vn->GetUuid());
+    client->WaitForIdle();
+
+    DelPhysicalDeviceVn(agent_, 1, 1, true);
+    client->WaitForIdle();
+
+    VnDelReq(1);
+    client->WaitForIdle();
+
+    VrfDelReq("vrf1");
+    client->WaitForIdle();
+
+    DelPhysicalDeviceVn(agent_, 1, 2, true);
+    client->WaitForIdle();
+
+    VnDelReq(2);
+    client->WaitForIdle();
+
+    DBRequest del_dev_req(DBRequest::DB_ENTRY_DELETE);
+    del_dev_req.key.reset(new PhysicalDeviceVnKey(MakeUuid(1),
+                                                  MakeUuid(1)));
+    agent_->physical_device_table()->Enqueue(&del_dev_req);
+    client->WaitForIdle();
+}
+
 TEST_F(OvsBaseTest, PhysicalLocatorCreateWait) {
     DBRequest device_req(DBRequest::DB_ENTRY_ADD_CHANGE);
     device_req.key.reset(new PhysicalDeviceKey(MakeUuid(1)));
@@ -263,7 +317,11 @@ int main(int argc, char *argv[]) {
     // override with true to initialize ovsdb server and client
     ksync_init = true;
     client = OvsTestInit(init_file, ksync_init);
+    boost::system::error_code ec;
+    bgp_peer_ = CreateBgpPeer(Ip4Address::from_string("0.0.0.1", ec),
+                              "xmpp channel");
     int ret = RUN_ALL_TESTS();
+    DeleteBgpPeer(bgp_peer_);
     TestShutdown();
     return ret;
 }

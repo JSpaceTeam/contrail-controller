@@ -153,9 +153,13 @@ protected:
     void ClearStale(KSyncEntry *entry);
     // Big lock on the tree
     // TODO: Make this more fine granular
-    tbb::recursive_mutex  lock_;
+    mutable tbb::recursive_mutex  lock_;
     void ChangeKey(KSyncEntry *entry, uint32_t arg);
     virtual void UpdateKey(KSyncEntry *entry, uint32_t arg) { }
+
+    // derived class needs to implement GetKey,
+    // default impl will assert
+    virtual uint32_t GetKey(KSyncEntry *entry);
 
 private:
     friend class KSyncEntry;
@@ -211,7 +215,9 @@ public:
     enum DBFilterResp {
         DBFilterAccept,  // Accept DB Entry Add/Change for processing
         DBFilterIgnore,  // Ignore DB Entry Add/Change
-        DBFilterDelete  // Ignore DB Entry Add/Change and clear previous state
+        DBFilterDelete,  // Ignore DB Entry Add/Change and clear previous state
+        DBFilterDelAdd,  // Delete current ksync and add new one (key change)
+        DBFilterMax
     };
     // Create KSyncObject. DB Table will be registered later
     KSyncDBObject(const std::string &name);
@@ -294,24 +300,9 @@ private:
     static KSyncObjectManager *singleton_;
 };
 
-class KSyncDebug {
-public:
-    static void set_debug(bool debug) { debug_ = debug;}
-    static bool debug() { return debug_; }
-private:
-    static bool debug_;
-};
-
 #define KSYNC_TRACE(obj, parent, ...)\
 do {\
    KSync##obj::TraceMsg(parent->GetKSyncTraceBuf(), __FILE__, __LINE__, ##__VA_ARGS__);\
-} while (false);\
-
-#define KSYNC_ASSERT(cond)\
-do {\
-   if (KSyncDebug::debug() == true) {\
-       assert(cond);\
-   }\
 } while (false);\
 
 #endif // ctrlplane_ksync_object_h 

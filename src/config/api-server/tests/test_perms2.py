@@ -53,6 +53,9 @@ PERMS_RWX = 7
 # create users specified as array of tuples (name, password, role)
 # assumes admin user and tenant exists
 
+def normalize_uuid(id):
+    return id.replace('-','')
+
 class User(object):
    def __init__(self, apis_ip, apis_port, kc, name, password, role, project):
        self.name = name
@@ -128,7 +131,7 @@ def set_perms(obj, owner=None, owner_access=None, share=None, global_access=None
     try:
         perms = obj.get_perms2()
     except AttributeError:
-        logger.info( '*** Unable to set perms2 in object %s' % obj.get_fq_name())
+        logger.info( 'Unable to set perms2 in object %s' % obj.get_fq_name())
         sys.exit()
     logger.info( 'Current perms %s = %s' % (obj.get_fq_name(), print_perms(perms)))
 
@@ -149,11 +152,11 @@ def set_perms(obj, owner=None, owner_access=None, share=None, global_access=None
 # end set_perms
 
 # Read VNC object. Return None if object doesn't exists
-def vnc_read_obj(vnc, obj_type, name = None, obj_uuid = None):
+def vnc_read_obj(vnc, res_type, name = None, obj_uuid = None):
     if name is None and obj_uuid is None:
-        logger.info( 'Need FQN or UUID to read object')
+        logger.info('Need FQN or UUID to read object')
         return None
-    method_name = obj_type.replace('-', '_')
+    method_name = res_type.replace('-', '_')
     method = getattr(vnc, "%s_read" % (method_name))
     try:
         if obj_uuid:
@@ -163,10 +166,10 @@ def vnc_read_obj(vnc, obj_type, name = None, obj_uuid = None):
         else:
             return method(fq_name=name)
     except NoIdError:
-        logger.info( '%s %s not found!' % (obj_type, name if name else obj_uuid))
+        logger.info( '%s %s not found!' % (res_type, name if name else obj_uuid))
         return None
     except PermissionDenied:
-        logger.info( 'Permission denied reading %s %s' % (obj_type, name))
+        logger.info( 'Permission denied reading %s %s' % (res_type, name))
         raise
 # end
 
@@ -285,7 +288,7 @@ def token_from_user_info(user_name, tenant_name, domain_name, role_name,
         'X-Role': role_name,
     }
     rval = json.dumps(token_dict)
-    # logger.info( '**** Generate token %s ****' % rval)
+    # logger.info( 'Generate token %s' % rval)
     return rval
 
 class MyVncApi(VncApi):
@@ -420,7 +423,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         # bob - delete VN  ... should fail
         try:
             bob.vnc_lib.virtual_network_delete(fq_name = vn_fq_name)
-            self.assertTrue(False, '*** Bob Deleted VN ... test failed!')
+            self.assertTrue(False, 'Bob Deleted VN ... test failed!')
         except PermissionDenied as e:
             self.assertTrue(True, 'Error deleting VN ... test passed!')
 
@@ -429,7 +432,7 @@ class TestPermissions(test_case.ApiServerTestCase):
             alice.vnc_lib.virtual_network_delete(fq_name = vn_fq_name)
             self.assertTrue(True, 'Deleted VN ... test succeeded!')
         except PermissionDenied as e:
-            self.assertTrue(False, '*** Alice Error deleting VN ... test failed!')
+            self.assertTrue(False, 'Alice Error deleting VN ... test failed!')
     # end
 
     def test_delete_admin_role(self):
@@ -446,7 +449,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         # admin2 - delete VN  ... should fail
         try:
             self.admin2.vnc_lib.virtual_network_delete(fq_name = vn_fq_name)
-            self.assertTrue(False, '*** Deleted VN ... test failed!')
+            self.assertTrue(False, 'Deleted VN ... test failed!')
         except PermissionDenied as e:
             self.assertTrue(True, 'Error deleting VN ... test passed!')
 
@@ -455,7 +458,7 @@ class TestPermissions(test_case.ApiServerTestCase):
             self.admin1.vnc_lib.virtual_network_delete(fq_name = vn_fq_name)
             self.assertTrue(True, 'Deleted VN ... test succeeded!')
         except PermissionDenied as e:
-            self.assertTrue(False, '*** Error deleting VN ... test failed!')
+            self.assertTrue(False, 'Error deleting VN ... test failed!')
     # end
 
     # delete api-access-list for alice and bob and disallow api access to their projects
@@ -483,7 +486,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         vn = VirtualNetwork(self.vn_name, self.alice.project_obj)
         try:
             self.alice.vnc_lib.virtual_network_create(vn)
-            self.assertTrue(False, '*** Created virtual network ... test failed!')
+            self.assertTrue(False, 'Created virtual network ... test failed!')
         except PermissionDenied as e:
             self.assertTrue(True, 'Failed to create VN ... Test passes!')
 
@@ -512,7 +515,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         try:
             vn_fq_name = [self.domain_name, self.alice.project, self.vn_name]
             vn = vnc_read_obj(self.alice.vnc_lib, 'virtual-network', name = vn_fq_name)
-            self.assertTrue(False, '*** Read VN without read permission')
+            self.assertTrue(False, 'Read VN without read permission')
         except PermissionDenied as e:
             self.assertTrue(True, 'Unable to read VN ... test passed')
 
@@ -525,7 +528,7 @@ class TestPermissions(test_case.ApiServerTestCase):
             vn = vnc_read_obj(self.alice.vnc_lib, 'virtual-network', name = vn_fq_name)
             self.assertTrue(True, 'Read VN successfully ... test passed')
         except PermissionDenied as e:
-            self.assertTrue(False, '*** Read VN failed ... test failed!!!')
+            self.assertTrue(False, 'Read VN failed ... test failed!!!')
 
         logger.info('')
         logger.info( '########### API ACCESS (UPDATE) ##################')
@@ -533,7 +536,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         try:
             vn.display_name = "foobar"
             alice.vnc_lib.virtual_network_update(vn)
-            self.assertTrue(False, '*** Set field in VN ... test failed!')
+            self.assertTrue(False, 'Set field in VN ... test failed!')
             testfail += 1
         except PermissionDenied as e:
             self.assertTrue(True, 'Unable to update field in VN ... Test succeeded!')
@@ -550,7 +553,7 @@ class TestPermissions(test_case.ApiServerTestCase):
             alice.vnc_lib.virtual_network_update(vn)
             self.assertTrue(True, 'Set field in VN ... test passed!')
         except PermissionDenied as e:
-            self.assertTrue(False, '*** Failed to update field in VN ... Test failed!')
+            self.assertTrue(False, 'Failed to update field in VN ... Test failed!')
             testfail += 1
         if testfail > 0:
             sys.exit()
@@ -567,7 +570,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         try:
             vn.display_name = "alice"
             alice.vnc_lib.virtual_network_update(vn)
-            self.assertTrue(False, '*** Set field in VN  ... test failed!')
+            self.assertTrue(False, 'Set field in VN  ... test failed!')
         except PermissionDenied as e:
             self.assertTrue(True, 'Failed to update field in VN ... Test passed!')
 
@@ -579,7 +582,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         vn_fq_name = [self.domain_name, alice.project, self.vn_name]
         try:
             alice.vnc_lib.virtual_network_delete(fq_name = vn_fq_name)
-            self.assertTrue(False, '*** Deleted VN ... test failed!')
+            self.assertTrue(False, 'Deleted VN ... test failed!')
         except PermissionDenied as e:
             self.assertTrue(True, 'Error deleting VN ... test passed!')
 
@@ -596,7 +599,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         try:
             vn2 = VirtualNetwork('bob-vn-in-alice-project', alice.project_obj)
             bob.vnc_lib.virtual_network_create(vn2)
-            self.assertTrue(False, '*** Created virtual network ... test failed!')
+            self.assertTrue(False, 'Created virtual network ... test failed!')
         except PermissionDenied as e:
             self.assertTrue(True, 'Failed to create VN ... Test passed!')
 
@@ -611,7 +614,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         logger.info( 'Reading VN as bob ... should fail')
         try:
             net_obj = bob.vnc_lib.virtual_network_read(id=vn.get_uuid())
-            self.assertTrue(False, '*** Succeeded in reading VN. Test failed!')
+            self.assertTrue(False, 'Succeeded in reading VN. Test failed!')
         except PermissionDenied as e:
             self.assertTrue(True, 'Failed to read VN ... Test passed!')
 
@@ -624,7 +627,7 @@ class TestPermissions(test_case.ApiServerTestCase):
             net_obj = bob.vnc_lib.virtual_network_read(id=vn.get_uuid())
             self.assertTrue(True, 'Succeeded in reading VN. Test passed!')
         except PermissionDenied as e:
-            self.assertTrue(False, '*** Failed to read VN ... Test failed!')
+            self.assertTrue(False, 'Failed to read VN ... Test failed!')
 
         logger.info('')
         logger.info( '########### READ (DISABLE READ SHARING) ##################')
@@ -637,7 +640,7 @@ class TestPermissions(test_case.ApiServerTestCase):
             net_obj = bob.vnc_lib.virtual_network_read(id=vn.get_uuid())
             self.assertTrue(False, 'Succeeded in reading VN. Test failed!')
         except PermissionDenied as e:
-            self.assertTrue(True, '*** Failed to read VN ... Test passed!')
+            self.assertTrue(True, 'Failed to read VN ... Test passed!')
 
         logger.info('')
         logger.info( '########### READ (GLOBALLY SHARED) ##################')
@@ -650,14 +653,14 @@ class TestPermissions(test_case.ApiServerTestCase):
             net_obj = bob.vnc_lib.virtual_network_read(id=vn.get_uuid())
             self.assertTrue(True, 'Succeeded in reading VN. Test passed!')
         except PermissionDenied as e:
-            self.assertTrue(False, '*** Failed to read VN ... Test failed!')
+            self.assertTrue(False, 'Failed to read VN ... Test failed!')
 
         logger.info( '########### WRITE (GLOBALLY SHARED) ##################')
         logger.info( 'Writing shared VN as bob ... should fail')
         try:
             vn.display_name = "foobar"
             bob.vnc_lib.virtual_network_update(vn)
-            self.assertTrue(False, '*** Succeeded in updating VN. Test failed!!')
+            self.assertTrue(False, 'Succeeded in updating VN. Test failed!!')
         except PermissionDenied as e:
             self.assertTrue(True, 'Failed to update VN ... Test passed!')
 
@@ -686,6 +689,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         #        '*** Read VN collection without list permission ... test failed!')
         #except PermissionDenied as e:
         #    self.assertTrue(True, 'Failed to read VN collection ... test passed')
+
 
         # allow permission to read virtual-network collection
         #for user in [alice, bob]:
@@ -798,8 +802,204 @@ class TestPermissions(test_case.ApiServerTestCase):
             perms = user.check_perms(vn.get_uuid())
             self.assertEquals(perms, ExpectedPerms[user.name])
 
+    # check owner of internally created ri is cloud-admin (bug #1528796)
+    def test_ri_owner(self):
+        """
+        1) Create a virtual network as a non-admin user.
+        2) Verify owner of automatically created routing instance is cloud-admin
+        """
+
+        alice = self.alice
+        bob   = self.bob
+        admin = self.admin
+
+        # allow permission to create virtual-network
+        for user in self.users:
+            logger.info( "%s: project %s to allow full access to role %s" % \
+                (user.name, user.project, user.role))
+            # note that collection API is set for create operation
+            vnc_fix_api_access_list(self.admin.vnc_lib, user.project_obj,
+                rule_str = 'virtual-networks %s:CRUD' % user.role)
+
+        # Create VN as non-admin user
+        vn_fq_name = [self.domain_name, alice.project, self.vn_name]
+        vn = VirtualNetwork(self.vn_name, self.alice.project_obj)
+        self.alice.vnc_lib.virtual_network_create(vn)
+        vn_obj = vnc_read_obj(self.admin.vnc_lib, 'virtual-network', name = vn_fq_name)
+        self.assertNotEquals(vn_obj, None)
+
+        # Verify owner of automatically created routing instance is cloud-admin
+        ri_name = [self.domain_name, alice.project, self.vn_name, self.vn_name]
+        ri = vnc_read_obj(self.admin.vnc_lib, 'routing-instance', name = ri_name)
+        self.assertEquals(ri.get_perms2().owner, 'cloud-admin')
+
+    def test_chown_api(self):
+        """
+        1) Alice creates a VN in her project
+        2) Alice changes ownership of her VN to Bob
+        """
+
+        alice = self.alice
+        bob   = self.bob
+        admin = self.admin
+
+        logger.info( 'alice: create VN in her project')
+        vn_fq_name = [self.domain_name, alice.project, self.vn_name]
+        vn = VirtualNetwork(self.vn_name, self.alice.project_obj)
+        self.alice.vnc_lib.virtual_network_create(vn)
+
+        logger.info( "Verify Bob cannot chown Alice's virtual network")
+        self.assertRaises(PermissionDenied, bob.vnc_lib.chown, vn.get_uuid(), bob.project_uuid)
+
+        logger.info( 'Verify Alice can chown virtual network in her project to Bob')
+        alice.vnc_lib.chown(vn.get_uuid(), bob.project_uuid)
+        self.assertRaises(PermissionDenied, alice.vnc_lib.chown, vn.get_uuid(), alice.project_uuid)
+        bob.vnc_lib.chown(vn.get_uuid(), alice.project_uuid)
+
+        # negative test cases
+
+        # Version 4 UUIDs have the form xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+        # where x is any hexadecimal digit and y is one of 8, 9, A, or B.
+        invalid_uuid = '7a574f27-6934-4970-C767-b4996bd30f36'
+        valid_uuid_1 = '7a574f27-6934-4970-8767-b4996bd30f36'
+        valid_uuid_2 = '7a574f27693449708767b4996bd30f36'
+
+        with ExpectedException(BadRequest) as e:
+            alice.vnc_lib.chown(invalid_uuid, vn.get_uuid())
+        with ExpectedException(BadRequest) as e:
+            alice.vnc_lib.chown(vn.get_uuid(), owner=invalid_uuid)
+
+        # test valid UUID formats
+        alice.vnc_lib.chown(vn.get_uuid(), valid_uuid_1)
+        admin.vnc_lib.chown(vn.get_uuid(), alice.project_uuid)
+        alice.vnc_lib.chown(vn.get_uuid(), valid_uuid_2)
+        admin.vnc_lib.chown(vn.get_uuid(), alice.project_uuid)
+
+        # ensure chown/chmod works even when rbac is disabled
+        self.assertRaises(PermissionDenied, alice.vnc_lib.set_multi_tenancy_with_rbac, False)
+        rv = admin.vnc_lib.set_multi_tenancy_with_rbac(False)
+        self.assertEquals(rv['enabled'], False)
+        alice.vnc_lib.chown(vn.get_uuid(), valid_uuid_1)
+        admin.vnc_lib.chown(vn.get_uuid(), alice.project_uuid)
+        alice.vnc_lib.chmod(vn.get_uuid(), owner=valid_uuid_1)
+        admin.vnc_lib.chown(vn.get_uuid(), alice.project_uuid)
+
+        # re-enable rbac for subsequent tests!
+        try:
+            rv = admin.vnc_lib.set_multi_tenancy_with_rbac(True)
+            self.assertEquals(rv['enabled'], True)
+        except Exception:
+            self.fail("Error in enabling rbac")
+
+    def test_chmod_api(self):
+        """
+        1) Alice creates a VN in her project
+        3) Alice enables read sharing in VN for Bob's project
+        4) Alice enables global read access for VN
+        5) Alice enables global read/write access for VN
+        """
+
+        alice = self.alice
+        bob   = self.bob
+        admin = self.admin
+
+        logger.info( 'alice: create VN in her project')
+        vn_fq_name = [self.domain_name, alice.project, self.vn_name]
+        vn = VirtualNetwork(self.vn_name, self.alice.project_obj)
+        self.alice.vnc_lib.virtual_network_create(vn)
+        vn = vnc_read_obj(alice.vnc_lib, 'virtual-network', name = vn_fq_name)
+
+        logger.info( "Verify Bob cannot chmod Alice's virtual network")
+        self.assertRaises(PermissionDenied, bob.vnc_lib.chmod, vn.get_uuid(), owner=bob.project_uuid)
+
+        logger.info( 'Enable read share in virtual network for bob project')
+        alice.vnc_lib.chmod(vn.get_uuid(), share=[(bob.project_uuid,PERMS_R)])
+        ExpectedPerms = {'admin':'RWX', 'alice':'RWX', 'bob':'R'}
+        for user in [alice, bob, admin]:
+            perms = user.check_perms(vn.get_uuid())
+            self.assertEquals(ExpectedPerms[user.name], perms)
+
+        logger.info( 'Disable share in virtual networks for others')
+        alice.vnc_lib.chmod(vn.get_uuid(), share=[])
+        ExpectedPerms = {'admin':'RWX', 'alice':'RWX', 'bob':''}
+        for user in [alice, bob, admin]:
+            perms = user.check_perms(vn.get_uuid())
+            self.assertEquals(perms, ExpectedPerms[user.name])
+
+        logger.info( 'Enable VN in alice project for global sharing (read only)')
+        alice.vnc_lib.chmod(vn.get_uuid(), global_access=PERMS_R)
+        ExpectedPerms = {'admin':'RWX', 'alice':'RWX', 'bob':'R'}
+        for user in [alice, bob, admin]:
+            perms = user.check_perms(vn.get_uuid())
+            self.assertEquals(perms, ExpectedPerms[user.name])
+
+        logger.info( 'Enable virtual networks in alice project for global sharing (read, write)')
+        alice.vnc_lib.chmod(vn.get_uuid(), global_access=PERMS_RW)
+        ExpectedPerms = {'admin':'RWX', 'alice':'RWX', 'bob':'RW'}
+        for user in [alice, bob, admin]:
+            perms = user.check_perms(vn.get_uuid())
+            self.assertEquals(perms, ExpectedPerms[user.name])
+
+        logger.info( 'Enable virtual networks in alice project for global sharing (read, write, link)')
+        alice.vnc_lib.chmod(vn.get_uuid(), global_access=7)
+        ExpectedPerms = {'admin':'RWX', 'alice':'RWX', 'bob':'RWX'}
+        for user in [alice, bob, admin]:
+            perms = user.check_perms(vn.get_uuid())
+            self.assertEquals(perms, ExpectedPerms[user.name])
+
+        # negative test cases
+        invalid_uuid = '7a574f27-6934-4970-C767-b4996bd30f36'
+        valid_uuid_1 = '7a574f27-6934-4970-8767-b4996bd30f36'
+        valid_uuid_2 = '7a574f27693449708767b4996bd30f36'
+
+        logger.info( "verify Alice cannot set owner or global access to a bad value")
+        with ExpectedException(BadRequest) as e:
+            alice.vnc_lib.chmod(vn.get_uuid(), owner_access='7')
+        with ExpectedException(BadRequest) as e:
+            alice.vnc_lib.chmod(vn.get_uuid(), owner_access=8)
+        with ExpectedException(BadRequest) as e:
+            alice.vnc_lib.chmod(vn.get_uuid(), global_access='7')
+        with ExpectedException(BadRequest) as e:
+            alice.vnc_lib.chmod(vn.get_uuid(), global_access=8)
+
+        with ExpectedException(BadRequest) as e:
+            alice.vnc_lib.chmod(invalid_uuid, owner=vn.get_uuid())
+        with ExpectedException(BadRequest) as e:
+            alice.vnc_lib.chmod(vn.get_uuid(), owner=invalid_uuid)
+        with ExpectedException(BadRequest) as e:
+            alice.vnc_lib.chmod(vn.get_uuid(), share=[(invalid_uuid,PERMS_R)])
+
+        # test valid UUID formats
+        alice.vnc_lib.chmod(vn.get_uuid(), owner=valid_uuid_1)
+        admin.vnc_lib.chmod(vn.get_uuid(), owner=alice.project_uuid)
+        alice.vnc_lib.chmod(vn.get_uuid(), owner=valid_uuid_2)
+        admin.vnc_lib.chmod(vn.get_uuid(), owner=alice.project_uuid)
+
+    def test_bug_1604986(self):
+        """
+        1) Create a VN
+        2) Make is globally shared
+        3) list of virtual-networks should not return VN information twice
+        """
+        admin = self.admin
+        vn_name = "test-vn-1604986"
+        vn_fq_name = [self.domain_name, admin.project, vn_name]
+
+        test_vn = VirtualNetwork(vn_name, admin.project_obj)
+        self.admin.vnc_lib.virtual_network_create(test_vn)
+
+        z = self.admin.vnc_lib.resource_list('virtual-network')
+        test_vn_list = [vn for vn in z['virtual-networks'] if vn['fq_name'][-1] == vn_name]
+        self.assertEquals(len(test_vn_list), 1)
+
+        test_vn = vnc_read_obj(self.admin.vnc_lib, 'virtual-network', name = vn_fq_name)
+        set_perms(test_vn, global_access = PERMS_RWX)
+        admin.vnc_lib.virtual_network_update(test_vn)
+
+        z = self.admin.vnc_lib.resource_list('virtual-network')
+        test_vn_list = [vn for vn in z['virtual-networks'] if vn['fq_name'][-1] == vn_name]
+        self.assertEquals(len(test_vn_list), 1)
 
     def tearDown(self):
         super(TestPermissions, self).tearDown()
     # end tearDown
-

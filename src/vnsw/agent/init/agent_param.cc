@@ -307,7 +307,7 @@ void AgentParam::ParseDns() {
 
 void AgentParam::ParseDiscovery() {
     GetValueFromTree<string>(dss_server_, "DISCOVERY.server");
-    GetValueFromTree<uint16_t>(dss_port_, "DISCOVERY.port");
+    GetValueFromTree<uint32_t>(dss_port_, "DISCOVERY.port");
     if (!GetValueFromTree<uint16_t>(xmpp_instance_count_,
                                     "DISCOVERY.max_control_nodes")) {
         xmpp_instance_count_ = MAX_XMPP_SERVERS;
@@ -352,7 +352,7 @@ void AgentParam::ParseHypervisor() {
         }
     }
 
-    if (opt_str = tree_.get_optional<string>("HYPERVISOR.vmware_mode")) {
+    if ((opt_str = tree_.get_optional<string>("HYPERVISOR.vmware_mode")) && opt_str.get() != "") {
         if (opt_str.get() == "vcenter") {
             vmware_mode_ = VCENTER;
         } else if (opt_str.get() == "esxi_neutron") {
@@ -427,13 +427,6 @@ void AgentParam::ParseDefaultSection() {
         log_local_ = false;
     }
 
-    if (optional<bool> debug_opt =
-        tree_.get_optional<bool>("DEFAULT.debug")) {
-        debug_ = true;
-    } else {
-        debug_ = false;
-    }
-
     GetValueFromTree<bool>(use_syslog_, "DEFAULT.use_syslog");
     if (!GetValueFromTree<string>(syslog_facility_, "DEFAULT.syslog_facility")) {
         syslog_facility_ = "LOG_LOCAL0";
@@ -492,6 +485,15 @@ void AgentParam::ParseDefaultSection() {
                                     "DEFAULT.mirror_client_port")) {
         mirror_client_port_ = ContrailPorts::VrouterAgentMirrorClientUdpPort();
     }
+
+    if (!GetValueFromTree<uint32_t>(pkt0_tx_buffer_count_,
+                                    "DEFAULT.pkt0_tx_buffers")) {
+        pkt0_tx_buffer_count_ = Agent::kPkt0TxBufferCount;
+    }
+    if (!GetValueFromTree<bool>(measure_queue_delay_,
+                                "DEFAULT.measure_queue_delay")) {
+        measure_queue_delay_ = false;
+    }
 }
 
 void AgentParam::ParseTaskSection() {
@@ -520,6 +522,15 @@ void AgentParam::ParseFlows() {
         flow_thread_count_ = Agent::kDefaultFlowThreadCount;
     }
 
+    if (!GetValueFromTree<uint16_t>(flow_latency_limit_,
+                                    "FLOWS.latency_limit")) {
+        flow_latency_limit_ = Agent::kDefaultFlowLatencyLimit;
+    }
+
+    if (!GetValueFromTree<bool>(flow_trace_enable_, "FLOWS.trace_enable")) {
+        flow_trace_enable_ = true;
+    }
+
     if (!GetValueFromTree<float>(max_vm_flows_, "FLOWS.max_vm_flows")) {
         max_vm_flows_ = (float) 100;
     }
@@ -535,11 +546,11 @@ void AgentParam::ParseFlows() {
                                     "FLOWS.index_sm_log_count")) {
         flow_index_sm_log_count_ = Agent::kDefaultFlowIndexSmLogCount;
     }
-    if (!GetValueFromTree<uint16_t>(tcp_flow_scan_interval_,
-                                    "FLOWS.tcp_flow_scan_interval")) {
-        tcp_flow_scan_interval_ = kTcpFlowScanInterval;
-    }
 
+    GetValueFromTree<uint32_t>(flow_add_tokens_, "FLOWS.add_tokens");
+    GetValueFromTree<uint32_t>(flow_ksync_tokens_, "FLOWS.ksync_tokens");
+    GetValueFromTree<uint32_t>(flow_del_tokens_, "FLOWS.del_tokens");
+    GetValueFromTree<uint32_t>(flow_update_tokens_, "FLOWS.update_tokens");
 }
 
 void AgentParam::ParseHeadlessMode() {
@@ -559,6 +570,9 @@ void AgentParam::ParseAgentInfo() {
     GetValueFromTree<string>(mode, "DEFAULT.agent_mode");
     set_agent_mode(mode);
 
+    GetValueFromTree<string>(mode, "DEFAULT.gateway_mode");
+    set_gateway_mode(mode);
+
     if (!GetValueFromTree<string>(agent_base_dir_,
                                   "DEFAULT.agent_base_directory")) {
         agent_base_dir_ = "/var/lib/contrail";
@@ -573,6 +587,16 @@ void AgentParam::set_agent_mode(const std::string &mode) {
         agent_mode_ = TOR_AGENT;
     else
         agent_mode_ = VROUTER_AGENT;
+}
+
+void AgentParam::set_gateway_mode(const std::string &mode) {
+    std::string gateway_mode = boost::to_lower_copy(mode);
+    if (gateway_mode == "server")
+        gateway_mode_ = SERVER;
+    else if (gateway_mode == "vcpe")
+        gateway_mode_ = VCPE;
+    else
+        gateway_mode_ = NONE;
 }
 
 void AgentParam::ParseSimulateEvpnTor() {
@@ -593,8 +617,8 @@ void AgentParam::ParseServiceInstance() {
                           "SERVICE-INSTANCE.netns_timeout");
     GetValueFromTree<string>(si_lb_ssl_cert_path_,
                          "SERVICE-INSTANCE.lb_ssl_cert_path");
-    GetValueFromTree<string>(si_lb_keystone_auth_conf_path_,
-                         "SERVICE-INSTANCE.lb_keystone_auth_conf_path");
+    GetValueFromTree<string>(si_lbaas_auth_conf_,
+                         "SERVICE-INSTANCE.lbaas_auth_conf");
 }
 
 void AgentParam::ParseNexthopServer() {
@@ -609,9 +633,10 @@ void AgentParam::ParseNexthopServer() {
     }
 }
 
-void AgentParam::ParseBgpAsAServicePortRange() {
+void AgentParam::ParseServices() {
     GetValueFromTree<string>(bgp_as_a_service_port_range_,
                              "SERVICES.bgp_as_a_service_port_range");
+    GetValueFromTree<uint32_t>(services_queue_limit_, "SERVICES.queue_limit");
 }
 
 void AgentParam::ParseCollectorArguments
@@ -647,7 +672,7 @@ void AgentParam::ParseDnsArguments
 void AgentParam::ParseDiscoveryArguments
     (const boost::program_options::variables_map &var_map) {
     GetOptValue<string>(var_map, dss_server_, "DISCOVERY.server");
-    GetOptValue<uint16_t>(var_map, dss_port_, "DISCOVERY.port");
+    GetOptValue<uint32_t>(var_map, dss_port_, "DISCOVERY.port");
     GetOptValue<uint16_t>(var_map, xmpp_instance_count_,
                           "DISCOVERY.max_control_nodes");
 }
@@ -723,9 +748,6 @@ void AgentParam::ParseDefaultSectionArguments
     if (var_map.count("DEFAULT.log_local")) {
          log_local_ = true;
     }
-    if (var_map.count("DEFAULT.debug")) {
-        debug_ = true;
-    }
     if (var_map.count("DEFAULT.log_flow")) {
          log_flow_ = true;
     }
@@ -744,6 +766,10 @@ void AgentParam::ParseDefaultSectionArguments
                       "DEFAULT.subnet_hosts_resolvable");
     GetOptValue<uint16_t>(var_map, mirror_client_port_,
                           "DEFAULT.mirror_client_port");
+    GetOptValue<uint32_t>(var_map, pkt0_tx_buffer_count_,
+                          "DEFAULT.pkt0_tx_buffers");
+    GetOptValue<bool>(var_map, measure_queue_delay_,
+                      "DEFAULT.measure_queue_delay");
 }
 
 void AgentParam::ParseTaskSectionArguments
@@ -770,6 +796,9 @@ void AgentParam::ParseFlowArguments
     (const boost::program_options::variables_map &var_map) {
     GetOptValue<uint16_t>(var_map, flow_thread_count_,
                           "FLOWS.thread_count");
+    GetOptValue<uint16_t>(var_map, flow_latency_limit_,
+                          "FLOWS.latency_limit");
+    GetOptValue<bool>(var_map, flow_trace_enable_, "FLOWS.trace_enable");
     uint16_t val = 0;
     if (GetOptValue<uint16_t>(var_map, val, "FLOWS.max_vm_flows")) {
         max_vm_flows_ = (float)val;
@@ -781,8 +810,14 @@ void AgentParam::ParseFlowArguments
                           "FLOWS.max_vm_linklocal_flows");
     GetOptValue<uint16_t>(var_map, flow_index_sm_log_count_,
                           "FLOWS.index_sm_log_count");
-    GetOptValue<uint16_t>(var_map, tcp_flow_scan_interval_,
-                          "FLOWS.tcp_flow_scan_interval");
+    GetOptValue<uint32_t>(var_map, flow_add_tokens_,
+                          "FLOWS.add_tokens");
+    GetOptValue<uint32_t>(var_map, flow_ksync_tokens_,
+                          "FLOWS.ksync_tokens");
+    GetOptValue<uint32_t>(var_map, flow_del_tokens_,
+                          "FLOWS.del_tokens");
+    GetOptValue<uint32_t>(var_map, flow_update_tokens_,
+                          "FLOWS.update_tokens");
 }
 
 void AgentParam::ParseHeadlessModeArguments
@@ -801,6 +836,9 @@ void AgentParam::ParseAgentInfoArguments
     if (GetOptValue<string>(var_map, mode, "DEFAULT.agent_mode")) {
         set_agent_mode(mode);
     }
+    if (GetOptValue<string>(var_map, mode, "DEFAULT.gateway_mode")) {
+        set_gateway_mode(mode);
+    }
     GetOptValue<string>(var_map, agent_base_dir_,
                         "DEFAULT.agent_base_directory");
 }
@@ -813,6 +851,8 @@ void AgentParam::ParseServiceInstanceArguments
     GetOptValue<int>(var_map, si_netns_timeout_, "SERVICE-INSTANCE.netns_timeout");
     GetOptValue<string>(var_map, si_lb_ssl_cert_path_,
                         "SERVICE-INSTANCE.lb_ssl_cert_path");
+    GetOptValue<string>(var_map, si_lbaas_auth_conf_,
+                        "SERVICE-INSTANCE.lbaas_auth_conf");
 
 }
 
@@ -850,10 +890,11 @@ void AgentParam::ParsePlatformArguments
     }
 }
 
-void AgentParam::ParseBgpAsAServicePortRangeArguments
+void AgentParam::ParseServicesArguments
     (const boost::program_options::variables_map &v) {
     GetOptValue<string>(v, bgp_as_a_service_port_range_,
                         "SERVICES.bgp_as_a_service_port_range");
+    GetOptValue<uint32_t>(v, services_queue_limit_, "SERVICES.queue_limit");
 }
 
 // Initialize hypervisor mode based on system information
@@ -903,7 +944,7 @@ void AgentParam::InitFromConfig() {
     ParseAgentInfo();
     ParseNexthopServer();
     ParsePlatform();
-    ParseBgpAsAServicePortRange();
+    ParseServices();
     cout << "Config file <" << config_file_ << "> parsing completed.\n";
     return;
 }
@@ -927,8 +968,45 @@ void AgentParam::InitFromArguments() {
     ParseAgentInfoArguments(var_map_);
     ParseNexthopServerArguments(var_map_);
     ParsePlatformArguments(var_map_);
-    ParseBgpAsAServicePortRangeArguments(var_map_);
+    ParseServicesArguments(var_map_);
     return;
+}
+
+void AgentParam::UpdateBgpAsaServicePortRange() {
+    if (!stringToIntegerList(bgp_as_a_service_port_range_, "-",
+                             bgp_as_a_service_port_range_value_)) {
+        bgp_as_a_service_port_range_value_.clear();
+        return;
+    }
+    uint16_t start = bgp_as_a_service_port_range_value_[0];
+    uint16_t end = bgp_as_a_service_port_range_value_[1];
+
+    uint16_t count = end - start + 1;
+    if (count > Agent::kMaxBgpAsAServerSessions) {
+        bgp_as_a_service_port_range_value_[1] =
+            start + Agent::kMaxBgpAsAServerSessions - 1;
+        count = Agent::kMaxBgpAsAServerSessions;
+    }
+
+    struct rlimit rl;
+    int result = getrlimit(RLIMIT_NOFILE, &rl);
+    if (result == 0) {
+        if (rl.rlim_max <= Agent::kMaxOtherOpenFds) {
+            cout << "Clearing BGP as a Service port range," <<
+                    "as Max fd system limit is inadequate\n";
+            bgp_as_a_service_port_range_value_.clear();
+            return;
+        }
+        if (count > rl.rlim_max - Agent::kMaxOtherOpenFds) {
+            bgp_as_a_service_port_range_value_[1] =
+                start + rl.rlim_max - Agent::kMaxOtherOpenFds - 1;
+            cout << "Updating BGP as a Service port range to " <<
+                bgp_as_a_service_port_range_value_[0] << " - " <<
+                bgp_as_a_service_port_range_value_[1] << "\n";
+        }
+    } else {
+        cout << "Unable to validate BGP as a server port range configuration\n";
+    }
 }
 
 // Update max_vm_flows_ if it is greater than 100.
@@ -945,6 +1023,12 @@ void AgentParam::ComputeFlowLimits() {
         max_vm_flows_ = 0;
     }
 
+    uint16_t bgp_as_a_service_count = 0;
+    if (bgp_as_a_service_port_range_value_.size() == 2) {
+        bgp_as_a_service_count = bgp_as_a_service_port_range_value_[1]
+                                 - bgp_as_a_service_port_range_value_[0] + 1;
+    }
+
     struct rlimit rl;
     int result = getrlimit(RLIMIT_NOFILE, &rl);
     if (result == 0) {
@@ -953,26 +1037,36 @@ void AgentParam::ComputeFlowLimits() {
             linklocal_system_flows_ = linklocal_vm_flows_ = 0;
             return;
         }
-        if (linklocal_system_flows_ > rl.rlim_max - Agent::kMaxOtherOpenFds - 1) {
-            linklocal_system_flows_ = rl.rlim_max - Agent::kMaxOtherOpenFds - 1;
+        if (linklocal_system_flows_ > rl.rlim_max - bgp_as_a_service_count -
+                                      Agent::kMaxOtherOpenFds - 1) {
+            linklocal_system_flows_ = rl.rlim_max - bgp_as_a_service_count -
+                                      Agent::kMaxOtherOpenFds - 1;
             cout << "Updating linklocal-system-flows configuration to : " <<
                 linklocal_system_flows_ << "\n";
         }
-        if (rl.rlim_cur < linklocal_system_flows_ + Agent::kMaxOtherOpenFds + 1) {
+        if (rl.rlim_cur < linklocal_system_flows_ + bgp_as_a_service_count +
+                          Agent::kMaxOtherOpenFds + 1) {
             struct rlimit new_rl;
             new_rl.rlim_max = rl.rlim_max;
-            new_rl.rlim_cur = linklocal_system_flows_ + Agent::kMaxOtherOpenFds + 1;
+            new_rl.rlim_cur = linklocal_system_flows_ + bgp_as_a_service_count +
+                              Agent::kMaxOtherOpenFds + 1;
             result = setrlimit(RLIMIT_NOFILE, &new_rl);
             if (result != 0) {
                 if (rl.rlim_cur <= Agent::kMaxOtherOpenFds + 1) {
                     linklocal_system_flows_ = 0;
+                    bgp_as_a_service_count = 0;
+                    bgp_as_a_service_port_range_value_.clear();
                 } else {
-                    linklocal_system_flows_ = rl.rlim_cur - Agent::kMaxOtherOpenFds - 1;
+                    linklocal_system_flows_ = rl.rlim_cur -
+                                              bgp_as_a_service_count -
+                                              Agent::kMaxOtherOpenFds - 1;
                 }
                 cout << "Unable to set Max open files limit to : " <<
                     new_rl.rlim_cur <<
                     " Updating linklocal-system-flows configuration to : " <<
-                    linklocal_system_flows_ << "\n";
+                    linklocal_system_flows_ <<
+                    " and Bgp as a service port count to : " <<
+                    bgp_as_a_service_count << "\n";
             }
         }
         if (linklocal_vm_flows_ > linklocal_system_flows_) {
@@ -1092,6 +1186,7 @@ void AgentParam::Init(const string &config_file, const string &program_name) {
     InitFromConfig();
     InitFromArguments();
     InitVhostAndXenLLPrefix();
+    UpdateBgpAsaServicePortRange();
     ComputeFlowLimits();
     vgw_config_table_->InitFromConfig(tree_);
 }
@@ -1134,7 +1229,12 @@ void AgentParam::LogConfig() const {
     LOG(DEBUG, "Linklocal Max Vm Flows      : " << linklocal_vm_flows_);
     LOG(DEBUG, "Flow cache timeout          : " << flow_cache_timeout_);
     LOG(DEBUG, "Flow thread count           : " << flow_thread_count_);
+    LOG(DEBUG, "Flow latency limit          : " << flow_latency_limit_);
     LOG(DEBUG, "Flow index-mgr sm log count : " << flow_index_sm_log_count_);
+    LOG(DEBUG, "Flow add-tokens             : " << flow_add_tokens_);
+    LOG(DEBUG, "Flow ksync-tokens           : " << flow_ksync_tokens_);
+    LOG(DEBUG, "Flow del-tokens             : " << flow_del_tokens_);
+    LOG(DEBUG, "Flow update-tokens          : " << flow_update_tokens_);
 
     if (agent_mode_ == VROUTER_AGENT)
         LOG(DEBUG, "Agent Mode                  : Vrouter");
@@ -1142,6 +1242,13 @@ void AgentParam::LogConfig() const {
         LOG(DEBUG, "Agent Mode                  : TSN");
     else if (agent_mode_ == TOR_AGENT)
         LOG(DEBUG, "Agent Mode                  : TOR");
+
+    if (gateway_mode_ == SERVER)
+        LOG(DEBUG, "Gateway Mode                : Server");
+    else if (gateway_mode_ == VCPE)
+        LOG(DEBUG, "Gateway Mode                : vCPE");
+    else if (gateway_mode_ == NONE)
+        LOG(DEBUG, "Gateway Mode                : None");
 
     LOG(DEBUG, "Headless Mode               : " << headless_mode_);
     LOG(DEBUG, "DHCP Relay Mode             : " << dhcp_relay_mode_);
@@ -1153,7 +1260,9 @@ void AgentParam::LogConfig() const {
     LOG(DEBUG, "Service instance workers    : " << si_netns_workers_);
     LOG(DEBUG, "Service instance timeout    : " << si_netns_timeout_);
     LOG(DEBUG, "Service instance lb ssl     : " << si_lb_ssl_cert_path_);
+    LOG(DEBUG, "Service instance lbaas auth : " << si_lbaas_auth_conf_);
     LOG(DEBUG, "Bgp as a service port range : " << bgp_as_a_service_port_range_);
+    LOG(DEBUG, "Services queue limit        : " << services_queue_limit_);
     if (hypervisor_mode_ == MODE_KVM) {
     LOG(DEBUG, "Hypervisor mode             : kvm");
         return;
@@ -1218,7 +1327,9 @@ AgentParam::AgentParam(bool enable_flow_options,
         enable_vhost_options_(enable_vhost_options),
         enable_hypervisor_options_(enable_hypervisor_options),
         enable_service_options_(enable_service_options),
-        agent_mode_(agent_mode), vhost_(),
+        agent_mode_(agent_mode), gateway_mode_(NONE), vhost_(),
+        pkt0_tx_buffer_count_(Agent::kPkt0TxBufferCount),
+        measure_queue_delay_(false),
         agent_name_(), eth_port_(),
         eth_port_no_arp_(false), eth_port_encap_type_(),
         xmpp_instance_count_(),
@@ -1230,6 +1341,10 @@ AgentParam::AgentParam(bool enable_flow_options,
         metadata_proxy_port_(0), max_vm_flows_(),
         linklocal_system_flows_(), linklocal_vm_flows_(),
         flow_cache_timeout_(), flow_index_sm_log_count_(),
+        flow_add_tokens_(Agent::kFlowAddTokens),
+        flow_ksync_tokens_(Agent::kFlowKSyncTokens),
+        flow_del_tokens_(Agent::kFlowDelTokens),
+        flow_update_tokens_(Agent::kFlowUpdateTokens),
         config_file_(), program_name_(),
         log_file_(), log_local_(false), log_flow_(false), log_level_(),
         log_category_(), use_syslog_(false),
@@ -1237,8 +1352,7 @@ AgentParam::AgentParam(bool enable_flow_options,
         agent_stats_interval_(kAgentStatsInterval),
         flow_stats_interval_(kFlowStatsInterval),
         vrouter_stats_interval_(kVrouterStatsInterval),
-        tcp_flow_scan_interval_(kTcpFlowScanInterval),
-        vmware_physical_port_(""), test_mode_(false), debug_(false), tree_(),
+        vmware_physical_port_(""), test_mode_(false), tree_(),
         vgw_config_table_(new VirtualGatewayConfigTable() ),
         headless_mode_(false), dhcp_relay_mode_(false),
         xmpp_auth_enable_(false),
@@ -1246,7 +1360,7 @@ AgentParam::AgentParam(bool enable_flow_options,
         xmpp_dns_auth_enable_(false),
         simulate_evpn_tor_(false), si_netns_command_(),
         si_docker_command_(), si_netns_workers_(0),
-        si_netns_timeout_(0), si_lb_ssl_cert_path_(),
+        si_netns_timeout_(0), si_lb_ssl_cert_path_(), si_lbaas_auth_conf_(),
         vmware_mode_(ESXI_NEUTRON), nexthop_server_endpoint_(),
         nexthop_server_add_pid_(0),
         vrouter_on_nic_mode_(false),
@@ -1257,7 +1371,10 @@ AgentParam::AgentParam(bool enable_flow_options,
         agent_base_dir_(),
         send_ratelimit_(sandesh_send_rate_limit()),
         flow_thread_count_(Agent::kDefaultFlowThreadCount),
+        flow_trace_enable_(true),
+        flow_latency_limit_(Agent::kDefaultFlowLatencyLimit),
         subnet_hosts_resolvable_(true),
+        services_queue_limit_(1024),
         tbb_thread_count_(Agent::kMaxTbbThreads),
         tbb_exec_delay_(0),
         tbb_schedule_delay_(0),
@@ -1277,7 +1394,6 @@ AgentParam::AgentParam(bool enable_flow_options,
         ("DEFAULT.collectors",
          opt::value<std::vector<std::string> >()->multitoken(),
          "Collector server list")
-        ("DEFAULT.debug", "Enable debug logging")
         ("DEFAULT.flow_cache_timeout",
          opt::value<uint16_t>()->default_value(Agent::kDefaultFlowCacheTimeout),
          "Flow aging time in seconds")
@@ -1296,7 +1412,7 @@ AgentParam::AgentParam(bool enable_flow_options,
          "Run agent in vrouter / tsn / tor mode")
         ("DEFAULT.agent_base_directory", opt::value<string>(),
          "Base directory used by the agent")
-        ("DISCOVERY.port", opt::value<uint16_t>()->default_value(DISCOVERY_SERVER_PORT),
+        ("DISCOVERY.port", opt::value<uint32_t>()->default_value(DISCOVERY_SERVER_PORT),
          "Listen port of discovery server")
         ("DISCOVERY.server", opt::value<string>()->default_value("127.0.0.1"),
          "IP address of discovery server")
@@ -1334,6 +1450,8 @@ AgentParam::AgentParam(bool enable_flow_options,
          "Sandesh send rate limit in messages/sec")
         ("DEFAULT.subnet_hosts_resolvable",
           opt::value<bool>()->default_value(true))
+        ("DEFAULT.pkt0_tx_buffers", opt::value<uint32_t>(),
+         "Number of tx-buffers for pkt0 interface")
         ;
     options_.add(generic);
 
@@ -1370,6 +1488,16 @@ AgentParam::AgentParam(bool enable_flow_options,
              "Maximum number of link-local flows allowed across all VMs")
             ("FLOWS.max_vm_linklocal_flows", opt::value<uint16_t>(),
              "Maximum number of link-local flows allowed per VM")
+            ("FLOWS.trace_enable", opt::value<bool>(),
+             "Enable flow tracing")
+            ("FLOWS.add_tokens", opt::value<uint32_t>(),
+             "Number of add-tokens")
+            ("FLOWS.ksync_tokens", opt::value<uint32_t>(),
+             "Number of ksync-tokens")
+            ("FLOWS.del_tokens", opt::value<uint32_t>(),
+             "Number of delete-tokens")
+            ("FLOWS.update_tokens", opt::value<uint32_t>(),
+             "Number of update-tokens")
             ;
         options_.add(flow);
     }

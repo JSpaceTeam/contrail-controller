@@ -32,6 +32,7 @@
 #include <oper/vrf.h>
 #include <oper/vm.h>
 #include <oper/sg.h>
+#include <oper/qos_config.h>
 
 #include <filter/packet_header.h>
 #include <filter/acl.h>
@@ -79,6 +80,9 @@ const std::map<uint16_t, const char*>
         ((uint16_t)SHORT_FAILED_VROUTER_INSTALL,
          "Short flow vrouter install failed")
         ((uint16_t)SHORT_INVALID_L2_FLOW,    "Short flow invalid L2 flow")
+        ((uint16_t)SHORT_FLOW_ON_TSN,        "Short flow TSN flow")
+        ((uint16_t)SHORT_NO_MIRROR_ENTRY,     "Short flow No mirror entry ")
+        ((uint16_t)SHORT_SAME_FLOW_RFLOW_KEY,"Short flow same flow and rflow")
         ((uint16_t)DROP_POLICY,              "Flow drop Policy")
         ((uint16_t)DROP_OUT_POLICY,          "Flow drop Out Policy")
         ((uint16_t)DROP_SG,                  "Flow drop SG")
@@ -271,7 +275,6 @@ void FlowData::Reset() {
     dest_plen = 0;
     drop_reason = 0;
     vrf_assign_evaluated = false;
-    pending_recompute = false;
     if_index_info = 0;
     tunnel_info.Reset();
     flow_source_plen_map.clear();
@@ -282,6 +285,7 @@ void FlowData::Reset() {
     bgp_as_a_service_port = 0;
     ecmp_rpf_nh_ = 0;
     acl_assigned_vrf_index_ = VrfEntry::kInvalidIndex;
+    qos_config_idx = AgentQosConfigTable::kInvalidIndex;
 }
 
 static std::vector<std::string> MakeList(const VnListType &ilist) {
@@ -339,12 +343,28 @@ void MatchPolicy::Reset() {
 }
 
 /////////////////////////////////////////////////////////////////////////////
+// FlowEventLog constructor/destructor
+/////////////////////////////////////////////////////////////////////////////
+FlowEventLog::FlowEventLog() : time_(0), event_(EVENT_MAX),
+    flow_handle_(FlowEntry::kInvalidFlowHandle), flow_gen_id_(0),
+    ksync_entry_(NULL), hash_id_(FlowEntry::kInvalidFlowHandle), gen_id_(0),
+    vrouter_flow_handle_(FlowEntry::kInvalidFlowHandle), vrouter_gen_id_(0) {
+}
+
+FlowEventLog::~FlowEventLog() {
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // FlowEntry constructor/destructor
 /////////////////////////////////////////////////////////////////////////////
 FlowEntry::FlowEntry(FlowTable *flow_table) :
     flow_table_(flow_table), flags_(0),
     tunnel_type_(TunnelType::INVALID),
-    fip_vmi_(AgentKey::ADD_DEL_CHANGE, nil_uuid(), "") {
+    fip_vmi_(AgentKey::ADD_DEL_CHANGE, nil_uuid(), ""),
+    flow_mgmt_request_(NULL), flow_mgmt_info_() {
+    // ksync entry is set to NULL only on constructor and on flow delete
+    // it should not have any other explicit set to NULL
+    ksync_entry_ = NULL;
     Reset();
     alloc_count_.fetch_and_increment();
 }
@@ -356,9 +376,12 @@ FlowEntry::~FlowEntry() {
 }
 
 void FlowEntry::Reset() {
+    assert(ksync_entry_ == NULL);
     uuid_ = flow_table_->rand_gen();
+    egress_uuid_ = flow_table_->rand_gen();
     data_.Reset();
     l3_flow_ = true;
+    gen_id_ = 0;
     flow_handle_ = kInvalidFlowHandle;
     reverse_flow_entry_ = NULL;
     deleted_ = false;
@@ -372,9 +395,16 @@ void FlowEntry::Reset() {
     refcount_ = 0;
     nw_ace_uuid_ = FlowPolicyStateStr.at(NOT_EVALUATED);
     sg_rule_uuid_= FlowPolicyStateStr.at(NOT_EVALUATED);
-    ksync_index_entry_ = std::auto_ptr<KSyncFlowIndexEntry>
-        (new KSyncFlowIndexEntry());
     fsc_ = NULL;
+    trace_ = false;
+    event_logs_.reset();
+    event_log_index_ = 0;
+    last_event_ = FlowEvent::INVALID;
+    flow_retry_attempts_ = 0;
+    is_flow_on_unresolved_list = false;
+    pending_actions_.Reset();
+    assert(flow_mgmt_request_ == NULL);
+    assert(flow_mgmt_info_.get() == NULL);
 }
 
 void FlowEntry::Reset(const FlowKey &k) {
@@ -402,6 +432,7 @@ FlowEntry *FlowEntry::Allocate(const FlowKey &key, FlowTable *flow_table) {
 }
 
 // selectively copy fields from RHS
+// When flow is being updated, rhs will be new flow allocated in PktFlowInfo
 void FlowEntry::Copy(FlowEntry *rhs, bool update) {
     if (update) {
         rhs->data_.in_vm_entry.FreeFd();
@@ -422,7 +453,11 @@ void FlowEntry::Copy(FlowEntry *rhs, bool update) {
     tunnel_type_ = rhs->tunnel_type_;
     fip_ = rhs->fip_;
     fip_vmi_ = rhs->fip_vmi_;
+    last_event_ = rhs->last_event_;
+    flow_retry_attempts_ = rhs->flow_retry_attempts_;
+    trace_ = rhs->trace_;
     if (update == false) {
+        gen_id_ = rhs->gen_id_;
         flow_handle_ = rhs->flow_handle_;
         /* Flow Entry is being re-used. Generate a new UUID for it. */
         // results is delete miss for previous uuid to stats collector
@@ -443,7 +478,8 @@ void intrusive_ptr_release(FlowEntry *fe) {
     int prev = fe->refcount_.fetch_and_decrement();
     if (prev == 1) {
         if (fe->on_tree()) {
-            if (flow_table->ConcurrencyCheck() == false) {
+            if (flow_table->ConcurrencyCheck(flow_table->flow_task_id())
+                == false) {
                 FlowEntryPtr ref(fe);
                 FlowProto *proto=flow_table->agent()->pkt()->get_flow_proto();
                 proto->ForceEnqueueFreeFlowReference(ref);
@@ -453,6 +489,7 @@ void intrusive_ptr_release(FlowEntry *fe) {
                 flow_table->flow_entry_map_.find(fe->key());
             assert(it != flow_table->flow_entry_map_.end());
             flow_table->flow_entry_map_.erase(it);
+            flow_table->agent()->stats()->decr_flow_count();
         }
         flow_table->free_list()->Free(fe);
     }
@@ -502,6 +539,12 @@ bool FlowEntry::InitFlowCmn(const PktFlowInfo *info, const PktControlInfo *ctrl,
         data_.bgp_as_a_service_port = 0;
     }
 
+    if (info->alias_ip_flow) {
+        set_flags(FlowEntry::AliasIpFlow);
+    } else {
+        reset_flags(FlowEntry::AliasIpFlow);
+    }
+
     data_.intf_entry = ctrl->intf_ ? ctrl->intf_ : rev_ctrl->intf_;
     data_.vn_entry = ctrl->vn_ ? ctrl->vn_ : rev_ctrl->vn_;
     data_.in_vm_entry.SetVm(ctrl->vm_);
@@ -516,6 +559,7 @@ void FlowEntry::InitFwdFlow(const PktFlowInfo *info, const PktInfo *pkt,
                             const PktControlInfo *ctrl,
                             const PktControlInfo *rev_ctrl,
                             FlowEntry *rflow, Agent *agent) {
+    gen_id_ = pkt->GetAgentHdr().cmd_param_5;
     flow_handle_ = pkt->GetAgentHdr().cmd_param;
     if (InitFlowCmn(info, ctrl, rev_ctrl, rflow) == false) {
         return;
@@ -653,7 +697,8 @@ void FlowEntry::InitRevFlow(const PktFlowInfo *info, const PktInfo *pkt,
     data_.dmac = pkt->smac;
 }
 
-void FlowEntry::InitAuditFlow(uint32_t flow_idx) {
+void FlowEntry::InitAuditFlow(uint32_t flow_idx, uint8_t gen_id) {
+    gen_id_ = gen_id;
     flow_handle_ = flow_idx;
     set_flags(FlowEntry::ShortFlow);
     short_flow_reason_ = SHORT_AUDIT_ENTRY;
@@ -711,20 +756,12 @@ void FlowEntry::UpdateFipStatsInfo(uint32_t fip, uint32_t id, Agent *agent) {
     fip_vmi_ = InterfaceIdToKey(agent, id);
 }
 
-bool FlowEntry::set_pending_recompute(bool value) {
-    if (data_.pending_recompute != value) {
-        data_.pending_recompute = value;
-        return true;
-    }
-
-    return false;
-}
-
-void FlowEntry::set_flow_handle(uint32_t flow_handle) {
+void FlowEntry::set_flow_handle(uint32_t flow_handle, uint8_t gen_id) {
     if (flow_handle_ != flow_handle) {
         assert(flow_handle_ == kInvalidFlowHandle);
         flow_handle_ = flow_handle;
     }
+    gen_id_ = gen_id;
 }
 
 const std::string& FlowEntry::acl_assigned_vrf() const {
@@ -737,6 +774,19 @@ void FlowEntry::set_acl_assigned_vrf_index() {
             flow_table()->agent()->vrf_table()->FindActiveEntry(&vrf_key));
     if (vrf) {
         data_.acl_assigned_vrf_index_ = vrf->vrf_id();
+        bool set_dest_vrf = true;
+        if (is_flags_set(FlowEntry::NatFlow) &&
+            reverse_flow_entry() &&
+            key().dst_addr != reverse_flow_entry()->key().src_addr) {
+            //Packet is getting DNATed, VRF assign ACL action
+            //is applied on floating-ip VN and the destination VRF should
+            //be retained as interface VRF
+            set_dest_vrf = false;
+        }
+
+        if (set_dest_vrf) {
+            data_.dest_vrf = vrf->vrf_id();
+        }
         return;
     }
     data_.acl_assigned_vrf_index_ = VrfEntry::kInvalidIndex;
@@ -744,6 +794,31 @@ void FlowEntry::set_acl_assigned_vrf_index() {
 
 uint32_t FlowEntry::acl_assigned_vrf_index() const {
     return data_.acl_assigned_vrf_index_;
+}
+
+void FlowEntry::RevFlowDepInfo(RevFlowDepParams *params) {
+    params->sip_ = key().src_addr;
+    FlowEntry *rev_flow = reverse_flow_entry();
+    if (rev_flow) {
+        params->rev_uuid_ = rev_flow->uuid();
+        params->vm_cfg_name_ = rev_flow->data().vm_cfg_name;
+        params->sg_uuid_ = rev_flow->sg_rule_uuid();
+        params->rev_egress_uuid_ = rev_flow->egress_uuid();
+        if (rev_flow->intf_entry()) {
+            params->vmi_uuid_ = UuidToString(rev_flow->intf_entry()->GetUuid());
+        }
+
+        if (key().family != Address::INET) {
+            return;
+        }
+        if (is_flags_set(FlowEntry::NatFlow) &&
+            is_flags_set(FlowEntry::IngressDir)) {
+            const FlowKey *nat_key = &rev_flow->key();
+            if (key().src_addr != nat_key->dst_addr) {
+                params->sip_ = nat_key->dst_addr;
+            }
+        }
+    }
 }
 
 static bool ShouldDrop(uint32_t action) {
@@ -1149,6 +1224,10 @@ void FlowEntry::GetSgList(const Interface *intf) {
 // Function takes care of copying right rules
 static bool CopySgEntries(const VmInterface *vm_port, bool ingress_acl,
                           std::list<MatchAclParams> &list) {
+    /* If policy is NOT enabled on VMI, do not copy SG rules */
+    if (!vm_port->policy_enabled()) {
+        return false;
+    }
     bool ret = false;
     for (VmInterface::SecurityGroupEntrySet::const_iterator it =
          vm_port->sg_list().list_.begin();
@@ -1233,16 +1312,49 @@ void FlowEntry::GetNonLocalFlowSgList(const VmInterface *vm_port) {
     data_.match_p.reverse_sg_rule_present = false;
 }
 
+// For an L2-Flow, refresh the vn-list and sg-list from the route used for
+// flow
+void FlowEntry::UpdateL2RouteInfo() {
+    // Skip L3-Flows
+    if (l3_flow())
+        return;
+
+    Agent *agent = flow_table()->agent();
+    // Get VRF for the flow. L2 flow have same in and out-vrf. So, use same
+    // vrf for both smac and dmac lookup
+    uint32_t vrf_id = data().flow_source_vrf;
+    const VrfEntry *vrf = agent->vrf_table()->FindVrfFromId(vrf_id);
+    if (vrf == NULL || vrf->IsDeleted()) {
+        return;
+    }
+    BridgeAgentRouteTable *table =
+        static_cast<BridgeAgentRouteTable *>(vrf->GetBridgeRouteTable());
+
+    // Get route-info for smac
+    GetSourceRouteInfo(table->FindRoute(data().smac));
+    // Get route-info for dmac
+    GetDestRouteInfo(table->FindRoute(data().dmac));
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Flow policy processing routines
 /////////////////////////////////////////////////////////////////////////////
 void FlowEntry::SetVrfAssignEntry() {
     if (!(data_.match_p.vrf_assign_acl_action &
          (1 << TrafficAction::VRF_TRANSLATE))) {
+        //If VRF assign was evaluated and the vrf translate
+        //action is not present in latest evaluation mark the
+        //flow as short flow
+        if (data_.vrf_assign_evaluated &&
+                data_.match_p.action_info.vrf_translate_action_.vrf_name()
+                != Agent::NullString()) {
+            MakeShortFlow(SHORT_VRF_CHANGE);
+        }
         data_.vrf_assign_evaluated = true;
         data_.acl_assigned_vrf_index_ = VrfEntry::kInvalidIndex;
         return;
     }
+
     std::string vrf_assigned_name =
         data_.match_p.action_info.vrf_translate_action_.vrf_name();
     std::list<MatchAclParams>::const_iterator acl_it;
@@ -1264,7 +1376,7 @@ void FlowEntry::SetVrfAssignEntry() {
     }
 
     set_acl_assigned_vrf_index();
-    if (acl_assigned_vrf_index() == 0) {
+    if (acl_assigned_vrf_index() == VrfEntry::kInvalidIndex) {
         MakeShortFlow(SHORT_VRF_CHANGE);
     }
     data_.vrf_assign_evaluated = true;
@@ -1395,6 +1507,53 @@ void FlowEntry::SetOutPacketHeader(PacketHeader *hdr) {
     hdr->dst_sg_id_l = &(rflow->data().source_sg_id_l);
 }
 
+void FlowEntry::SetSgAclInfo(const FlowPolicyInfo &fwd_flow_info,
+                             const FlowPolicyInfo &rev_flow_info,
+                             bool tcp_rev_sg) {
+
+    FlowEntry *rflow = reverse_flow_entry();
+    if (rflow == NULL) {
+        return;
+    }
+
+    sg_rule_uuid_ = fwd_flow_info.uuid;
+    rflow->sg_rule_uuid_ = rev_flow_info.uuid;
+
+    //If Forward flow SG rule says drop, copy corresponding
+    //ACE id to both forward and reverse flow
+    if (fwd_flow_info.drop) {
+        rflow->sg_rule_uuid_ = fwd_flow_info.uuid;
+        return;
+    }
+
+    //If reverse flow SG rule says drop, copy corresponding
+    //ACE id to both forward and reverse flow
+    if (rev_flow_info.drop) {
+        sg_rule_uuid_ = rev_flow_info.uuid;
+        return;
+    }
+
+    if (tcp_rev_sg == false) {
+        if (data_.match_p.sg_rule_present == false) {
+            sg_rule_uuid_ = rev_flow_info.uuid;
+        }
+
+        if (data_.match_p.out_sg_rule_present == false) {
+            rflow->sg_rule_uuid_ = fwd_flow_info.uuid;
+        }
+    }
+
+    if (tcp_rev_sg == true) {
+        if (data_.match_p.reverse_sg_rule_present == false) {
+             rflow->sg_rule_uuid_ = fwd_flow_info.uuid;
+        }
+
+        if (data_.match_p.reverse_out_sg_rule_present == false) {
+            sg_rule_uuid_ = rev_flow_info.uuid;
+        }
+    }
+}
+
 // Apply Policy and SG rules for a flow.
 //
 // Special case of local flows:
@@ -1436,9 +1595,12 @@ bool FlowEntry::DoPolicy() {
     data_.match_p.mirror_action = 0;
     data_.match_p.out_mirror_action = 0;
     data_.match_p.sg_action_summary = 0;
+
     const string value = FlowPolicyStateStr.at(NOT_EVALUATED);
     FlowPolicyInfo nw_acl_info(value), sg_acl_info(value);
+    FlowPolicyInfo out_sg_acl_info(value);
     FlowPolicyInfo rev_sg_acl_info(value);
+    FlowPolicyInfo rev_out_sg_acl_info(value);
 
     FlowEntry *rflow = reverse_flow_entry();
     PacketHeader hdr;
@@ -1482,7 +1644,7 @@ bool FlowEntry::DoPolicy() {
             SetOutPacketHeader(&out_hdr);
             data_.match_p.out_sg_action =
                 MatchAcl(out_hdr, data_.match_p.m_out_sg_acl_l, true,
-                         !data_.match_p.out_sg_rule_present, &sg_acl_info);
+                         !data_.match_p.out_sg_rule_present, &out_sg_acl_info);
         }
 
         // For TCP-ACK packet, we allow packet if either forward or reverse
@@ -1501,7 +1663,7 @@ bool FlowEntry::DoPolicy() {
                 data_.match_p.reverse_out_sg_action =
                     MatchAcl(out_hdr, data_.match_p.m_reverse_out_sg_acl_l,
                              true, !data_.match_p.reverse_out_sg_rule_present,
-                             &rev_sg_acl_info);
+                             &rev_out_sg_acl_info);
             }
         }
 
@@ -1531,7 +1693,7 @@ bool FlowEntry::DoPolicy() {
                 data_.match_p.out_sg_action |
                 data_.match_p.reverse_sg_action |
                 data_.match_p.reverse_out_sg_action;
-            sg_rule_uuid_ = sg_acl_info.uuid;
+                SetSgAclInfo(sg_acl_info, out_sg_acl_info, false);
         } else {
             if (ShouldDrop(data_.match_p.sg_action |
                            data_.match_p.out_sg_action)
@@ -1539,15 +1701,15 @@ bool FlowEntry::DoPolicy() {
                 ShouldDrop(data_.match_p.reverse_sg_action |
                            data_.match_p.reverse_out_sg_action)) {
                 data_.match_p.sg_action_summary = (1 << TrafficAction::DENY);
-                sg_rule_uuid_ = sg_acl_info.uuid;
+                SetSgAclInfo(sg_acl_info, out_sg_acl_info, false);
             } else {
                 data_.match_p.sg_action_summary = (1 << TrafficAction::PASS);
                 if (!ShouldDrop(data_.match_p.sg_action |
                                 data_.match_p.out_sg_action)) {
-                    sg_rule_uuid_ = sg_acl_info.uuid;
+                    SetSgAclInfo(sg_acl_info, out_sg_acl_info, false);
                 } else if (!ShouldDrop(data_.match_p.reverse_sg_action |
                                        data_.match_p.reverse_out_sg_action)) {
-                    sg_rule_uuid_ = rev_sg_acl_info.uuid;
+                    SetSgAclInfo(rev_out_sg_acl_info, rev_sg_acl_info, true);
                 }
             }
         }
@@ -1595,10 +1757,8 @@ FlowEntry::GetDestinationVrf() {
     const VrfEntry *vrf = NULL;
     VrfTable *vrf_table = flow_table()->agent()->vrf_table();
 
-    if (match_p().action_info.action &
-            (1 << TrafficAction::VRF_TRANSLATE)) {
-        vrf = vrf_table->FindVrfFromId(acl_assigned_vrf_index());
-    } else if (is_flags_set(FlowEntry::NatFlow)) {
+    if (is_flags_set(FlowEntry::NatFlow) ||
+        match_p().action_info.action & (1 << TrafficAction::VRF_TRANSLATE)) {
         vrf = vrf_table->FindVrfFromId(data().dest_vrf);
     } else {
         vrf = vrf_table->FindVrfFromId(data().vrf);
@@ -1788,9 +1948,80 @@ void FlowEntry::set_ecmp_rpf_nh(uint32_t id) {
         update_ksync = SetEcmpRpfNH(flow_table(), id);
     }
 
-    if (ksync_index_entry()->ksync_entry() && update_ksync) {
+    if (ksync_entry() && update_ksync) {
         flow_table()->UpdateKSync(this, true);
     }
+}
+
+bool FlowEntry::SetQosConfigIndex() {
+    uint32_t i = AgentQosConfigTable::kInvalidIndex;
+    MatchAclParamsList::const_iterator it;
+
+    //Priority of QOS config
+    // 1> SG
+    // 2> Interface
+    // 3> ACL
+    // 4> VN
+    if (is_flags_set(FlowEntry::ReverseFlow) &&
+        data_.match_p.sg_action_summary & 1 << TrafficAction::APPLY_QOS) {
+        i = reverse_flow_entry()->data().qos_config_idx;
+    } else if (data_.match_p.sg_action & 1 << TrafficAction::APPLY_QOS) {
+        for(it = data_.match_p.m_sg_acl_l.begin();
+                it != data_.match_p.m_sg_acl_l.end(); it++) {
+            if (it->action_info.action & 1 << TrafficAction::APPLY_QOS &&
+                    it->action_info.qos_config_action_.id()
+                    != AgentQosConfigTable::kInvalidIndex) {
+                i = it->action_info.qos_config_action_.id();
+                break;
+            }
+        }
+    } else if (data_.match_p.out_sg_action & 1 << TrafficAction::APPLY_QOS) {
+        for(it = data_.match_p.m_out_sg_acl_l.begin();
+                it != data_.match_p.m_out_sg_acl_l.end(); it++) {
+            if (it->action_info.action & 1 << TrafficAction::APPLY_QOS &&
+                    it->action_info.qos_config_action_.id() !=
+                    AgentQosConfigTable::kInvalidIndex) {
+                i = it->action_info.qos_config_action_.id();
+                break;
+            }
+        }
+    } else if (data_.match_p.policy_action & 1 << TrafficAction::APPLY_QOS) {
+        for(it = data_.match_p.m_acl_l.begin();
+                it != data_.match_p.m_acl_l.end(); it++) {
+            if (it->action_info.action & 1 << TrafficAction::APPLY_QOS &&
+                    it->action_info.qos_config_action_.id() !=
+                    AgentQosConfigTable::kInvalidIndex) {
+                i = it->action_info.qos_config_action_.id();
+                break;
+            }
+        }
+    } else if (data_.match_p.out_policy_action & 1 << TrafficAction::APPLY_QOS) {
+        for(it = data_.match_p.m_out_acl_l.begin();
+                it != data_.match_p.m_out_acl_l.end(); it++) {
+            if (it->action_info.action & 1 << TrafficAction::APPLY_QOS &&
+                    it->action_info.qos_config_action_.id() !=
+                    AgentQosConfigTable::kInvalidIndex) {
+                i = it->action_info.qos_config_action_.id();
+                break;
+            }
+        }
+    }
+
+    const VmInterface *intf =
+        dynamic_cast<const VmInterface*>(data_.intf_entry.get());
+    if (intf && intf->qos_config()) {
+        if (intf->is_vn_qos_config() == false ||
+                i == AgentQosConfigTable::kInvalidIndex) {
+            i = intf->qos_config()->id();
+        }
+    }
+
+    if (i != data_.qos_config_idx) {
+        data_.qos_config_idx = i;
+        return true;
+    }
+
+    return false;
 }
 
 // Recompute FlowEntry action based on ACLs already set in the flow
@@ -1829,6 +2060,10 @@ bool FlowEntry::ActionRecompute() {
     // Force short flows to DROP
     if (is_flags_set(FlowEntry::ShortFlow)) {
         action |= (1 << TrafficAction::DENY);
+    }
+
+    if (SetQosConfigIndex()) {
+        ret = true;
     }
 
     // check for conflicting actions and remove allowed action
@@ -1918,8 +2153,6 @@ void FlowEntry::UpdateReflexiveAction() {
     if (fwd_flow) {
         data_.match_p.sg_action_summary =
             fwd_flow->data().match_p.sg_action_summary;
-        // Since SG is reflexive ACL, copy sg_rule_uuid_ from forward flow
-        sg_rule_uuid_ = fwd_flow->sg_rule_uuid();
     }
     // If forward flow is DROP, set action for reverse flow to
     // TRAP. If packet hits reverse flow, we will re-establish
@@ -1928,6 +2161,106 @@ void FlowEntry::UpdateReflexiveAction() {
         data_.match_p.sg_action &= ~(TrafficAction::DROP_FLAGS);
         data_.match_p.sg_action |= (1 << TrafficAction::TRAP);
      }
+    data_.qos_config_idx = fwd_flow->data_.qos_config_idx;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Routines to manage pending actions on a flow. The pending actions are used
+// to state-compress actions trigged due to update of,
+// - DBEntries like interface, ACL etc..
+// - Routes
+/////////////////////////////////////////////////////////////////////////////
+FlowPendingAction::FlowPendingAction()  {
+    Reset();
+}
+
+FlowPendingAction::~FlowPendingAction() {
+}
+
+void FlowPendingAction::Reset() {
+    delete_ = false;
+    recompute_ = false;
+    recompute_dbentry_ = false;
+    revaluate_ = false;
+}
+
+bool FlowPendingAction::SetDelete() {
+    if (delete_)
+        return false;
+
+    delete_ = true;
+    return true;
+}
+
+void FlowPendingAction::ResetDelete() {
+    delete_ = false;
+    recompute_ = false;
+    recompute_dbentry_ = false;
+    revaluate_ = false;
+}
+
+bool FlowPendingAction::CanDelete() {
+    return delete_;
+}
+
+bool FlowPendingAction::SetRecompute() {
+    if (delete_ || recompute_)
+        return false;
+
+    recompute_ = true;
+    return true;
+}
+
+void FlowPendingAction::ResetRecompute() {
+    recompute_ = false;
+    recompute_dbentry_ = false;
+    revaluate_ = false;
+}
+
+bool FlowPendingAction::CanRecompute() {
+    if (delete_)
+        return false;
+
+    return recompute_;
+}
+
+bool FlowPendingAction::SetRecomputeDBEntry() {
+    if (delete_ || recompute_ || recompute_dbentry_)
+        return false;
+
+    recompute_dbentry_ = true;
+    return true;
+}
+
+void FlowPendingAction::ResetRecomputeDBEntry() {
+    recompute_dbentry_ = false;
+    revaluate_ = false;
+}
+
+bool FlowPendingAction::CanRecomputeDBEntry() {
+    if (delete_ || recompute_)
+        return false;
+
+    return recompute_dbentry_;
+}
+
+bool FlowPendingAction::SetRevaluate() {
+    if (delete_ || recompute_ || recompute_dbentry_ || revaluate_)
+        return false;
+
+    revaluate_ = true;
+    return true;
+}
+
+void FlowPendingAction::ResetRevaluate() {
+    revaluate_ = false;
+}
+
+bool FlowPendingAction::CanRevaluate() {
+    if (delete_ || recompute_ || recompute_dbentry_)
+        return false;
+
+    return revaluate_;
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -2026,6 +2359,7 @@ void FlowEntry::SetAclAction(std::vector<AclAction> &acl_action_l) const {
 }
 
 void FlowEntry::FillFlowInfo(FlowInfo &info) {
+    info.set_gen_id(gen_id_);
     info.set_flow_index(flow_handle_);
     if (key_.family == Address::INET) {
         info.set_source_ip(key_.src_addr.to_v4().to_ulong());
@@ -2071,6 +2405,10 @@ void FlowEntry::FillFlowInfo(FlowInfo &info) {
         info.set_allow(true);
     }
 
+    if (reverse_flow_entry_.get()) {
+        info.set_reverse_index(reverse_flow_entry_->flow_handle());
+    }
+
     if (is_flags_set(FlowEntry::NatFlow)) {
         info.set_nat(true);
         FlowEntry *nat_flow = reverse_flow_entry_.get();
@@ -2103,7 +2441,6 @@ void FlowEntry::FillFlowInfo(FlowInfo &info) {
             }
             info.set_nat_protocol(nat_flow->key().protocol);
             info.set_nat_vrf(data_.dest_vrf);
-            info.set_reverse_index(nat_flow->flow_handle());
             info.set_nat_mirror_vrf(nat_flow->data().mirror_vrf);
         }
     }
@@ -2138,6 +2475,7 @@ void FlowEntry::FillFlowInfo(FlowInfo &info) {
     info.set_l3_flow(l3_flow_);
     info.set_smac(data_.smac.ToString());
     info.set_dmac(data_.dmac.ToString());
+    info.set_short_flow_reason(FlowEntry::DropReasonStr(short_flow_reason_));
     info.set_drop_reason(FlowEntry::DropReasonStr(data_.drop_reason));
     if (flow_table_) {
         info.set_table_id(flow_table_->table_index());
@@ -2187,13 +2525,6 @@ void FlowEntry::SetAclFlowSandeshData(const AclDBEntry *acl,
     fe_sandesh_data.set_source_vn_list(data_.SourceVnList());
     fe_sandesh_data.set_dest_vn_list(data_.DestinationVnList());
     std::vector<uint32_t> v;
-    if (!fsc_) {
-        return;
-    }
-    const FlowExportInfo *info = fsc_->FindFlowExportInfo(uuid_);
-    if (!info) {
-        return;
-    }
     SecurityGroupList::const_iterator it;
     for (it = data_.source_sg_id_l.begin(); 
             it != data_.source_sg_id_l.end(); it++) {
@@ -2206,18 +2537,21 @@ void FlowEntry::SetAclFlowSandeshData(const AclDBEntry *acl,
         v.push_back(*it);
     }
     fe_sandesh_data.set_dest_sg_id_l(v);
-    if (info) {
-        fe_sandesh_data.set_flow_uuid(UuidToString(info->flow_uuid()));
-        fe_sandesh_data.set_bytes(integerToString(info->bytes()));
-        fe_sandesh_data.set_packets(integerToString(info->packets()));
-        fe_sandesh_data.set_setup_time(
-            integerToString(UTCUsecToPTime(info->setup_time())));
-        fe_sandesh_data.set_setup_time_utc(info->setup_time());
-        if (info->teardown_time()) {
-            fe_sandesh_data.set_teardown_time(
-                integerToString(UTCUsecToPTime(info->teardown_time())));
-        } else {
-            fe_sandesh_data.set_teardown_time("");
+    fe_sandesh_data.set_flow_uuid(UuidToString(uuid()));
+    if (fsc_) {
+        const FlowExportInfo *info = fsc_->FindFlowExportInfo(this);
+        if (info) {
+            fe_sandesh_data.set_bytes(integerToString(info->bytes()));
+            fe_sandesh_data.set_packets(integerToString(info->packets()));
+            fe_sandesh_data.set_setup_time(
+                integerToString(UTCUsecToPTime(info->setup_time())));
+            fe_sandesh_data.set_setup_time_utc(info->setup_time());
+            if (info->teardown_time()) {
+                fe_sandesh_data.set_teardown_time(
+                    integerToString(UTCUsecToPTime(info->teardown_time())));
+            } else {
+                fe_sandesh_data.set_teardown_time("");
+            }
         }
     }
     fe_sandesh_data.set_current_time(integerToString(
@@ -2260,4 +2594,101 @@ string FlowEntry::KeyString() const {
         << key_.dst_port << " "
         << (uint16_t)key_.protocol;
     return str.str();
+}
+
+static std::string EventToString(FlowEventLog::Event event,
+                                 std::string &event_str) {
+    switch (event) {
+    case FlowEventLog::FLOW_ADD:
+        event_str = "FlowAdd";
+        break;
+    case FlowEventLog::FLOW_UPDATE:
+        event_str = "FlowUpdate";
+        break;
+    case FlowEventLog::FLOW_DELETE:
+        event_str = "FlowDelete";
+        break;
+    case FlowEventLog::FLOW_EVICT:
+        event_str = "FlowEvict";
+        break;
+    case FlowEventLog::FLOW_HANDLE_ASSIGN:
+        event_str = "FlowHandleAssign";
+        break;
+    case FlowEventLog::FLOW_MSG_SKIP_EVICTED:
+        event_str = "FlowMessageSkippedEvictedFlow";
+        break;
+    default:
+        event_str = "Unknown";
+        break;
+    }
+    return event_str;
+}
+
+void FlowEntry::SetEventSandeshData(SandeshFlowIndexInfo *info) {
+    KSyncFlowIndexManager *mgr =
+        flow_table_->agent()->ksync()->ksync_flow_index_manager();
+    info->set_trace_index(event_log_index_);
+    if (mgr->sm_log_count() == 0) {
+        return;
+    }
+    int start = 0;
+    int count = event_log_index_;
+    if (event_log_index_ >= mgr->sm_log_count()) {
+        start = event_log_index_ % mgr->sm_log_count();
+        count = mgr->sm_log_count();
+    }
+    std::vector<SandeshFlowIndexTrace> trace_list;
+    for (int i = 0; i < count; i++) {
+        SandeshFlowIndexTrace trace;
+        FlowEventLog *log = &event_logs_[((start + i) % mgr->sm_log_count())];
+        trace.set_timestamp(log->time_);
+        trace.set_flow_handle(log->flow_handle_);
+        trace.set_flow_gen_id(log->flow_gen_id_);
+        string event_str;
+        trace.set_event(EventToString(log->event_, event_str));
+        trace.set_ksync_hash_id(log->hash_id_);
+        trace.set_ksync_gen_id(log->gen_id_);
+        trace.set_vrouter_flow_handle(log->vrouter_flow_handle_);
+        trace.set_vrouter_gen_id(log->vrouter_gen_id_);
+        trace_list.push_back(trace);
+    }
+    info->set_flow_index_trace(trace_list);
+}
+
+void FlowEntry::LogFlow(FlowEventLog::Event event, FlowTableKSyncEntry* ksync,
+                        uint32_t flow_handle, uint8_t gen_id) {
+    KSyncFlowIndexManager *mgr =
+        flow_table_->agent()->ksync()->ksync_flow_index_manager();
+    string event_str;
+    LOG(DEBUG, "Flow event = " << EventToString(event, event_str)
+        << " flow = " << (void *)this
+        << " flow->flow_handle = " << flow_handle_
+        << " flow->gen_id = " << (int)gen_id_
+        << " ksync = " << (void *)ksync
+        << " Ksync->hash_id = " << ((ksync != NULL) ? ksync->hash_id() : -1)
+        << " Ksync->gen_id = " << ((ksync != NULL) ? (int)ksync->gen_id() : 0)
+        << " new_flow_handle = " << flow_handle
+        << " new_gen_id = " << (int)gen_id);
+
+    if (mgr->sm_log_count() == 0) {
+        return;
+    }
+
+    if (event_logs_ == NULL) {
+        event_log_index_ = 0;
+        event_logs_.reset(new FlowEventLog[mgr->sm_log_count()]);
+    }
+
+    FlowEventLog *log = &event_logs_[event_log_index_ % mgr->sm_log_count()];
+    event_log_index_++;
+
+    log->time_ = ClockMonotonicUsec();
+    log->event_ = event;
+    log->flow_handle_ = flow_handle_;
+    log->flow_gen_id_ = gen_id_;
+    log->ksync_entry_ = ksync;
+    log->hash_id_ = (ksync != NULL) ? ksync->hash_id() : -1;
+    log->gen_id_ = (ksync != NULL) ? ksync->gen_id() : 0;
+    log->vrouter_flow_handle_ = flow_handle;
+    log->vrouter_gen_id_ = gen_id;
 }

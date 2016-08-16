@@ -11,6 +11,7 @@
 #include <boost/shared_ptr.hpp>
 #include <controller/controller_cleanup_timer.h>
 #include "xmpp/xmpp_channel.h"
+#include <oper/peer.h>
 
 class AgentXmppChannel;
 class AgentDnsXmppChannel;
@@ -68,9 +69,10 @@ private:
 
 class ControllerDiscoveryData : public ControllerWorkQueueData {
 public:
-    ControllerDiscoveryData(std::vector<DSResponse> resp);
+    ControllerDiscoveryData(xmps::PeerId peer_id, std::vector<DSResponse> resp);
     virtual ~ControllerDiscoveryData() {}
 
+    xmps::PeerId peer_id_;
     std::vector<DSResponse> discovery_response_;
     DISALLOW_COPY_AND_ASSIGN(ControllerDiscoveryData);
 };
@@ -82,10 +84,9 @@ public:
     typedef boost::shared_ptr<ControllerDeletePeerData> ControllerDeletePeerDataType;
     typedef boost::shared_ptr<ControllerWorkQueueData> ControllerWorkQueueDataType;
     typedef boost::shared_ptr<ControllerDiscoveryData> ControllerDiscoveryDataType;
-    typedef boost::shared_ptr<BgpPeer> BgpPeerPtr; 
-    typedef std::list<boost::shared_ptr<BgpPeer> > BgpPeerList;
+    typedef std::list<PeerPtr> BgpPeerList;
     typedef BgpPeerList::const_iterator BgpPeerConstIterator;
-    typedef std::list<boost::shared_ptr<BgpPeer> >::iterator BgpPeerIterator;
+    typedef std::list<PeerPtr>::iterator BgpPeerIterator;
 
     struct FabricMulticastLabelRange {
         FabricMulticastLabelRange() : start(), end(), fabric_multicast_label_range_str() {};
@@ -125,7 +126,7 @@ public:
     uint32_t DecommissionedPeerListSize() const {
         return decommissioned_peer_list_.size();
     }
-    void AddToDecommissionedPeerList(boost::shared_ptr<BgpPeer> peer);
+    void AddToDecommissionedPeerList(PeerPtr peer);
     const BgpPeerList &decommissioned_peer_list() const {
         return decommissioned_peer_list_;
     }
@@ -166,11 +167,16 @@ public:
     void RegisterControllerChangeCallback(XmppChannelDownCb xmpp_channel_down_cb) {
         xmpp_channel_down_cb_ = xmpp_channel_down_cb;
     }
-    bool XmppMessageTrace(uint8_t peer_index,
-                          const std::string &to_address,
-                          int port, int size,
-                          const std::string &msg,
-                          const XmppStanza::XmppMessage *xmpp_msg);
+    bool RxXmppMessageTrace(uint8_t peer_index,
+                            const std::string &to_address,
+                            int port, int size,
+                            const std::string &msg,
+                            const XmppStanza::XmppMessage *xmpp_msg);
+    bool TxXmppMessageTrace(uint8_t peer_index,
+                            const std::string &to_address,
+                            int port, int size,
+                            const std::string &msg,
+                            const XmppStanza::XmppMessage *xmpp_msg);
 
 private:
     AgentXmppChannel *FindAgentXmppChannel(const std::string &server_ip);
@@ -180,10 +186,11 @@ private:
     bool AgentXmppServerExists(const std::string &server_ip,
                                std::vector<DSResponse> resp);
     bool  ApplyDiscoveryXmppServicesInternal(std::vector<DSResponse> resp);
+    bool  ApplyDiscoveryDnsXmppServicesInternal(std::vector<DSResponse> resp);
 
     Agent *agent_;
     uint64_t multicast_sequence_number_;
-    std::list<boost::shared_ptr<BgpPeer> > decommissioned_peer_list_;
+    std::list<PeerPtr> decommissioned_peer_list_;
     boost::scoped_ptr<AgentIfMapVmExport> agent_ifmap_vm_export_;
     UnicastCleanupTimer unicast_cleanup_timer_;
     MulticastCleanupTimer multicast_cleanup_timer_;
@@ -203,6 +210,8 @@ extern SandeshTraceBufferPtr ControllerRxRouteMessageTraceBuf1;
 extern SandeshTraceBufferPtr ControllerRxConfigMessageTraceBuf1;
 extern SandeshTraceBufferPtr ControllerRxRouteMessageTraceBuf2;
 extern SandeshTraceBufferPtr ControllerRxConfigMessageTraceBuf2;
+extern SandeshTraceBufferPtr ControllerTxMessageTraceBuf1;
+extern SandeshTraceBufferPtr ControllerTxMessageTraceBuf2;
 
 #define CONTROLLER_RX_ROUTE_MESSAGE_TRACE(obj, index, ...)\
 do {\
@@ -253,6 +262,17 @@ do {\
 #define CONTROLLER_TRACE(obj, ...)\
 do {\
     AgentXmpp##obj::TraceMsg(ControllerTraceBuf, __FILE__, __LINE__, __VA_ARGS__);\
+} while(0);\
+
+#define CONTROLLER_TX_MESSAGE_TRACE(obj, index, ...)\
+do {\
+    if (index == 0) { \
+        AgentXmpp##obj::TraceMsg(ControllerTxMessageTraceBuf1, __FILE__, \
+                                 __LINE__, __VA_ARGS__);\
+    } else { \
+        AgentXmpp##obj::TraceMsg(ControllerTxMessageTraceBuf2, __FILE__, \
+                                 __LINE__, __VA_ARGS__);\
+    } \
 } while(0);\
 
 #endif

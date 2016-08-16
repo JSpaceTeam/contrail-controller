@@ -58,6 +58,7 @@ bool Icmpv6Handler::Run() {
         ICMPV6_TRACE(Trace, "Received ICMP with l3 disabled");
         return true;
     }
+    nd_neighbor_advert *icmp = (nd_neighbor_advert *)icmp_;
     switch (icmp_->icmp6_type) {
         case ND_ROUTER_SOLICIT:
             icmpv6_proto->IncrementStatsRouterSolicit(vm_itf);
@@ -103,9 +104,12 @@ bool Icmpv6Handler::Run() {
             break;
 
         case ND_NEIGHBOR_ADVERT:
-            icmpv6_proto->IncrementStatsNeighborAdvert(vm_itf);
+            if (icmp->nd_na_flags_reserved & ND_NA_FLAG_SOLICITED) {
+                icmpv6_proto->IncrementStatsNeighborAdvertSolicited(vm_itf);
+            } else {
+                icmpv6_proto->IncrementStatsNeighborAdvertUnSolicited(vm_itf);
+            }
             if (CheckPacket()) {
-                nd_neighbor_advert *icmp = (nd_neighbor_advert *)icmp_;
                 boost::array<uint8_t, 16> bytes;
                 for (int i = 0; i < 16; i++) {
                     bytes[i] = icmp->nd_na_target.s6_addr[i];
@@ -148,12 +152,16 @@ bool Icmpv6Handler::RouterAdvertisement(Icmpv6Proto *proto) {
     for (Icmpv6Proto::VmInterfaceMap::const_iterator it = interfaces.begin();
          it != interfaces.end(); ++it) {
         VmInterface *vmi = it->first;
-        if (vmi->IsIpv6Active()) {
+        if (vmi->IsIpv6Active() && !vmi->HasServiceVlan()) {
             pkt_info_->AllocPacketBuffer(agent(), PktHandler::ICMPV6, ICMP_PKT_SIZE, 0);
             pkt_info_->eth = (struct ether_header *)(pkt_info_->pkt);
             pkt_info_->ip6 = (ip6_hdr *)(pkt_info_->pkt + sizeof(struct ether_header));
+            uint32_t vlan_offset = 0;
+            if (vmi->tx_vlan_id() != VmInterface::kInvalidVlanId)
+                vlan_offset += 4;
             icmp_ = pkt_info_->transp.icmp6 =
-                (icmp6_hdr *)(pkt_info_->pkt + sizeof(struct ether_header) + sizeof(ip6_hdr));
+                (icmp6_hdr *)(pkt_info_->pkt + sizeof(struct ether_header) +
+                              vlan_offset + sizeof(ip6_hdr));
             Ip6Address prefix;
             uint8_t plen;
             if (vmi->vn()->GetPrefix(vmi->primary_ip6_addr(), &prefix, &plen)) {
@@ -184,8 +192,8 @@ bool Icmpv6Handler::CheckPacket() {
     return false;
 }
 
-uint16_t Icmpv6Handler::FillRouterAdvertisement(uint8_t *buf, uint8_t *src,
-                                                uint8_t *dest,
+uint16_t Icmpv6Handler::FillRouterAdvertisement(uint8_t *buf, uint32_t ifindex,
+                                                uint8_t *src, uint8_t *dest,
                                                 const Ip6Address &prefix,
                                                 uint8_t plen) {
     nd_router_advert *icmp = (nd_router_advert *)buf;
@@ -194,9 +202,15 @@ uint16_t Icmpv6Handler::FillRouterAdvertisement(uint8_t *buf, uint8_t *src,
     icmp->nd_ra_cksum = 0;
     icmp->nd_ra_curhoplimit = 64;
     icmp->nd_ra_flags_reserved = ND_RA_FLAG_MANAGED | ND_RA_FLAG_OTHER; //DHCPv6
-    icmp->nd_ra_router_lifetime = htons(9000);
     icmp->nd_ra_reachable = 0;
     icmp->nd_ra_retransmit = 0;
+
+    bool def_gw = IsDefaultGatewayConfigured(ifindex, prefix);
+    if (def_gw) {
+        icmp->nd_ra_router_lifetime = htons(9000);
+    } else {
+        icmp->nd_ra_router_lifetime = 0;
+    }
 
     // add source linklayer address information
     uint16_t offset = sizeof(nd_router_advert);
@@ -231,8 +245,8 @@ void Icmpv6Handler::SendRAResponse(uint32_t ifindex, uint32_t vrfindex,
                                    const MacAddress &dest_mac,
                                    const Ip6Address &prefix, uint8_t plen) {
     // fill in the response
-    uint16_t len = FillRouterAdvertisement((uint8_t *)icmp_, src_ip, dest_ip,
-                                           prefix, plen);
+    uint16_t len = FillRouterAdvertisement((uint8_t *)icmp_, ifindex, src_ip,
+                                           dest_ip, prefix, plen);
     SendIcmpv6Response(ifindex, vrfindex, src_ip, dest_ip, dest_mac, len);
 }
 
@@ -342,7 +356,8 @@ void Icmpv6Handler::SolicitedMulticastIpAndMac(const Ip6Address &dip,
 }
 
 void Icmpv6Handler::SendNeighborSolicit(const Ip6Address &sip,
-                                        const Ip6Address &dip, uint32_t itf,
+                                        const Ip6Address &dip,
+                                        const VmInterface *vmi,
                                         uint32_t vrf) {
     if (pkt_info_->packet_buffer() == NULL) {
         pkt_info_->AllocPacketBuffer(agent(), PktHandler::ICMPV6, ICMP_PKT_SIZE,
@@ -351,14 +366,35 @@ void Icmpv6Handler::SendNeighborSolicit(const Ip6Address &sip,
 
     pkt_info_->eth = (struct ether_header *)(pkt_info_->pkt);
     pkt_info_->ip6 = (ip6_hdr *)(pkt_info_->pkt + sizeof(struct ether_header));
+    uint32_t vlan_offset = 0;
+    if (vmi->tx_vlan_id() != VmInterface::kInvalidVlanId)
+        vlan_offset += 4;
     icmp_ = pkt_info_->transp.icmp6 =
             (icmp6_hdr *)(pkt_info_->pkt + sizeof(struct ether_header) +
-                          sizeof(ip6_hdr));
+                          vlan_offset + sizeof(ip6_hdr));
     uint8_t solicited_mcast_ip[16], source_ip[16];
     MacAddress dmac;
     memcpy(source_ip, sip.to_bytes().data(), sizeof(source_ip));
     SolicitedMulticastIpAndMac(dip, solicited_mcast_ip, dmac);
     uint16_t len = FillNeighborSolicit((uint8_t *)icmp_, dip, source_ip,
                                        solicited_mcast_ip);
-    SendIcmpv6Response(itf, vrf, source_ip, solicited_mcast_ip, dmac, len);
+    SendIcmpv6Response(vmi->id(), vrf, source_ip,
+                       solicited_mcast_ip, dmac, len);
+}
+
+bool Icmpv6Handler::IsDefaultGatewayConfigured(uint32_t ifindex,
+                                               const Ip6Address &addr) {
+    Interface *intf = agent()->interface_table()->FindInterface(ifindex);
+    if (!intf || intf->type() != Interface::VM_INTERFACE) {
+        return false;
+    }
+    VmInterface *vmi = static_cast<VmInterface *>(intf);
+    if (!vmi->vn()) {
+        return false;
+    }
+    const VnIpam *ipam = vmi->vn()->GetIpam(addr);
+    if (!ipam || !ipam->default_gw.is_v6()) {
+        return false;
+    }
+    return !(ipam->default_gw.to_v6().is_unspecified());
 }

@@ -58,8 +58,10 @@ void ShowIFMapXmppClientInfo::CopyNode(IFMapXmppClientInfo *dest,
     dest->set_client_index(src->index());
     dest->set_msgs_sent(src->msgs_sent());
     dest->set_msgs_blocked(src->msgs_blocked());
-    dest->set_nodes_sent(src->nodes_sent());
-    dest->set_links_sent(src->links_sent());
+    dest->set_update_nodes_sent(src->update_nodes_sent());
+    dest->set_delete_nodes_sent(src->delete_nodes_sent());
+    dest->set_update_links_sent(src->update_links_sent());
+    dest->set_delete_links_sent(src->delete_links_sent());
     dest->set_bytes_sent(src->bytes_sent());
     dest->set_is_blocked(src->send_is_blocked());
 
@@ -149,7 +151,7 @@ void IFMapXmppClientInfoShowReq::HandleRequest() const {
 
     // 2 stages - first: gather/read, second: send
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.allocFn_ = ShowIFMapXmppClientInfo::AllocBuffer;
     s0.cbFn_ = ShowIFMapXmppClientInfo::BufferStage;
     s0.instances_.push_back(0);

@@ -5,9 +5,11 @@
 #include "base/test/task_test_util.h"
 
 #include <boost/asio/deadline_timer.hpp>
+#include <boost/bind.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 
 #include "base/task.h"
+#include "base/task_annotations.h"
 #include "io/event_manager.h"
 #include "testing/gunit.h"
 
@@ -21,7 +23,7 @@ namespace task_util {
 // Use environment variable WAIT_FOR_IDLE to tune the value appropriately
 // based on the test load and the running environment (pprof, valgrind, etc.)
 //
-void WaitForIdle(long wait_seconds, bool running_only) {
+void WaitForIdle(long wait_seconds, bool running_only, bool verify) {
     static const long kTimeoutUsecs = 1000;
     static long envWaitTime;
 
@@ -42,7 +44,8 @@ void WaitForIdle(long wait_seconds, bool running_only) {
         }
         usleep(kTimeoutUsecs);
     }
-    EXPECT_TRUE(scheduler->IsEmpty(running_only));
+    if (verify)
+        EXPECT_TRUE(scheduler->IsEmpty(running_only));
 }
 
 static void TimeoutHandler(const boost::system::error_code &error) {
@@ -108,6 +111,22 @@ TaskSchedulerLock::TaskSchedulerLock() {
 
 TaskSchedulerLock::~TaskSchedulerLock() {
     TaskScheduler::GetInstance()->Start();
+}
+
+TaskFire::TaskFire(FunctionPtr func, const std::string task_name,
+                   int instance) :
+        func_(func), task_name_(task_name),
+        task_trigger_(new TaskTrigger(boost::bind(&TaskFire::Run, this),
+                      TaskScheduler::GetInstance()->GetTaskId(task_name),
+                      instance)) {
+    task_trigger_->Set();
+    TASK_UTIL_EXPECT_FALSE(task_trigger_->IsSet());
+}
+
+bool TaskFire::Run() {
+   CHECK_CONCURRENCY(task_name_.c_str());
+   func_();
+   return true;
 }
 
 }  // namespace task_util

@@ -44,6 +44,11 @@ libprocessinfo = env.Library('process_info',
                           ['connection_info.cc'] +
                           ProcessInfoSandeshGenSrcs)
 
+NodeInfoSandeshGenFiles = env.SandeshGenCpp('sandesh/nodeinfo.sandesh')
+NodeInfoSandeshGenSrcs = env.ExtractCpp(NodeInfoSandeshGenFiles)
+libnodeinfo = env.Library('nodeinfo',
+                          NodeInfoSandeshGenSrcs)
+
 VersionInfoSandeshGenFiles = env.SandeshGenCpp('sandesh/version.sandesh')
 VersionInfoSandeshGenSrcs = env.ExtractCpp(VersionInfoSandeshGenFiles)
 
@@ -54,6 +59,7 @@ libbase = env.Library('base',
                        'contrail_ports.cc',
                        'misc_utils.cc',
                        'bitset.cc',
+                       'index_allocator.cc',
                        'label_block.cc',
                        'lifetime.cc',
                        'logging.cc',
@@ -62,6 +68,7 @@ libbase = env.Library('base',
                        'task_annotations.cc',
                        'task_sandesh.cc',
                        'task_trigger.cc',
+                       'tdigest.c',
                        timer,
                        taskinfo_sandesh_files_,
                        ]])

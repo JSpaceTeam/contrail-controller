@@ -40,6 +40,25 @@ private:
     tbb::atomic<bool> task_held_;
 };
 
+struct TestForwardingClassData {
+    uint32_t id_;
+    uint32_t dscp_;
+    uint32_t vlan_priority_;
+    uint32_t mpls_exp_;
+    uint32_t qos_queue_;
+};
+
+struct TestQosConfigData {
+    std::string name_;
+    uint32_t id_;
+    std::string type_;
+    uint32_t default_forwarding_class_;
+
+    std::map<uint32_t, uint32_t> dscp_;
+    std::map<uint32_t, uint32_t> vlan_priority_;
+    std::map<uint32_t, uint32_t> mpls_exp_;
+};
+
 uuid MakeUuid(int id);
 void DelXmlHdr(char *buff, int &len);
 void DelXmlTail(char *buff, int &len);
@@ -114,6 +133,7 @@ bool VmPortPolicyEnabled(int id);
 bool VmPortPolicyEnabled(PortInfo *input, int id);
 Interface *VmPortGet(int id);
 bool VmPortFloatingIpCount(int id, unsigned int count);
+bool VmPortAliasIpCount(int id, unsigned int count);
 bool VmPortGetStats(PortInfo *input, int id, uint32_t & bytes, uint32_t & pkts);
 bool VmPortStats(PortInfo *input, int id, uint32_t bytes, uint32_t pkts);
 bool VmPortStatsMatch(Interface *intf, uint32_t ibytes, uint32_t ipkts, 
@@ -144,12 +164,21 @@ void VnAddReq(int id, const char *name, const char *vrf_name);
 void VnVxlanAddReq(int id, const char *name, uint32_t vxlan_id);
 void VnDelReq(int id);
 void VrfAddReq(const char *name);
+void VrfAddReq(const char *name, const boost::uuids::uuid &vn_uuid);
 void VrfDelReq(const char *name);
 void VmAddReq(int id);
 void VmDelReq(int id);
 void AclAddReq(int id);
 void AclDelReq(int id);
 void AclAddReq(int id, int ace_id, bool drop);
+void StartAcl(string *str, const char *name, int id);
+void EndAcl(string *str);
+void AddAceEntry(string *str, const char *src_vn, const char *dst_vn,
+                 const char *proto, uint16_t sport_start, uint16_t sport_end,
+                 uint16_t dport_start, uint16_t dport_end,
+                 const char *action, const std::string &vrf_assign,
+                 const std::string &mirror_ip);
+
 void DeleteRoute(const char *vrf, const char *ip, uint8_t plen,
                  const Peer *peer = NULL);
 void DeleteRoute(const char *vrf, const char *ip);
@@ -238,6 +267,9 @@ void AddAcl(const char *name, int id, const char *src_vn, const char *dest_vn,
 void AddVrfAssignNetworkAcl(const char *name, int id, const char *src_vn,
                             const char *dest_vn, const char *action,
                             std::string vrf_name);
+void AddQosAcl(const char *name, int id, const char *src_vn,
+               const char *dest_vn, const char *action,
+               std::string qos_config);
 void AddMirrorAcl(const char *name, int id, const char *src_vn,
                   const char *dest_vn, const char *action,
                   std::string mirror_ip);
@@ -248,6 +280,10 @@ void AddFloatingIp(const char *name, int id, const char *addr,
 void DelFloatingIp(const char *name);
 void AddFloatingIpPool(const char *name, int id);
 void DelFloatingIpPool(const char *name);
+void AddAliasIp(const char *name, int id, const char *addr);
+void DelAliasIp(const char *name);
+void AddAliasIpPool(const char *name, int id);
+void DelAliasIpPool(const char *name);
 void AddIPAM(const char *name, IpamInfo *ipam, int size, const char *ipam_attr = NULL,
              const char *vdns_name = NULL,
              const std::vector<std::string> *vm_host_routes = NULL,
@@ -313,6 +349,9 @@ bool FlowGetNat(const string &vrf_name, const char *sip, const char *dip,
                 const char *nat_vrf, const char *nat_sip,
                 const char *nat_dip, uint16_t nat_sport, int16_t nat_dport,
                 int nh_id, int nat_nh_id);
+FlowEntry* FlowGet(std::string sip, std::string dip, uint8_t proto,
+                   uint16_t sport, uint16_t dport, int nh_id,
+                   uint32_t flow_handle);
 FlowEntry* FlowGet(int nh_id, std::string sip, std::string dip, uint8_t proto,
                    uint16_t sport, uint16_t dport);
 bool FlowGet(const string &vrf_name, const char *sip, const char *dip,
@@ -360,8 +399,12 @@ void DelVmPortVrf(const char *name);
 uint32_t PathCount(const string vrf_name, const Ip4Address &addr, int plen);
 bool VlanNhFind(int id, uint16_t tag);
 void AddInstanceIp(const char *name, int id, const char* addr);
+void AddServiceInstanceIp(const char *name, int id, const char* addr, bool ecmp,
+                          const char *tracking_ip);
 void AddSubnetType(const char *name, int id, const char* addr, uint8_t);
 void AddActiveActiveInstanceIp(const char *name, int id, const char* addr);
+void AddHealthCheckServiceInstanceIp(const char *name, int id,
+                                     const char *addr);
 void DelInstanceIp(const char *name);
 extern Peer *bgp_peer_;
 VxLanId* GetVxLan(const Agent *agent, uint32_t vxlan_id);
@@ -378,6 +421,11 @@ void AddEncapList(Agent *agent, const char *encap1, const char *encap2,
                   const char *encap3);
 void DelEncapList();
 void DelEncapList(Agent *agent);
+
+void DelHealthCheckService(const char *name);
+void AddHealthCheckService(const char *name, int id, const char *url_path,
+                           const char *monitor_type);
+
 void VxLanNetworkIdentifierMode(bool config);
 void GlobalForwardingMode(std::string mode);
 int MplsToVrfId(int label);
@@ -392,6 +440,14 @@ void AddInterfaceRouteTable(const char *name, int id, TestIp4Prefix *addr,
 void AddInterfaceRouteTableV6(const char *name, int id, TestIp6Prefix *addr,
                               int count);
 void ShutdownAgentController(Agent *agent);
+void AddAap(std::string intf_name, int intf_id,
+            std::vector<Ip4Address> aap_list);
+void AddEcmpAap(std::string intf_name, int intf_id, Ip4Address ip);
+void AddAap(std::string intf_name, int intf_id, Ip4Address ip,
+            const std::string &mac);
+void AddAapWithDisablePolicy(std::string intf_name, int intf_id,
+                             std::vector<Ip4Address> aap_list,
+                             bool disable_policy);
 
 class XmppChannelMock : public XmppChannel {
 public:
@@ -403,6 +459,7 @@ public:
     void Close() { }
     void CloseComplete() { }
     bool IsCloseInProgress() const { return false; }
+    int GetTaskInstance() const { return 0; }
     MOCK_METHOD2(RegisterReceive, void(xmps::PeerId, ReceiveCb));
     MOCK_METHOD1(UnRegisterReceive, void(xmps::PeerId));
     MOCK_METHOD1(UnRegisterWriteReady, void(xmps::PeerId));
@@ -414,6 +471,8 @@ public:
     const XmppConnection *connection() const { return NULL; }
 
     virtual void RegisterRxMessageTraceCallback(RxMessageTraceCb cb) {
+    }
+    virtual void RegisterTxMessageTraceCallback(TxMessageTraceCb cb) {
     }
     virtual std::string LastStateName() const {
         return "";
@@ -495,4 +554,34 @@ void AddPhysicalDeviceVn(Agent *agent, int dev_id, int vn_id, bool validate);
 void DelPhysicalDeviceVn(Agent *agent, int dev_id, int vn_id, bool validate);
 void AddStaticPreference(std::string intf_name, int intf_id, uint32_t value);
 bool VnMatch(VnListType &vn_list, std::string &vn);
+void SendBgpServiceConfig(const std::string &ip,
+                          uint32_t source_port,
+                          uint32_t id,
+                          const std::string &vmi_name,
+                          const std::string &vrf_name,
+                          const std::string &bgp_router_type,
+                          bool deleted);
+void AddAddressVrfAssignAcl(const char *intf_name, int intf_id,
+                            const char *sip, const char *dip, int proto,
+                            int sport_start, int sport_end, int dport_start,
+                            int dport_end, const char *vrf, const char *ignore_acl);
+void SendBgpServiceConfig(const std::string &ip,
+                          uint32_t source_port,
+                          uint32_t id,
+                          const std::string &vmi_name,
+                          const std::string &vrf_name,
+                          const std::string &bgp_router_type,
+                          bool deleted);
+bool QosConfigFind(uint32_t id);
+const AgentQosConfig* QosConfigGetByIndex(uint32_t id);
+const AgentQosConfig* QosConfigGet(uint32_t id);
+bool ForwardingClassFind(uint32_t id);
+ForwardingClass *ForwardingClassGet(uint32_t id);
+
+void AddGlobalConfig(struct TestForwardingClassData *data, uint32_t count);
+void DelGlobalConfig(struct TestForwardingClassData *data, uint32_t count);
+void VerifyForwardingClass(Agent *agent, struct TestForwardingClassData *data,
+                           uint32_t count);
+void VerifyQosConfig(Agent *agent, struct TestQosConfigData *data);
+void AddQosConfig(struct TestQosConfigData &data);
 #endif // vnsw_agent_test_cmn_util_h

@@ -401,7 +401,7 @@ void StaticRoute<T>::RemoveStaticRoute() {
 // UpdateStaticRoute
 template <typename T>
 void StaticRoute<T>::UpdateStaticRoute() {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     RouteT rt_key(prefix_);
     DBTablePartition *partition =
        static_cast<DBTablePartition *>(bgp_table()->GetTablePartition(&rt_key));
@@ -512,11 +512,13 @@ void StaticRoute<T>::AddStaticRoute(NexthopPathIdList *old_path_ids) {
         BgpPath *existing_path = static_route->FindPath(BgpPath::StaticRoute,
                                                         NULL, path_id);
         bool is_stale = false;
+        bool is_llgr_stale = false;
         if (existing_path != NULL) {
             if ((new_attr.get() != existing_path->GetAttr()) ||
                 (nexthop_route_path->GetLabel() != existing_path->GetLabel())) {
                 // Update Attributes and notify (if needed)
                 is_stale = existing_path->IsStale();
+                is_llgr_stale = existing_path->IsLlgrStale();
                 static_route->RemovePath(BgpPath::StaticRoute, NULL, path_id);
             } else {
                 continue;
@@ -528,6 +530,8 @@ void StaticRoute<T>::AddStaticRoute(NexthopPathIdList *old_path_ids) {
                 nexthop_route_path->GetFlags(), nexthop_route_path->GetLabel());
         if (is_stale)
             new_path->SetStale();
+        if (is_llgr_stale)
+            new_path->SetLlgrStale();
 
         static_route->InsertPath(new_path);
         partition->Notify(static_route);
@@ -720,7 +724,7 @@ void StaticRouteMgr<T>::UnregisterAndResolveStaticRoute(StaticRoutePtr entry) {
 template <typename T>
 void StaticRouteMgr<T>::LocateStaticRoutePrefix(
     const StaticRouteConfig &config) {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     AddressT address = this->GetAddress(config.address);
     PrefixT prefix(address, config.prefix_length);
 
@@ -774,7 +778,7 @@ void StaticRouteMgr<T>::LocateStaticRoutePrefix(
 template <typename T>
 void StaticRouteMgr<T>::StopStaticRouteDone(BgpTable *table,
                                              ConditionMatch *info) {
-    CHECK_CONCURRENCY("db::DBTable");
+    CHECK_CONCURRENCY("db::Walker");
     StaticRoute<T> *match = static_cast<StaticRoute<T> *>(info);
     match->set_unregistered();
     if (!match->num_matchstate() && match->unregistered()) {
@@ -785,7 +789,7 @@ void StaticRouteMgr<T>::StopStaticRouteDone(BgpTable *table,
 
 template <typename T>
 void StaticRouteMgr<T>::RemoveStaticRoutePrefix(const PrefixT &static_route) {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     typename StaticRouteMap::iterator it = static_route_map_.find(static_route);
     if (it == static_route_map_.end()) return;
 
@@ -800,7 +804,7 @@ void StaticRouteMgr<T>::RemoveStaticRoutePrefix(const PrefixT &static_route) {
 
 template <typename T>
 void StaticRouteMgr<T>::ProcessStaticRouteConfig() {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     if (routing_instance()->deleted() || !routing_instance()->config()) return;
     const BgpInstanceConfig::StaticRouteList &list =
         routing_instance()->config()->static_routes(GetFamily());
@@ -825,7 +829,7 @@ bool CompareStaticRouteConfig(const StaticRouteConfig &lhs,
 
 template <typename T>
 void StaticRouteMgr<T>::UpdateStaticRouteConfig() {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     StaticRouteConfigList config_list =
         routing_instance()->config()->static_routes(GetFamily());
     sort(config_list.begin(), config_list.end(), CompareStaticRouteConfig);
@@ -875,7 +879,7 @@ void StaticRouteMgr<T>::UpdateStaticRoute(typename StaticRouteMap::iterator loc,
 
 template <typename T>
 void StaticRouteMgr<T>::NotifyAllRoutes() {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     for (typename StaticRouteMap::iterator it = static_route_map_.begin();
          it != static_route_map_.end(); ++it) {
         StaticRouteT *static_route =
@@ -886,7 +890,7 @@ void StaticRouteMgr<T>::NotifyAllRoutes() {
 
 template <typename T>
 void StaticRouteMgr<T>::UpdateAllRoutes() {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     for (typename StaticRouteMap::iterator it = static_route_map_.begin();
          it != static_route_map_.end(); ++it) {
         StaticRouteT *static_route =
@@ -907,13 +911,13 @@ void StaticRouteMgr<T>::EnableUnregisterTrigger() {
 
 template <typename T>
 uint32_t StaticRouteMgr<T>::GetRouteCount() const {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Uve");
     return static_route_map_.size();
 }
 
 template <typename T>
 uint32_t StaticRouteMgr<T>::GetDownRouteCount() const {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Uve");
     uint32_t count = 0;
     for (typename StaticRouteMap::const_iterator it = static_route_map_.begin();
          it != static_route_map_.end(); ++it) {

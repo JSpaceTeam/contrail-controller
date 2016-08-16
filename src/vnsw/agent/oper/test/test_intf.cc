@@ -1528,26 +1528,24 @@ TEST_F(IntfTest, IntfActivateDeactivate_1) {
     EXPECT_FALSE(RouteFind("vrf1", "1.1.1.10", 32));
 
     uuid intf_uuid = MakeUuid(1);
+    MacAddress mac = MacAddress::FromString("00:00:00:01:01:01");
     VmInterfaceKey *intf_key1 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
     VmInterfaceKey *intf_key2 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
-    VmInterfaceKey *intf_key3 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
     VmInterfaceKey *intf_key4 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
     VmInterfaceKey *intf_key5 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
 
-    InterfaceNHKey unicast_nh_key(intf_key1, false, InterfaceNHFlags::INET4);
+    InterfaceNHKey unicast_nh_key(intf_key1, false, InterfaceNHFlags::INET4, mac);
     EXPECT_FALSE(FindNH(&unicast_nh_key));
 
-    InterfaceNHKey unicast_policy_nh_key(intf_key2, true, InterfaceNHFlags::INET4);
+    InterfaceNHKey unicast_policy_nh_key(intf_key2, true, InterfaceNHFlags::INET4,
+                                         mac);
     EXPECT_FALSE(FindNH(&unicast_policy_nh_key));
 
-    InterfaceNHKey multicast_nh_key(intf_key3, false, InterfaceNHFlags::MULTICAST |
-                                    InterfaceNHFlags::INET4);
-    EXPECT_FALSE(FindNH(&multicast_nh_key));
-
-    InterfaceNHKey bridge_nh_key(intf_key4, false, InterfaceNHFlags::BRIDGE);
+    InterfaceNHKey bridge_nh_key(intf_key4, false, InterfaceNHFlags::BRIDGE, mac);
     EXPECT_FALSE(FindNH(&bridge_nh_key));
 
-    InterfaceNHKey bridge_policy_nh_key(intf_key5, true, InterfaceNHFlags::BRIDGE);
+    InterfaceNHKey bridge_policy_nh_key(intf_key5, true,
+                                        InterfaceNHFlags::BRIDGE, mac);
     EXPECT_FALSE(FindNH(&bridge_policy_nh_key));
 
     AddPort(input[0].name, 1);
@@ -1555,7 +1553,6 @@ TEST_F(IntfTest, IntfActivateDeactivate_1) {
     client->WaitForIdle();
     EXPECT_TRUE(FindNH(&unicast_nh_key));
     EXPECT_TRUE(FindNH(&unicast_policy_nh_key));
-    EXPECT_TRUE(FindNH(&multicast_nh_key));
     EXPECT_TRUE(FindNH(&bridge_nh_key));
     EXPECT_TRUE(FindNH(&bridge_policy_nh_key));
 
@@ -1564,7 +1561,6 @@ TEST_F(IntfTest, IntfActivateDeactivate_1) {
     client->WaitForIdle();
     EXPECT_FALSE(FindNH(&unicast_nh_key));
     EXPECT_FALSE(FindNH(&unicast_policy_nh_key));
-    EXPECT_FALSE(FindNH(&multicast_nh_key));
     EXPECT_FALSE(FindNH(&bridge_nh_key));
     EXPECT_FALSE(FindNH(&bridge_policy_nh_key));
     EXPECT_FALSE(VrfFind("vrf1", true));
@@ -1585,23 +1581,22 @@ TEST_F(IntfTest, IntfActivateDeactivate_2) {
     EXPECT_TRUE(VmPortActive(input, 0));
 
     uuid intf_uuid = MakeUuid(1);
+    MacAddress mac = MacAddress::FromString("00:00:00:01:01:01");
     VmInterfaceKey *intf_key1 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
     VmInterfaceKey *intf_key2 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
-    VmInterfaceKey *intf_key3 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
     VmInterfaceKey *intf_key4 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
     VmInterfaceKey *intf_key5 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
 
-    InterfaceNHKey unicast_nh_key(intf_key1, false, InterfaceNHFlags::INET4);
-    InterfaceNHKey unicast_policy_nh_key(intf_key2, true, InterfaceNHFlags::INET4);
-    InterfaceNHKey multicast_nh_key(intf_key3, false, InterfaceNHFlags::MULTICAST |
-                                    InterfaceNHFlags::INET4);
-    InterfaceNHKey bridge_nh_key(intf_key4, false, InterfaceNHFlags::BRIDGE);
-    InterfaceNHKey bridge_policy_nh_key(intf_key5, true, InterfaceNHFlags::BRIDGE);
-
+    InterfaceNHKey unicast_nh_key(intf_key1, false, InterfaceNHFlags::INET4, mac);
+    InterfaceNHKey unicast_policy_nh_key(intf_key2, true, InterfaceNHFlags::INET4,
+                                         mac);
+    InterfaceNHKey bridge_nh_key(intf_key4, false, InterfaceNHFlags::BRIDGE,
+                                 mac);
+    InterfaceNHKey bridge_policy_nh_key(intf_key5, true, InterfaceNHFlags::BRIDGE,
+                                        mac);
     client->WaitForIdle();
     EXPECT_TRUE(FindNH(&unicast_nh_key));
     EXPECT_TRUE(FindNH(&unicast_policy_nh_key));
-    EXPECT_TRUE(FindNH(&multicast_nh_key));
     EXPECT_TRUE(FindNH(&bridge_nh_key));
     EXPECT_TRUE(FindNH(&bridge_policy_nh_key));
 
@@ -1612,7 +1607,6 @@ TEST_F(IntfTest, IntfActivateDeactivate_2) {
     WAIT_FOR(100, 1000, (FindNH(&unicast_nh_key) == false));
     EXPECT_FALSE(FindNH(&unicast_nh_key));
     EXPECT_FALSE(FindNH(&unicast_policy_nh_key));
-    EXPECT_FALSE(FindNH(&multicast_nh_key));
     EXPECT_FALSE(FindNH(&bridge_nh_key));
     EXPECT_FALSE(FindNH(&bridge_policy_nh_key));
 
@@ -1622,7 +1616,6 @@ TEST_F(IntfTest, IntfActivateDeactivate_2) {
     client->WaitForIdle();
     EXPECT_TRUE(FindNH(&unicast_nh_key));
     EXPECT_TRUE(FindNH(&unicast_policy_nh_key));
-    EXPECT_TRUE(FindNH(&multicast_nh_key));
     EXPECT_TRUE(FindNH(&bridge_nh_key));
     EXPECT_TRUE(FindNH(&bridge_policy_nh_key));
 
@@ -1630,7 +1623,6 @@ TEST_F(IntfTest, IntfActivateDeactivate_2) {
     client->WaitForIdle();
     EXPECT_FALSE(FindNH(&unicast_nh_key));
     EXPECT_FALSE(FindNH(&unicast_policy_nh_key));
-    EXPECT_FALSE(FindNH(&multicast_nh_key));
     EXPECT_FALSE(FindNH(&bridge_nh_key));
     EXPECT_FALSE(FindNH(&bridge_policy_nh_key));
     EXPECT_FALSE(VrfFind("vrf1", true));
@@ -1650,23 +1642,21 @@ TEST_F(IntfTest, DISABLED_IntfActivateDeactivate_5) {
     client->WaitForIdle();
 
     uuid intf_uuid = MakeUuid(1);
+    MacAddress mac = MacAddress::FromString("00:00:00:01:01:01");
     VmInterfaceKey *intf_key1 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
     VmInterfaceKey *intf_key2 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
-    VmInterfaceKey *intf_key3 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
     VmInterfaceKey *intf_key4 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
     VmInterfaceKey *intf_key5 = new VmInterfaceKey(AgentKey::RESYNC, intf_uuid, "");
 
-    InterfaceNHKey unicast_nh_key(intf_key1, false, InterfaceNHFlags::INET4);
-    InterfaceNHKey unicast_policy_nh_key(intf_key2, true, InterfaceNHFlags::INET4);
-    InterfaceNHKey multicast_nh_key(intf_key3, false, InterfaceNHFlags::MULTICAST |
-                                    InterfaceNHFlags::INET4);
-    InterfaceNHKey bridge_nh_key(intf_key4, false, InterfaceNHFlags::BRIDGE);
-    InterfaceNHKey bridge_policy_nh_key(intf_key5, true, InterfaceNHFlags::BRIDGE);
-
+    InterfaceNHKey unicast_nh_key(intf_key1, false, InterfaceNHFlags::INET4, mac);
+    InterfaceNHKey unicast_policy_nh_key(intf_key2, true,
+                                         InterfaceNHFlags::INET4, mac);
+    InterfaceNHKey bridge_nh_key(intf_key4, false, InterfaceNHFlags::BRIDGE, mac);
+    InterfaceNHKey bridge_policy_nh_key(intf_key5, true,
+                                        InterfaceNHFlags::BRIDGE, mac);
     client->WaitForIdle();
     EXPECT_FALSE(FindNH(&unicast_nh_key));
     EXPECT_FALSE(FindNH(&unicast_policy_nh_key));
-    EXPECT_TRUE(FindNH(&multicast_nh_key));
     EXPECT_TRUE(FindNH(&bridge_nh_key));
     EXPECT_TRUE(FindNH(&bridge_policy_nh_key));
 
@@ -1678,7 +1668,6 @@ TEST_F(IntfTest, DISABLED_IntfActivateDeactivate_5) {
     client->WaitForIdle();
     EXPECT_TRUE(FindNH(&unicast_nh_key));
     EXPECT_TRUE(FindNH(&unicast_policy_nh_key));
-    EXPECT_TRUE(FindNH(&multicast_nh_key));
     EXPECT_TRUE(FindNH(&bridge_nh_key));
     EXPECT_TRUE(FindNH(&bridge_policy_nh_key));
 
@@ -1686,7 +1675,6 @@ TEST_F(IntfTest, DISABLED_IntfActivateDeactivate_5) {
     client->WaitForIdle();
     EXPECT_FALSE(FindNH(&unicast_nh_key));
     EXPECT_FALSE(FindNH(&unicast_policy_nh_key));
-    EXPECT_FALSE(FindNH(&multicast_nh_key));
     EXPECT_FALSE(FindNH(&bridge_nh_key));
     EXPECT_FALSE(FindNH(&bridge_policy_nh_key));
     EXPECT_FALSE(VrfFind("vrf1", true));
@@ -1717,6 +1705,11 @@ TEST_F(IntfTest, VmPortServiceVlanDelete_1) {
     Ip4Address service_ip = Ip4Address::from_string("2.2.2.100");
     EXPECT_TRUE(RouteFind("vrf2", service_ip, 32));
     EXPECT_TRUE(VmPortServiceVlanCount(1, 1));
+    InetUnicastRouteEntry *rt = RouteGet("vrf2", service_ip, 32);
+    if (rt) {
+        EXPECT_TRUE(rt->GetActivePath()->path_preference().dependent_ip() ==
+                    Ip4Address::from_string("1.1.1.10"));
+    }
     DoInterfaceSandesh("");
     client->WaitForIdle();
 
@@ -1771,6 +1764,12 @@ TEST_F(IntfTest, VmPortServiceVlanDelete_2) {
     Ip4Address service_ip = Ip4Address::from_string("2.2.2.100");
     EXPECT_TRUE(RouteFind("vrf2", service_ip, 32));
     EXPECT_TRUE(VmPortServiceVlanCount(1, 1));
+    InetUnicastRouteEntry *rt = RouteGet("vrf2", service_ip, 32);
+    if (rt) {
+        EXPECT_TRUE(rt->GetActivePath()->path_preference().dependent_ip() ==
+                    Ip4Address::from_string("1.1.1.10"));
+    }
+
     DoInterfaceSandesh("");
     client->WaitForIdle();
 
@@ -1811,6 +1810,13 @@ TEST_F(IntfTest, VmPortServiceVlanDelete_2) {
     client->WaitForIdle();
     EXPECT_TRUE(RouteFind("vrf2", service_ip, 32));
     EXPECT_TRUE(VmPortServiceVlanCount(1, 1));
+
+    rt = RouteGet("vrf2", service_ip, 32);
+    if (rt) {
+        EXPECT_TRUE(rt->GetActivePath()->path_preference().dependent_ip() ==
+                    Ip4Address::from_string("1.1.1.10"));
+    }
+
     DoInterfaceSandesh("");
     client->WaitForIdle();
 
@@ -1867,6 +1873,11 @@ TEST_F(IntfTest, VmPortServiceVlanAdd_1) {
     EXPECT_TRUE(VmPortActive(input, 0));
     service_ip = Ip4Address::from_string("2.2.2.100");
     EXPECT_TRUE(RouteFind("vrf2", service_ip, 32));
+    InetUnicastRouteEntry *rt = RouteGet("vrf2", service_ip, 32);
+    if (rt) {
+        EXPECT_TRUE(rt->GetActivePath()->path_preference().dependent_ip() ==
+                    Ip4Address::from_string("1.1.1.10"));
+    }
 
     //Delete config for vnet1, forcing interface to deactivate
     //verify that route and service vlan map gets cleaned up
@@ -1913,6 +1924,11 @@ TEST_F(IntfTest, VmPortServiceVlanAdd_2) {
     client->WaitForIdle();
     Ip4Address service_ip = Ip4Address::from_string("2.2.2.100");
     EXPECT_TRUE(RouteFind("vrf2", service_ip, 32));
+    InetUnicastRouteEntry *rt = RouteGet("vrf2", service_ip, 32);
+    if (rt) {
+        EXPECT_TRUE(rt->GetActivePath()->path_preference().dependent_ip() ==
+                    Ip4Address::from_string("1.1.1.10"));
+    }
 
     //Delete the interface, all service vlan routes should be deleted
     //and interface should be released
@@ -2001,6 +2017,201 @@ TEST_F(IntfTest, VmPortServiceVlanAdd_3) {
     DelVrf("vrf2");
     DelVn("vn2");
     client->WaitForIdle();
+    DeleteVmportEnv(input, 1, true);
+    client->WaitForIdle();
+    EXPECT_FALSE(VrfFind("vrf1"));
+    EXPECT_FALSE(VrfFind("vrf2"));
+}
+
+/* Test to verify behavior of ServiceVlan activation when service-vrf is
+ * delete marked.*/
+TEST_F(IntfTest, VmPortServiceVlanVrfDelete_1) {
+    struct PortInfo input[] = {
+        {"vnet1", 1, "1.1.1.10", "00:00:00:01:01:01", 1, 1},
+    };
+
+    client->Reset();
+    CreateVmportEnv(input, 1);
+    client->WaitForIdle();
+    EXPECT_TRUE(VmPortActive(input, 0));
+
+    AddVn("vn2", 2);
+    AddVrf("vrf2", 2);
+    AddLink("virtual-network", "vn2", "routing-instance", "vrf2");
+    //Add service vlan for vnet1
+    client->WaitForIdle();
+    AddVmPortVrf("vmvrf1", "2.2.2.100", 10);
+    AddLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "routing-instance", "vrf2");
+    AddLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "virtual-machine-interface", "vnet1");
+
+    client->WaitForIdle();
+    Ip4Address service_ip = Ip4Address::from_string("2.2.2.100");
+    EXPECT_TRUE(RouteFind("vrf2", service_ip, 32));
+    EXPECT_TRUE(VmPortServiceVlanCount(1, 1));
+    client->WaitForIdle();
+
+    //Mark service VRF as deleted
+    VrfEntry *vrf = VrfGet("vrf2", false);
+    EXPECT_TRUE(vrf != NULL);
+    vrf->MarkDelete();
+
+    //Trigger change on VMI (we are doing this by associating secondary IP)
+    AddInstanceIp("instance2", input[0].vm_id, "3.1.1.10");
+    AddLink("virtual-machine-interface", input[0].name,
+            "instance-ip", "instance2");
+    client->WaitForIdle();
+
+    //Clear the delete flag from service VRF so that it can be deleted
+    vrf->ClearDelete();
+
+    //Verify that service vlan count is still 1 and route is still present in
+    //service VRF
+    EXPECT_TRUE(VmPortServiceVlanCount(1, 1));
+    EXPECT_TRUE(RouteFind("vrf2", service_ip, 32));
+
+    //Clean-up
+    DelLink("virtual-machine-interface", input[0].name,
+            "instance-ip", "instance2");
+    DelInstanceIp("instance2");
+    //Delete config for vnet1, forcing interface to deactivate
+    //verify that route and service vlan map gets cleaned up
+    DelNode("virtual-machine-interface", input[0].name);
+    client->WaitForIdle();
+    EXPECT_FALSE(RouteFind("vrf2", service_ip, 32));
+    client->WaitForIdle();
+
+    DelLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "routing-instance", "vrf2");
+    DelLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "virtual-machine-interface", "vnet1");
+    DelVmPortVrf("vmvrf1");
+    client->WaitForIdle();
+    DelLink("virtual-network", "vn2", "routing-instance", "vrf2");
+    DelVrf("vrf2");
+    DelVn("vn2");
+    DeleteVmportEnv(input, 1, true);
+    client->WaitForIdle();
+    EXPECT_FALSE(VrfFind("vrf1"));
+    EXPECT_FALSE(VrfFind("vrf2"));
+}
+
+TEST_F(IntfTest, VmPortServiceVlanServiceIp_1) {
+    struct PortInfo input[] = {
+        {"vnet1", 1, "1.1.1.10", "00:00:00:01:01:01", 1, 1},
+    };
+
+    client->Reset();
+    CreateVmportEnv(input, 1);
+    client->WaitForIdle();
+    EXPECT_TRUE(VmPortActive(input, 0));
+    Ip4Address service_ip = Ip4Address::from_string("2.2.2.100");
+
+    AddVn("vn2", 2);
+    AddVrf("vrf2", 2);
+    AddLink("virtual-network", "vn2", "routing-instance", "vrf2");
+    //Add service vlan for vnet1
+    client->WaitForIdle();
+    AddVmPortVrf("vmvrf1", "2.2.2.100", 10);
+    AddLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "routing-instance", "vrf2");
+    AddLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "virtual-machine-interface", "vnet1");
+    client->WaitForIdle();
+
+    InetUnicastRouteEntry *rt = RouteGet("vrf2", service_ip, 32);
+    EXPECT_TRUE(rt->GetActivePath()->path_preference().dependent_ip() ==
+                Ip4Address::from_string("1.1.1.10"));
+
+    AddServiceInstanceIp("serviceip1", 100, "1.1.1.100", false, NULL);
+    AddLink("virtual-machine-interface", "vnet1", "instance-ip", "serviceip1");
+    client->WaitForIdle();
+
+    EXPECT_TRUE(rt->GetActivePath()->path_preference().dependent_ip() ==
+                Ip4Address::from_string("1.1.1.100"));
+    EXPECT_TRUE(rt->GetActivePath()->path_preference().ecmp() == false);
+
+    AddServiceInstanceIp("serviceip1", 100, "1.1.1.100", true, NULL);
+    client->WaitForIdle();
+    EXPECT_TRUE(rt->GetActivePath()->path_preference().ecmp() == true);
+
+    DelLink("virtual-machine-interface", "vnet1", "instance-ip", "serviceip1");
+    client->WaitForIdle();
+    EXPECT_TRUE(rt->GetActivePath()->path_preference().dependent_ip() ==
+                            Ip4Address::from_string("1.1.1.10"));
+    EXPECT_TRUE(rt->GetActivePath()->path_preference().ecmp() == false);
+
+    DelNode("instance-ip", "serviceip1");
+    //Clean up
+    DelLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "routing-instance", "vrf2");
+    DelLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "virtual-machine-interface", "vnet1");
+    DelLink("virtual-network", "vn2", "routing-instance", "vrf2");
+    DelLink("virtual-network", "vn1", "virtual-machine-interface",
+            input[0].name);
+    DelVmPortVrf("vmvrf1");
+    DelVrf("vrf2");
+    DelVn("vn2");
+    client->WaitForIdle();
+    DeleteVmportEnv(input, 1, true);
+    client->WaitForIdle();
+    EXPECT_FALSE(VrfFind("vrf1"));
+    EXPECT_FALSE(VrfFind("vrf2"));
+}
+
+TEST_F(IntfTest, VmPortServiceVlanChange_1) {
+    struct PortInfo input[] = {
+        {"vnet1", 1, "1.1.1.10", "00:00:00:01:01:01", 1, 1},
+    };
+
+    client->Reset();
+    CreateVmportEnv(input, 1);
+    client->WaitForIdle();
+    EXPECT_TRUE(VmPortActive(input, 0));
+
+    AddVn("vn2", 2);
+    AddVrf("vrf2", 2);
+    AddVrf("vrf3", 3);
+    AddLink("virtual-network", "vn2", "routing-instance", "vrf2");
+    //Add service vlan for vnet1
+    client->WaitForIdle();
+    AddVmPortVrf("vmvrf1", "2.2.2.100", 10);
+    AddLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "routing-instance", "vrf2");
+    AddLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "virtual-machine-interface", "vnet1");
+
+    client->WaitForIdle();
+    Ip4Address service_ip = Ip4Address::from_string("2.2.2.100");
+    EXPECT_TRUE(RouteFind("vrf2", service_ip, 32));
+    EXPECT_TRUE(VmPortServiceVlanCount(1, 1));
+    InetUnicastRouteEntry *rt = RouteGet("vrf2", service_ip, 32);
+    EXPECT_TRUE(rt);
+
+    AddVmPortVrf("vmvrf1", "2.2.2.100", 10);
+    DelLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "routing-instance", "vrf2");
+    AddLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "routing-instance", "vrf3");
+    AddLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "virtual-machine-interface", "vnet1");
+    client->WaitForIdle();
+
+    rt = RouteGet("vrf2", service_ip, 32);
+    EXPECT_TRUE(rt == NULL);
+
+    DelLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "routing-instance", "vrf3");
+    DelLink("virtual-machine-interface-routing-instance", "vmvrf1",
+            "virtual-machine-interface", "vnet1");
+    DelVmPortVrf("vmvrf1");
+    client->WaitForIdle();
+    DelLink("virtual-network", "vn2", "routing-instance", "vrf2");
+    DelVn("vn2");
+    DelVrf("vrf3");
+    DelVrf("vrf2");
     DeleteVmportEnv(input, 1, true);
     client->WaitForIdle();
     EXPECT_FALSE(VrfFind("vrf1"));
@@ -2584,7 +2795,7 @@ TEST_F(IntfTest, vm_interface_change_req) {
     EXPECT_TRUE(VmPortActive(input1, 0));
     EXPECT_TRUE(VmPortFind(8));
     VmInterface *vm_interface = static_cast<VmInterface *>(VmPortGet(8));
-    EXPECT_TRUE(vm_interface->vm_mac() == "00:00:00:01:01:01");
+    EXPECT_TRUE(vm_interface->vm_mac().ToString() == "00:00:00:01:01:01");
     client->Reset();
 
     CreateVmportEnv(input1_mac_changed, 1);
@@ -2593,7 +2804,7 @@ TEST_F(IntfTest, vm_interface_change_req) {
     EXPECT_TRUE(VmPortFind(8));
     client->Reset();
     //No change expected as vm interface change results in no modifications
-    EXPECT_TRUE(vm_interface->vm_mac() == "00:00:00:01:01:01");
+    EXPECT_TRUE(vm_interface->vm_mac().ToString() == "00:00:00:01:01:01");
 
     DeleteVmportEnv(input1, 1, true);
     client->WaitForIdle();
@@ -3195,9 +3406,14 @@ TEST_F(IntfTest, Layer2Mode_2) {
     struct PortInfo input1[] = {
         {"vnet8", 8, "8.1.1.1", "00:00:00:01:01:01", 1, 1}
     };
+    IpamInfo ipam_info[] = {
+        {"8.1.1.0", 24, "8.1.1.10", true},
+    };
 
     client->Reset();
     CreateVmportEnv(input1, 1, 1);
+    client->WaitForIdle();
+    AddIPAM("vn1", ipam_info, 1);
     client->WaitForIdle();
     EXPECT_TRUE(VmPortActive(input1, 0));
     client->Reset();
@@ -3258,6 +3474,8 @@ TEST_F(IntfTest, Layer2Mode_2) {
 
     DeleteVmportEnv(input1, 1, true, 1);
     client->WaitForIdle();
+    DelIPAM("vn1");
+    client->WaitForIdle();
     EXPECT_FALSE(VmPortFind(8));
     VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(8), "");
     WAIT_FOR(100, 1000, (Agent::GetInstance()->interface_table()->Find(&key, true)
@@ -3270,9 +3488,15 @@ TEST_F(IntfTest, Layer2Mode_3) {
         {"vnet1", 1, "0.0.0.0", "00:00:00:01:01:01", 1, 1, "fd11::2"},
     };
 
+    IpamInfo ipam_info[] = {
+        {"fd11::", 96, "fd11::1"},
+    };
+
     CreateV6VmportEnv(input, 1, 0, NULL, NULL, false);
     WAIT_FOR(100, 1000, (VmPortActive(input, 0)) == false);
     WAIT_FOR(100, 1000, (VmPortV6Active(input, 0)) == true);
+    client->WaitForIdle();
+    AddIPAM("vn1", ipam_info, 1);
     client->WaitForIdle();
 
     boost::system::error_code ec;
@@ -3322,6 +3546,8 @@ TEST_F(IntfTest, Layer2Mode_3) {
 
     DeleteVmportEnv(input, 1, 1, 0, NULL, NULL, false, true);
     client->WaitForIdle();
+    DelIPAM("vn1");
+    client->WaitForIdle();
     EXPECT_FALSE(VmPortFind(8));
     VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(1), "");
     WAIT_FOR(100, 1000, (Agent::GetInstance()->interface_table()->Find(&key, true)
@@ -3335,8 +3561,15 @@ TEST_F(IntfTest, MultipleIp) {
         {"vnet8", 8, "8.1.1.1", "00:00:00:01:01:01", 1, 1}
     };
 
+    IpamInfo ipam_info[] = {
+        {"8.1.1.0", 24, "8.1.1.10"},
+        {"1.1.1.0", 24, "1.1.1.100"},
+    };
+
     client->Reset();
     CreateVmportEnv(input1, 1, 1);
+    client->WaitForIdle();
+    AddIPAM("vn1", ipam_info, 2);
     client->WaitForIdle();
     EXPECT_TRUE(VmPortActive(input1, 0));
     client->Reset();
@@ -3390,6 +3623,8 @@ TEST_F(IntfTest, MultipleIp) {
     DelInstanceIp("instance2");
     DeleteVmportEnv(input1, 1, true, 1);
     client->WaitForIdle();
+    DelIPAM("vn1");
+    client->WaitForIdle();
     EXPECT_FALSE(VmPortFind(8));
     VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(8), "");
     WAIT_FOR(100, 1000, (Agent::GetInstance()->interface_table()->Find(&key, true)
@@ -3403,9 +3638,15 @@ TEST_F(IntfTest, MultipleIp1) {
         {"vnet1", 1, "0.0.0.0", "00:00:00:01:01:01", 1, 1, "fd11::2"},
     };
 
+    IpamInfo ipam_info[] = {
+        {"fd11::", 96, "fd11:1"},
+    };
+
     CreateV6VmportEnv(input, 1, 1, NULL, NULL, false);
     WAIT_FOR(100, 1000, (VmPortActive(input, 0)) == false);
     WAIT_FOR(100, 1000, (VmPortV6Active(input, 0)) == true);
+    client->WaitForIdle();
+    AddIPAM("vn1", ipam_info, 1);
     client->WaitForIdle();
 
     boost::system::error_code ec;
@@ -3456,6 +3697,8 @@ TEST_F(IntfTest, MultipleIp1) {
     DelInstanceIp("instance2");
     DeleteVmportEnv(input, 1, 1, 1, NULL, NULL, false, true);
     client->WaitForIdle();
+    DelIPAM("vn1");
+    client->WaitForIdle();
     EXPECT_FALSE(VmPortFind(8));
     VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(8), "");
     WAIT_FOR(100, 1000, (Agent::GetInstance()->interface_table()->Find(&key, true)
@@ -3470,8 +3713,15 @@ TEST_F(IntfTest, MultipleIp2) {
         {"vnet8", 8, "8.1.1.1", "00:00:00:01:01:01", 1, 1}
     };
 
+    IpamInfo ipam_info[] = {
+        {"8.1.1.0", 24, "8.1.1.10"},
+        {"1.1.1.0", 24, "1.1.1.100"},
+    };
+
     client->Reset();
     CreateVmportEnv(input1, 1, 1);
+    client->WaitForIdle();
+    AddIPAM("vn1", ipam_info, 2);
     client->WaitForIdle();
     EXPECT_TRUE(VmPortActive(input1, 0));
     client->Reset();
@@ -3568,6 +3818,8 @@ TEST_F(IntfTest, MultipleIp2) {
             "instance-ip", "instance2");
     DeleteVmportEnv(input1, 1, true, 1);
     client->WaitForIdle();
+    DelIPAM("vn1");
+    client->WaitForIdle();
     EXPECT_FALSE(VmPortFind(8));
     VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(8), "");
     WAIT_FOR(100, 1000, (Agent::GetInstance()->interface_table()->Find(&key, true)
@@ -3582,8 +3834,15 @@ TEST_F(IntfTest, MultipleIp3) {
         {"vnet8", 8, "8.1.1.1", "00:00:00:01:01:01", 1, 1}
     };
 
+    IpamInfo ipam_info[] = {
+        {"8.1.1.0", 24, "8.1.1.10"},
+        {"1.1.1.0", 24, "1.1.1.100"},
+    };
+
     client->Reset();
     CreateVmportEnv(input1, 1, 1);
+    client->WaitForIdle();
+    AddIPAM("vn1", ipam_info, 2);
     client->WaitForIdle();
     EXPECT_TRUE(VmPortActive(input1, 0));
     client->Reset();
@@ -3652,6 +3911,87 @@ TEST_F(IntfTest, MultipleIp3) {
     DelLink("virtual-machine-interface", input1[0].name,
             "instance-ip", "instance2");
     DeleteVmportEnv(input1, 1, true, 1);
+    client->WaitForIdle();
+    DelIPAM("vn1");
+    client->WaitForIdle();
+    EXPECT_FALSE(VmPortFind(8));
+    VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(8), "");
+    WAIT_FOR(100, 1000, (Agent::GetInstance()->interface_table()->Find(&key, true)
+                == NULL));
+    client->Reset();
+}
+
+//Addition and deletion of service health check IP
+TEST_F(IntfTest, ServiceHealthCheckIP) {
+    struct PortInfo input1[] = {
+        {"vnet8", 8, "8.1.1.1", "00:00:00:01:01:01", 1, 1}
+    };
+
+    IpamInfo ipam_info[] = {
+        {"8.1.1.0", 24, "8.1.1.10"},
+        {"1.1.1.0", 24, "1.1.1.100"},
+    };
+
+    client->Reset();
+    CreateVmportEnv(input1, 1, 1);
+    client->WaitForIdle();
+    AddIPAM("vn1", ipam_info, 2);
+    client->WaitForIdle();
+    EXPECT_TRUE(VmPortActive(input1, 0));
+    client->Reset();
+
+    AddHealthCheckServiceInstanceIp("instance2", input1[0].vm_id, "1.1.1.10");
+    AddLink("virtual-machine-interface", input1[0].name,
+            "instance-ip", "instance2");
+    client->WaitForIdle();
+
+    const VmInterface *vm_intf = static_cast<const VmInterface *>(VmPortGet(8));
+    const MacAddress mac("00:00:00:01:01:01");
+    Ip4Address ip = Ip4Address::from_string("8.1.1.1");
+    Ip4Address service_hc_ip = Ip4Address::from_string("1.1.1.10");
+    Ip4Address zero_ip = Ip4Address::from_string("0.0.0.0");
+
+    EXPECT_TRUE(L2RouteFind("vrf1", mac));
+    EvpnRouteEntry *evpn_rt = EvpnRouteGet("vrf1", mac, zero_ip,
+                                           vm_intf->ethernet_tag());
+    EXPECT_TRUE(evpn_rt != NULL);
+    EXPECT_TRUE(evpn_rt->GetActiveNextHop()->PolicyEnabled() == true);
+
+    //Verify primary route is found
+    evpn_rt = EvpnRouteGet("vrf1", mac, ip, vm_intf->ethernet_tag());
+    EXPECT_TRUE(evpn_rt != NULL);
+    EXPECT_TRUE(evpn_rt->GetActiveNextHop()->PolicyEnabled() == true);
+    EXPECT_TRUE(RouteFind("vrf1", ip, 32));
+
+    //Verify service health check IP route is found
+    evpn_rt = EvpnRouteGet("vrf1", mac, service_hc_ip, vm_intf->ethernet_tag());
+    EXPECT_TRUE(evpn_rt != NULL);
+    EXPECT_TRUE(evpn_rt->GetActiveNextHop()->PolicyEnabled() == true);
+    EXPECT_TRUE(RouteFind("vrf1", service_hc_ip, 32));
+    EXPECT_TRUE(vm_intf->instance_ipv4_list().list_.size() == 2);
+    EXPECT_TRUE(vm_intf->service_health_check_ip().to_v4() == service_hc_ip);
+
+    DelLink("virtual-machine-interface", input1[0].name,
+            "instance-ip", "instance2");
+    client->WaitForIdle();
+
+    //Verify primary route is found
+    evpn_rt = EvpnRouteGet("vrf1", mac, ip, vm_intf->ethernet_tag());
+    EXPECT_TRUE(evpn_rt != NULL);
+    EXPECT_TRUE(evpn_rt->GetActiveNextHop()->PolicyEnabled() == true);
+    EXPECT_TRUE(RouteFind("vrf1", ip, 32));
+
+    //Verify secondary IP route is not found since link is deleted
+    evpn_rt = EvpnRouteGet("vrf1", mac, service_hc_ip, vm_intf->ethernet_tag());
+    EXPECT_TRUE(evpn_rt == NULL);
+    EXPECT_FALSE(RouteFind("vrf1", service_hc_ip, 32));
+    EXPECT_TRUE(vm_intf->instance_ipv4_list().list_.size() == 1);
+    EXPECT_TRUE(vm_intf->service_health_check_ip().to_v4() == zero_ip);
+
+    DelInstanceIp("instance2");
+    DeleteVmportEnv(input1, 1, true, 1);
+    client->WaitForIdle();
+    DelIPAM("vn1");
     client->WaitForIdle();
     EXPECT_FALSE(VmPortFind(8));
     VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(8), "");
@@ -3748,8 +4088,13 @@ TEST_F(IntfTest, IntfAddDel) {
     struct PortInfo input[] = {
         {"vnet1", 1, "1.1.1.1", "00:00:00:00:00:01", 1, 1},
     };
+    IpamInfo ipam_info[] = {
+        {"1.1.1.0", 24, "1.1.1.10"},
+    };
 
     CreateVmportEnv(input, 1);
+    client->WaitForIdle();
+    AddIPAM("vn1", ipam_info, 1);
     client->WaitForIdle();
     EXPECT_TRUE(VmPortFind(1));
 
@@ -3774,6 +4119,8 @@ TEST_F(IntfTest, IntfAddDel) {
     EXPECT_TRUE(RouteFind("vrf1", "1.1.1.1", 32));
 
     DeleteVmportEnv(input, 1, true);
+    client->WaitForIdle();
+    DelIPAM("vn1");
     client->WaitForIdle();
     EXPECT_FALSE(VmPortFind(1));
     client->Reset();

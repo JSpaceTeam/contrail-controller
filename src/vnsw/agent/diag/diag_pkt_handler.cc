@@ -13,9 +13,10 @@
 #include "diag/diag.h"
 #include "diag/diag_proto.h"
 #include "diag/ping.h"
+#include "diag/overlay_ping.h"
 #include "oper/mirror_table.h"
-
-
+#include <oper/vxlan.h>
+using namespace boost::posix_time; 
 void DiagPktHandler::SetReply() {
     AgentDiagPktData *ad = (AgentDiagPktData *)pkt_info_->data;
     ad->op_ = htonl(AgentDiagPktData::DIAG_REPLY);
@@ -56,15 +57,31 @@ bool DiagPktHandler::IsTraceRoutePacket() {
     return false;
 }
 
+bool DiagPktHandler::IsOverlayPingPacket() {
+    if (pkt_info_->agent_hdr.cmd == AgentHdr::TRAP_ROUTER_ALERT)
+        return true;
+    return false;
+}
+
 bool DiagPktHandler::HandleTraceRoutePacket() {
 
+    uint32_t rabit =0;
     if (pkt_info_->ip == NULL) {
         // we only send IPv4 trace route packets; ignore other packets
         return true;
     }
 
     if (pkt_info_->ip->ip_ttl == 0) {
-        SendTimeExceededPacket();
+        if (pkt_info_->dport == VXLAN_UDP_DEST_PORT) {
+            VxlanHdr *vxlan = (VxlanHdr *)(pkt_info_->transp.udp + 1);
+            rabit = ntohl(vxlan->reserved) & OverlayPing::kVxlanRABit;
+        }
+
+        if (rabit) {
+           SendOverlayResponse(); 
+        } else {
+            SendTimeExceededPacket();
+        }
         return true;
     }
 
@@ -118,8 +135,14 @@ bool DiagPktHandler::HandleTraceRouteResponse() {
     uint8_t *data = (uint8_t *)(pkt_info_->transp.icmp) + 8;
     uint16_t len = pkt_info_->len - (data - pkt_info_->pkt);
     DiagEntry::DiagKey key = -1;
-    if (!ParseIcmpData(data, len, (uint16_t *)&key))
-        return true;
+    // if it is Overlay packet get the key from Oam data 
+    if (IsOverlayPingPacket()) {
+        OverlayOamPktData *oamdata = (OverlayOamPktData * )pkt_info_->data;
+        key = ntohs(oamdata->org_handle_); 
+    } else {
+        if (!ParseIcmpData(data, len, (uint16_t *)&key))
+            return true;
+    }
 
     DiagEntry *entry = diag_table_->Find(key);
     if (!entry) return true;
@@ -205,11 +228,30 @@ bool DiagPktHandler::ParseIcmpData(const uint8_t *data, uint16_t data_len,
 }
 
 bool DiagPktHandler::Run() {
+    bool isoverlay_packet = IsOverlayPingPacket();
+    AgentDiagPktData *ad = NULL;
+    AgentDiagPktData tempdata;
+    
     if (IsTraceRoutePacket()) {
         return HandleTraceRoutePacket();
     }
 
-    AgentDiagPktData *ad = (AgentDiagPktData *)pkt_info_->data;
+    if (isoverlay_packet) {
+        // Process Overlay packet
+        // papulate diag data AgentDiagPktData here
+        memset(&tempdata, 0, sizeof(AgentDiagPktData));
+        ad = &tempdata;
+        OverlayOamPktData *oamdata = (OverlayOamPktData * )pkt_info_->data; 
+        if (oamdata->msg_type_ == OverlayOamPktData::OVERLAY_ECHO_REQUEST) {
+            ad->op_ = htonl(AgentDiagPktData::DIAG_REQUEST);
+        } else if (oamdata->msg_type_ == OverlayOamPktData::OVERLAY_ECHO_REPLY) {
+            ad->op_ = htonl(AgentDiagPktData::DIAG_REPLY);
+        }
+        
+        ad->key_ = oamdata->org_handle_;
+    } else {
+        ad = (AgentDiagPktData *)pkt_info_->data;
+    }
 
     if (!ad) {
         //Ignore if packet doesnt have proper L4 header
@@ -222,6 +264,11 @@ bool DiagPktHandler::Run() {
     if (ntohl(ad->op_) == AgentDiagPktData::DIAG_REQUEST) {
         //Request received swap the packet
         //and dump the packet back
+        if (isoverlay_packet) {
+            // Reply packet with after setting the TLV content.
+            SendOverlayResponse();
+            return true;
+        } 
         Reply();
         return true;
     }
@@ -235,7 +282,6 @@ bool DiagPktHandler::Run() {
     if (!entry) {
         return true;
     }
-
     entry->HandleReply(this);
 
     if (entry->GetSeqNo() == entry->GetMaxAttempts()) {
@@ -245,7 +291,7 @@ bool DiagPktHandler::Run() {
     } else {
         entry->Retry();
     }
-
+    
     return true;
 }
 
@@ -313,4 +359,49 @@ void DiagPktHandler::Swap() {
     SwapL4();
     SwapIpHdr();
     SwapEthHdr();
+}
+
+void DiagPktHandler::SetReturnCode(uint8_t *retcode) {
+
+    VxLanId *vxlan; 
+    vxlan = 
+    Agent::GetInstance()->vxlan_table()->Find(pkt_info_->tunnel.vxlan_id);
+    
+    if (vxlan) {
+      *retcode = OverlayOamPktData::RETURN_CODE_OK;
+    } else {
+      *retcode = OverlayOamPktData::OVERLAY_SEGMENT_NOT_PRESET;
+    }
+}
+
+void DiagPktHandler::TunnelHdrSwap() {
+    struct ether_header *eth = pkt_info_->tunnel.eth;
+    EthHdr((char *)eth, sizeof(struct ether_header), MacAddress(eth->ether_dhost), 
+           MacAddress(eth->ether_shost), ntohs(eth->ether_type), 
+           VmInterface::kInvalidVlanId);
+    struct ip *ip = pkt_info_->tunnel.ip;
+    IpHdr((char *)ip, sizeof(struct ip), ntohs(ip->ip_len),ip->ip_dst.s_addr, 
+            ip->ip_src.s_addr, ip->ip_p, DEFAULT_IP_ID, DEFAULT_IP_TTL);
+}
+void DiagPktHandler::SendOverlayResponse() {
+    Agent *agent = Agent::GetInstance();
+    TunnelHdrSwap();
+   // Swap();
+    OverlayOamPktData *oamdata = (OverlayOamPktData * )pkt_info_->data;
+    if (oamdata->reply_mode_ == OverlayOamPktData::DONT_REPLY) {
+        return ;
+    }
+    oamdata->msg_type_ = OverlayOamPktData::OVERLAY_ECHO_REPLY;
+    SetReturnCode(&oamdata->return_code_);
+    boost::posix_time::ptime time = microsec_clock::universal_time();
+    boost::posix_time::time_duration td = time.time_of_day();
+    oamdata->timerecv_sec_ = td.total_seconds();
+    oamdata->timerecv_misec_ = td.total_microseconds() - 
+        seconds(oamdata->timerecv_sec_).total_microseconds();;
+    PhysicalInterfaceKey key1(agent->fabric_interface_name());
+    Interface *intf = static_cast<Interface *>
+                (agent->interface_table()->Find(&key1, true));
+    Send(intf->id(), agent->fabric_vrf()->vrf_id(),
+         AgentHdr::TX_SWITCH, CMD_PARAM_PACKET_CTRL,
+         CMD_PARAM_1_DIAG, PktHandler::DIAG);
 }

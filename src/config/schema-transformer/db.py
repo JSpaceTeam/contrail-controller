@@ -9,6 +9,7 @@ Schema transformer DB to store ids allocated by it
 from pycassa import NotFoundException
 
 import cfgm_common as common
+from cfgm_common.exceptions import VncError, NoIdError
 from cfgm_common.zkclient import IndexAllocator
 from cfgm_common.vnc_cassandra import VncCassandraClient
 from sandesh_common.vns.constants import SCHEMA_KEYSPACE_NAME
@@ -56,15 +57,22 @@ class SchemaTransformerDB(VncCassandraClient):
             self._zk_path_pfx = ''
 
         keyspaces = {
-            self._KEYSPACE: [(self._RT_CF, None),
-                             (self._SC_IP_CF, None),
-                             (self._SERVICE_CHAIN_CF, None),
-                             (self._SERVICE_CHAIN_UUID_CF, None)]}
+            self._KEYSPACE: {self._RT_CF: {},
+                             self._SC_IP_CF: {},
+                             self._SERVICE_CHAIN_CF: {},
+                             self._SERVICE_CHAIN_UUID_CF: {}}}
         cass_server_list = self._args.cassandra_server_list
+
+        cred = None
+        if (self._args.cassandra_user is not None and
+            self._args.cassandra_password is not None):
+            cred={'username':self._args.cassandra_user,
+                  'password':self._args.cassandra_password}
 
         super(SchemaTransformerDB, self).__init__(
             cass_server_list, self._args.cluster_id, keyspaces, None,
-            manager.config_log, reset_config=self._args.reset_config)
+            manager.config_log, reset_config=self._args.reset_config,
+            credential=cred)
 
         SchemaTransformerDB._rt_cf = self._cf_dict[self._RT_CF]
         SchemaTransformerDB._sc_ip_cf = self._cf_dict[self._SC_IP_CF]
@@ -75,8 +83,17 @@ class SchemaTransformerDB(VncCassandraClient):
 
         # reset zookeeper config
         if self._args.reset_config:
-            zkclient.delete_node(self._zk_path_pfx + "/id", True)
+            zkclient.delete_node(
+                self._zk_path_pfx + self._BGP_RTGT_ALLOC_PATH, True)
+            zkclient.delete_node(
+                 self._zk_path_pfx + self._BGPAAS_PORT_ALLOC_PATH, True)
+            zkclient.delete_node(
+                self._zk_path_pfx + self._SERVICE_CHAIN_VLAN_ALLOC_PATH, True)
 
+        # TODO(ethuleau): We keep the virtual network and security group ID
+        #                 allocation in schema and in the vnc API for one
+        #                 release overlap to prevent any upgrade issue. So the
+        #                 following code need to be remove in release (3.2 + 1)
         self._vn_id_allocator = IndexAllocator(
             zkclient, self._zk_path_pfx+self._VN_ID_ALLOC_PATH, self._VN_MAX_ID)
         self._sg_id_allocator = IndexAllocator(
@@ -138,12 +155,15 @@ class SchemaTransformerDB(VncCassandraClient):
         vlan_ia = self._sc_vlan_allocator_dict[service_vm]
 
         try:
-            vlan = int(
-                self._service_chain_cf.get(service_vm)[service_chain])
+            vlan = int(self.get_one_col(self._SERVICE_CHAIN_CF,
+                                        service_vm, service_chain))
             db_sc = vlan_ia.read(vlan)
             if (db_sc is None) or (db_sc != service_chain):
                 alloc_new = True
-        except (KeyError, NotFoundException):
+        except (KeyError, VncError, NoIdError):
+            # TODO(ethuleau): VncError is raised if more than one row was
+            #                 fetched from db with get_one_col method.
+            #                 Probably need to be cleaned
             alloc_new = True
 
         if alloc_new:
@@ -158,19 +178,26 @@ class SchemaTransformerDB(VncCassandraClient):
     def free_service_chain_vlan(self, service_vm, service_chain):
         try:
             vlan_ia = self._sc_vlan_allocator_dict[service_vm]
-            vlan = int(self._service_chain_cf.get(service_vm)[service_chain])
+            vlan = int(self.get_one_col(self._SERVICE_CHAIN_CF,
+                                        service_vm, service_chain))
             self._service_chain_cf.remove(service_vm, [service_chain])
             vlan_ia.delete(vlan)
             if vlan_ia.empty():
                 del self._sc_vlan_allocator_dict[service_vm]
-        except (KeyError, NotFoundException):
+        except (KeyError, VncError, NoIdError):
+            # TODO(ethuleau): VncError is raised if more than one row was
+            #                 fetched from db with get_one_col method.
+            #                 Probably need to be cleaned
             pass
     # end free_service_chain_vlan
 
     def get_route_target(self, ri_fq_name):
         try:
-            return int(self._rt_cf.get(ri_fq_name)['rtgt_num'])
-        except NotFoundException:
+            return int(self.get_one_col(self._RT_CF, ri_fq_name, 'rtgt_num'))
+        except (VncError, NoIdError):
+            # TODO(ethuleau): VncError is raised if more than one row was
+            #                 fetched from db with get_one_col method.
+            #                 Probably need to be cleaned
             return 0
 
     def alloc_route_target(self, ri_fq_name, zk_only=False):
@@ -207,10 +234,10 @@ class SchemaTransformerDB(VncCassandraClient):
     # end free_route_target
 
     def get_service_chain_ip(self, sc_name):
-        try:
-            addresses = self._sc_ip_cf.get(sc_name)
+        addresses = self.get(self._SC_IP_CF, sc_name)
+        if addresses:
             return addresses.get('ip_address'), addresses.get('ipv6_address')
-        except NotFoundException:
+        else:
             return None, None
 
     def add_service_chain_ip(self, sc_name, ip, ipv6):
@@ -242,6 +269,10 @@ class SchemaTransformerDB(VncCassandraClient):
         except NotFoundException:
             pass
 
+    # TODO(ethuleau): We keep the virtual network and security group ID
+    #                 allocation in schema and in the vnc API for one
+    #                 release overlap to prevent any upgrade issue. So the
+    #                 following code need to be remove in release (3.2 + 1)
     def get_sg_from_id(self, sg_id):
         return self._sg_id_allocator.read(sg_id)
 
@@ -268,4 +299,3 @@ class SchemaTransformerDB(VncCassandraClient):
 
     def free_bgpaas_port(self, port):
         self._bgpaas_port_allocator.delete(port)
-

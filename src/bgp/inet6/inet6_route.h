@@ -75,9 +75,7 @@ public:
     virtual int CompareTo(const Route &rhs) const;
     virtual std::string ToString() const;
 
-    const Inet6Prefix &GetPrefix() const {
-        return prefix_;
-    }
+    const Inet6Prefix &GetPrefix() const { return prefix_; }
 
     virtual KeyPtr GetDBRequestKey() const;
     virtual void SetKey(const DBRequestKey *reqkey);
@@ -102,6 +100,8 @@ public:
 
 private:
     Inet6Prefix prefix_;
+    mutable std::string prefix_str_;
+
     DISALLOW_COPY_AND_ASSIGN(Inet6Route);
 };
 

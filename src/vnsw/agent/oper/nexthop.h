@@ -380,6 +380,7 @@ public:
                                   NextHopObjectLogInfo &info);
     static void FillObjectLogMac(const unsigned char *m,
                                  NextHopObjectLogInfo &info);
+    bool NexthopToInterfacePolicy() const;
 protected:
     void FillObjectLog(AgentLogEvent::type event,
                        NextHopObjectLogInfo &info) const;
@@ -814,9 +815,10 @@ struct InterfaceNHFlags {
 
 class InterfaceNHKey : public NextHopKey {
 public:
-    InterfaceNHKey(InterfaceKey *intf, bool policy, uint8_t flags) :
+    InterfaceNHKey(InterfaceKey *intf, bool policy, uint8_t flags,
+                   const MacAddress &mac) :
         NextHopKey(NextHop::INTERFACE, policy), intf_key_(intf),
-        flags_(flags) {
+        flags_(flags), dmac_(mac) {
             //TODO evpn changes remove this, just extra check
             assert((flags != (InterfaceNHFlags::INVALID)) ||
                     (flags == (InterfaceNHFlags::INET4)) ||
@@ -837,7 +839,7 @@ public:
                 (flags_ == (InterfaceNHFlags::INET6)) ||
                 (flags_ ==
                  (InterfaceNHFlags::INET4|InterfaceNHFlags::MULTICAST)));
-        return new InterfaceNHKey(intf_key_->Clone(), policy_, flags_);
+        return new InterfaceNHKey(intf_key_->Clone(), policy_, flags_, dmac_);
     }
     virtual bool NextHopKeyIsLess(const NextHopKey &rhs) const {
         const InterfaceNHKey &key = static_cast<const InterfaceNHKey &>(rhs);
@@ -845,36 +847,50 @@ public:
             return intf_key_->IsLess(*key.intf_key_.get());
         }
 
-        return flags_ < key.flags_;
+        if (flags_ != key.flags_) {
+            return flags_ < key.flags_;
+        }
+
+        if (flags_ == InterfaceNHFlags::INET4 ||
+            flags_ == InterfaceNHFlags::INET6) {
+            return dmac_ < key.dmac_;
+        }
+        return false;
     }
 
 private:
     friend class InterfaceNH;
     boost::scoped_ptr<InterfaceKey> intf_key_;
     uint8_t flags_;
+    MacAddress dmac_;
 };
 
 class InterfaceNHData : public NextHopData {
 public:
-    InterfaceNHData(const string vrf_name, const MacAddress &dmac) :
-        NextHopData(), dmac_(dmac), vrf_key_(vrf_name) { }
+    InterfaceNHData(const string vrf_name) :
+        NextHopData(), vrf_key_(vrf_name), relaxed_policy_(false) { }
+    InterfaceNHData(const string vrf_name, bool relaxed_policy) :
+        NextHopData(), vrf_key_(vrf_name), relaxed_policy_(relaxed_policy) { }
     virtual ~InterfaceNHData() { }
 
 private:
     friend class InterfaceNH;
-    MacAddress dmac_;
     VrfKey vrf_key_;
+    bool relaxed_policy_;
     DISALLOW_COPY_AND_ASSIGN(InterfaceNHData);
 };
 
 class InterfaceNH : public NextHop {
 public:
-    InterfaceNH(Interface *intf, bool policy, uint8_t flags) :
+    InterfaceNH(Interface *intf, bool policy, uint8_t flags,
+                const MacAddress &mac) :
         NextHop(INTERFACE, true, policy), interface_(intf),
-        flags_(flags), dmac_(), vrf_(NULL, this) { };
-    InterfaceNH(Interface *intf, bool policy) :
+        flags_(flags), dmac_(mac), vrf_(NULL, this),
+        delete_on_zero_refcount_(false), relaxed_policy_(false) { };
+    InterfaceNH(Interface *intf, bool policy, const MacAddress &mac) :
         NextHop(INTERFACE, true, policy), interface_(intf),
-        flags_(InterfaceNHFlags::INET4), dmac_(), vrf_(NULL, this) { };
+        flags_(InterfaceNHFlags::INET4), dmac_(mac), vrf_(NULL, this),
+        delete_on_zero_refcount_(false), relaxed_policy_(false) {};
     virtual ~InterfaceNH() { };
 
     virtual std::string ToString() const {
@@ -904,27 +920,44 @@ public:
     static void CreateL2VmInterfaceNH(const uuid &intf_uuid,
                                       const MacAddress &dmac,
                                       const string &vrf_name);
-    static void DeleteL2InterfaceNH(const uuid &intf_uuid);
+    static void DeleteL2InterfaceNH(const uuid &intf_uuid,
+                                    const MacAddress &mac);
     static void CreateL3VmInterfaceNH(const uuid &intf_uuid,
                                       const MacAddress &dmac,
                                       const string &vrf_name);
-    static void DeleteL3InterfaceNH(const uuid &intf_uuid);
-    static void DeleteNH(const uuid &intf_uuid, bool policy, uint8_t flags);
-    static void DeleteVmInterfaceNHReq(const uuid &intf_uuid);
-    static void CreatePacketInterfaceNh(const string &ifname);
-    static void DeleteHostPortReq(const string &ifname);
+    static void DeleteL3InterfaceNH(const uuid &intf_uuid,
+                                    const MacAddress &mac);
+    static void DeleteNH(const uuid &intf_uuid, bool policy, uint8_t flags,
+                         const MacAddress &mac);
+    static void DeleteVmInterfaceNHReq(const uuid &intf_uuid, const MacAddress &mac);
+    static void CreatePacketInterfaceNh(Agent *agent, const string &ifname);
+    static void DeleteHostPortReq(Agent *agent, const string &ifname);
     static void CreateInetInterfaceNextHop(const string &ifname,
-                                           const string &vrf_name);
-    static void DeleteInetInterfaceNextHop(const string &ifname);
+                                           const string &vrf_name,
+                                           const MacAddress &mac);
+    static void DeleteInetInterfaceNextHop(const string &ifname,
+                                           const MacAddress &mac);
     static void CreatePhysicalInterfaceNh(const string &ifname,
                                           const MacAddress &mac);
-    static void DeletePhysicalInterfaceNh(const string &ifname);
+    static void DeletePhysicalInterfaceNh(const string &ifname,
+                                          const MacAddress &mac);
+    virtual bool DeleteOnZeroRefCount() const {
+        return delete_on_zero_refcount_;
+    }
+
+    void set_delete_on_zero_refcount(bool val) {
+        delete_on_zero_refcount_ = val;
+    }
+
+    bool relaxed_policy() const { return relaxed_policy_; }
 
 private:
     InterfaceRef interface_;
     uint8_t flags_;
     MacAddress dmac_;
     VrfEntryRef vrf_; 
+    bool delete_on_zero_refcount_;
+    bool relaxed_policy_;
     DISALLOW_COPY_AND_ASSIGN(InterfaceNH);
 };
 
@@ -1165,11 +1198,12 @@ public:
     ComponentNHKey(int label, Composite::Type type, bool policy,
                    const ComponentNHKeyList &component_nh_list,
                    const std::string &vrf_name);
-    ComponentNHKey(int label, const uuid &intf_uuid, uint8_t flags):
+    ComponentNHKey(int label, const uuid &intf_uuid, uint8_t flags,
+                   const MacAddress &mac):
         label_(label), 
         nh_key_(new InterfaceNHKey(
                     new VmInterfaceKey(AgentKey::ADD_DEL_CHANGE, intf_uuid, ""),
-                    false, flags)) {
+                    false, flags, mac)) {
     }
     ComponentNHKey(int label, uint8_t tag, const uuid &intf_uuid):
         label_(label), nh_key_(new VlanNHKey(intf_uuid, tag)) {
@@ -1226,14 +1260,14 @@ public:
     const ComponentNHKeyList& component_nh_key_list() const {
         return component_nh_key_list_;
     }
-    void Reorder(Agent *agent, uint32_t label, const NextHop *nh);
+    bool Reorder(Agent *agent, uint32_t label, const NextHop *nh);
     void CreateTunnelNH(Agent *agent);
     void CreateTunnelNHReq(Agent *agent);
     void ChangeTunnelType(TunnelType::Type tunnel_type);
     COMPOSITETYPE composite_nh_type() const {return composite_nh_type_;}
 private:
     friend class CompositeNH;
-    void ExpandLocalCompositeNH(Agent *agent);
+    bool ExpandLocalCompositeNH(Agent *agent);
     void insert(ComponentNHKeyPtr nh_key);
     void erase(ComponentNHKeyPtr nh_key);
     bool find(ComponentNHKeyPtr nh_key);
@@ -1328,11 +1362,14 @@ public:
         return;
     }
     uint32_t GetRemoteLabel(const Ip4Address &ip) const;
-    ComponentNHKeyList AddComponentNHKey(ComponentNHKeyPtr
-                                         component_nh_key) const;
+    ComponentNHKeyList AddComponentNHKey(ComponentNHKeyPtr component_nh_key,
+                                         bool &comp_nh_policy) const;
     ComponentNHKeyList DeleteComponentNHKey(ComponentNHKeyPtr
-                                            component_nh_key) const;
-    ComponentNHList& component_nh_list() {
+                                            component_nh_key,
+                                            bool &comp_nh_new_policy) const;
+    bool UpdateComponentNHKey(uint32_t label, NextHopKey *nh_key,
+        ComponentNHKeyList &component_nh_key_list, bool &comp_nh_policy) const;
+    const ComponentNHList& component_nh_list() const {
         return component_nh_list_;
     }
     const ComponentNHKeyList& component_nh_key_list() const {
@@ -1342,10 +1379,14 @@ public:
         return vrf_.get();
     }
    uint32_t hash(uint32_t seed) const {
-       uint32_t idx = seed % component_nh_list_.size();
+       size_t size = component_nh_list_.size();
+       if (size == 0) {
+           return kInvalidComponentNHIdx;
+       }
+       uint32_t idx = seed % size;
        while (component_nh_list_[idx].get() == NULL) {
-           idx = (idx + 1) % component_nh_list_.size();
-           if (idx == seed % component_nh_list_.size()) {
+           idx = (idx + 1) % size;
+           if (idx == seed % size) {
                idx = 0xffff;
                break;
            }

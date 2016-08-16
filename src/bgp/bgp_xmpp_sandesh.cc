@@ -6,10 +6,11 @@
 #include <string>
 #include <vector>
 
+#include "bgp/bgp_membership.h"
 #include "bgp/bgp_peer.h"
 #include "bgp/bgp_peer_internal_types.h"
-#include "bgp/bgp_peer_membership.h"
 #include "bgp/bgp_sandesh.h"
+#include "bgp/bgp_server.h"
 #include "bgp/bgp_xmpp_channel.h"
 #include "xmpp/xmpp_connection.h"
 
@@ -46,14 +47,17 @@ static void FillXmppNeighborInfo(BgpNeighborResp *bnr,
     const XmppConnection *connection = bx_channel->channel()->connection();
     bnr->set_negotiated_hold_time(connection->GetNegotiatedHoldTime());
     bnr->set_primary_path_count(bx_channel->Peer()->GetPrimaryPathCount());
+    bnr->set_task_instance(connection->GetTaskInstance());
     bnr->set_auth_type(connection->GetXmppAuthenticationType());
+    bnr->set_flap_count(bx_channel->Peer()->peer_stats()->num_flaps());
+    bnr->set_flap_time(bx_channel->Peer()->peer_stats()->last_flap());
     if (summary)
         return;
 
     bnr->set_configured_hold_time(connection->GetConfiguredHoldTime());
     bnr->set_configured_address_families(vector<string>());
     bnr->set_negotiated_address_families(vector<string>());
-    const PeerRibMembershipManager *mgr = bsc->bgp_server->membership_mgr();
+    const BgpMembershipManager *mgr = bsc->bgp_server->membership_mgr();
     mgr->FillPeerMembershipInfo(bx_channel->Peer(), bnr);
     bx_channel->FillTableMembershipInfo(bnr);
     bx_channel->FillInstanceMembershipInfo(bnr);
@@ -113,7 +117,7 @@ static void ShowXmppNeighborStatisticsVisitor(
         if (!table)
             return;
 
-        const PeerRibMembershipManager *mgr = bgp_server->membership_mgr();
+        const BgpMembershipManager *mgr = bgp_server->membership_mgr();
         if (!mgr->GetRegistrationInfo(channel->Peer(), table)) {
             return;
         }

@@ -77,6 +77,7 @@ public:
                             // VMI is created based on the INSTANCE_MSG
         TOR,                // Baremetal connected to ToR
         LOCAL_DEVICE,       // VMI on a local port. Used in GATEWAY
+        REMOTE_VM_VLAN_ON_VMI, // VMI on a local phy-port with VLAN as classifier
         VM_SRIOV            // VMI on an SRIOV VM
     };
 
@@ -88,6 +89,7 @@ public:
         SERVICE_INSTANCE,
         BAREMETAL,
         GATEWAY,
+        REMOTE_VM,
         SRIOV
     };
 
@@ -156,6 +158,42 @@ public:
         FloatingIpSet list_;
     };
 
+    // A unified structure for storing AliasIp information for both
+    // operational and config elements
+    struct AliasIp : public ListEntry {
+        AliasIp();
+        AliasIp(const AliasIp &rhs);
+        AliasIp(const IpAddress &addr, const std::string &vrf,
+                   const boost::uuids::uuid &vn_uuid);
+        virtual ~AliasIp();
+
+        bool operator() (const AliasIp &lhs, const AliasIp &rhs) const;
+        bool IsLess(const AliasIp *rhs) const;
+        void Activate(VmInterface *interface, bool force_update) const;
+        void DeActivate(VmInterface *interface) const;
+
+        IpAddress alias_ip_;
+        mutable VnEntryRef vn_;
+        mutable VrfEntryRef vrf_;
+        std::string vrf_name_;
+        boost::uuids::uuid vn_uuid_;
+        mutable bool force_update_;
+    };
+    typedef std::set<AliasIp, AliasIp> AliasIpSet;
+
+    struct AliasIpList {
+        AliasIpList() : v4_count_(0), v6_count_(0), list_() { }
+        ~AliasIpList() { }
+
+        void Insert(const AliasIp *rhs);
+        void Update(const AliasIp *lhs, const AliasIp *rhs);
+        void Remove(AliasIpSet::iterator &it);
+
+        uint16_t v4_count_;
+        uint16_t v6_count_;
+        AliasIpSet list_;
+    };
+
     struct ServiceVlan : ListEntry {
         ServiceVlan();
         ServiceVlan(const ServiceVlan &rhs);
@@ -173,7 +211,7 @@ public:
         void V6RouteDelete(const Peer *peer) const;
 
         uint16_t tag_;
-        std::string vrf_name_;
+        mutable std::string vrf_name_;
         Ip4Address addr_;
         Ip6Address addr6_;
         MacAddress smac_;
@@ -205,8 +243,7 @@ public:
 
         bool operator() (const StaticRoute &lhs, const StaticRoute &rhs) const;
         bool IsLess(const StaticRoute *rhs) const;
-        void Activate(VmInterface *interface, bool force_update,
-                      bool policy_change) const;
+        void Activate(VmInterface *interface, bool force_update) const;
         void DeActivate(VmInterface *interface) const;
 
         mutable std::string vrf_;
@@ -237,23 +274,27 @@ public:
         bool operator() (const AllowedAddressPair &lhs,
                          const AllowedAddressPair &rhs) const;
         bool IsLess(const AllowedAddressPair *rhs) const;
-        void Activate(VmInterface *interface, bool force_update,
-                      bool policy_change) const;
+        void Activate(VmInterface *interface, bool force_update) const;
         void DeActivate(VmInterface *interface) const;
         void L2Activate(VmInterface *interface, bool force_update,
                         bool policy_change, bool old_layer2_forwarding,
                         bool old_layer3_forwarding) const;
         void L2DeActivate(VmInterface *interface) const;
+        void CreateLabelAndNH(Agent *agent, VmInterface *interface) const;
 
         mutable std::string vrf_;
         IpAddress   addr_;
         uint32_t    plen_;
-        bool        ecmp_;
+        mutable bool ecmp_;
         MacAddress  mac_;
         mutable bool        l2_entry_installed_;
+        mutable bool        ecmp_config_changed_;
         mutable uint32_t    ethernet_tag_;
         mutable VrfEntryRef vrf_ref_;
         mutable IpAddress  service_ip_;
+        mutable uint32_t label_;
+        mutable NextHopRef policy_enabled_nh_;
+        mutable NextHopRef policy_disabled_nh_;
     };
     typedef std::set<AllowedAddressPair, AllowedAddressPair>
         AllowedAddressPairSet;
@@ -334,7 +375,9 @@ public:
     struct InstanceIp : ListEntry {
         InstanceIp();
         InstanceIp(const InstanceIp &rhs);
-        InstanceIp(const IpAddress &ip, bool ecmp, bool is_primary);
+        InstanceIp(const IpAddress &ip, uint8_t plen, bool ecmp,
+                   bool is_primary, bool is_service_health_check_ip,
+                   bool is_local, const IpAddress &tracking_ip);
         ~InstanceIp();
         bool operator == (const InstanceIp &rhs) const;
         bool operator() (const InstanceIp &lhs,
@@ -350,6 +393,7 @@ public:
                         VrfEntry *old_vrf, uint32_t old_ethernet_tag) const;
         void Activate(VmInterface *interface, bool force_update, bool l2,
                       int old_ethernet_tag) const;
+        void SetPrefixForAllocUnitIpam(VmInterface *interface) const;
         bool installed() const {
             if (l2_installed_ || installed_) {
                 return true;
@@ -357,11 +401,20 @@ public:
             return false;
         }
 
+        bool is_force_policy() const {
+            return is_service_health_check_ip_;
+        }
+
         const IpAddress ip_;
+        mutable uint8_t plen_;
         mutable bool ecmp_;
         mutable bool l2_installed_;
         mutable bool old_ecmp_;
         mutable bool is_primary_;
+        mutable bool is_service_health_check_ip_;
+        mutable bool is_local_;
+        mutable IpAddress old_tracking_ip_;
+        mutable IpAddress tracking_ip_;
     };
     typedef std::set<InstanceIp, InstanceIp> InstanceIpSet;
 
@@ -433,7 +486,7 @@ public:
 
     VmInterface(const boost::uuids::uuid &uuid);
     VmInterface(const boost::uuids::uuid &uuid, const std::string &name,
-                const Ip4Address &addr, const std::string &mac,
+                const Ip4Address &addr, const MacAddress &mac,
                 const std::string &vm_name,
                 const boost::uuids::uuid &vm_project_uuid, uint16_t tx_vlan_id,
                 uint16_t rx_vlan_id, Interface *parent,
@@ -459,9 +512,10 @@ public:
     bool policy_enabled() const { return policy_enabled_; }
     const Ip4Address &subnet_bcast_addr() const { return subnet_bcast_addr_; }
     const Ip6Address &primary_ip6_addr() const { return primary_ip6_addr_; }
-    const std::string &vm_mac() const { return vm_mac_; }
+    const MacAddress &vm_mac() const { return vm_mac_; }
     bool fabric_port() const { return fabric_port_; }
     bool need_linklocal_ip() const { return  need_linklocal_ip_; }
+    bool drop_new_flows() const { return drop_new_flows_; }
     bool dhcp_enable_config() const { return dhcp_enable_; }
     void set_dhcp_enable_config(bool dhcp_enable) {
         dhcp_enable_= dhcp_enable;
@@ -479,6 +533,10 @@ public:
     const Interface *parent() const { return parent_.get(); }
     bool ecmp() const { return ecmp_;}
     bool ecmp6() const { return ecmp6_;}
+    Ip4Address service_ip() { return service_ip_;}
+    bool service_ip_ecmp() const { return service_ip_ecmp_;}
+    Ip6Address service_ip6() { return service_ip6_;}
+    bool service_ip_ecmp6() const { return service_ip_ecmp6_;}
     const OperDhcpOptions &oper_dhcp_options() const { return oper_dhcp_options_; }
     uint8_t configurer() const {return configurer_;}
     bool IsConfigurerSet(VmInterface::Configurer type);
@@ -498,9 +556,15 @@ public:
     Interface::MirrorDirection mirror_direction() const {
         return mirror_direction_;
     }
+
     const FloatingIpList &floating_ip_list() const {
         return floating_ip_list_;
     }
+
+    const AliasIpList &alias_ip_list() const {
+        return alias_ip_list_;
+    }
+
     const ServiceVlanList &service_vlan_list() const {
         return service_vlan_list_;
     }
@@ -550,6 +614,8 @@ public:
 
     void SetPathPreference(PathPreference *pref, bool ecmp,
                            const IpAddress &dependent_ip) const;
+    void SetServiceVlanPathPreference(PathPreference *pref,
+                                      const IpAddress &service_ip) const;
     void CopySgIdList(SecurityGroupList *sg_id_list) const;
     bool NeedMplsLabel() const;
     bool IsVxlanMode() const;
@@ -558,8 +624,11 @@ public:
     bool HasFloatingIp(Address::Family family) const;
     bool HasFloatingIp() const;
     bool IsFloatingIp(const IpAddress &ip) const;
+    VrfEntry *GetAliasIpVrf(const IpAddress &ip) const;
     Ip4Address mdata_ip_addr() const;
     MetaDataIp *GetMetaDataIp(const Ip4Address &ip) const;
+    const MacAddress& GetIpMac(const IpAddress &,
+                              const uint8_t plen) const;
 
     void InsertMetaDataIpInfo(MetaDataIp *mip);
     void DeleteMetaDataIpInfo(MetaDataIp *mip);
@@ -570,6 +639,7 @@ public:
     const HealthCheckInstanceSet &hc_instance_set() const;
 
     size_t GetFloatingIpCount() const { return floating_ip_list_.list_.size(); }
+    size_t GetAliasIpCount() const { return alias_ip_list_.list_.size(); }
     bool HasServiceVlan() const { return service_vlan_list_.list_.size() != 0; }
 
     uint32_t GetServiceVlanLabel(const VrfEntry *vrf) const;
@@ -602,7 +672,6 @@ public:
 
     void AllocL2MplsLabel(bool force_update, bool policy_change);
     void DeleteL2MplsLabel();
-    void UpdateL2(bool force_update);
     const AclDBEntry* vrf_assign_acl() const { return vrf_assign_acl_.get();}
     bool WaitForTraffic() const;
     bool GetInterfaceDhcpOptions(
@@ -625,11 +694,17 @@ public:
                                 const MacAddress &mac,
                                 const IpAddress &dependent_ip) const;
     uint32_t ethernet_tag() const {return ethernet_tag_;}
+    IpAddress service_health_check_ip() const { return service_health_check_ip_; }
     void UpdateVxLan();
     bool IsActive() const;
     const VmiEcmpLoadBalance &ecmp_load_balance() const {return ecmp_load_balance_;}
+    bool InstallBridgeRoutes() const;
     Agent *agent() const {
         return (static_cast<InterfaceTable *>(get_table()))->agent();
+    }
+
+    bool is_vn_qos_config() const {
+        return is_vn_qos_config_;
     }
 
 private:
@@ -640,25 +715,26 @@ private:
     friend struct VmInterfaceMirrorData;
     friend struct VmInterfaceGlobalVrouterData;
     friend struct VmInterfaceHealthCheckData;
+    friend struct VmInterfaceNewFlowDropData;
 
+    bool IsMetaDataL2Active() const;
     bool IsMetaDataIPActive() const;
     bool IsIpv4Active() const;
     bool PolicyEnabled() const;
     void AddRoute(const std::string &vrf_name, const IpAddress &ip,
-                  uint32_t plen, const std::string &vn_name, bool policy,
-                  bool ecmp, const IpAddress &service_ip,
+                  uint32_t plen, const std::string &vn_name, bool force_policy,
+                  bool ecmp, bool is_local, const IpAddress &service_ip,
                   const IpAddress &dependent_ip,
-                  const CommunityList &communties);
+                  const CommunityList &communties, uint32_t label);
     void DeleteRoute(const std::string &vrf_name, const IpAddress &ip,
                      uint32_t plen);
     void ResolveRoute(const std::string &vrf_name, const Ip4Address &addr,
                       uint32_t plen, const std::string &dest_vn, bool policy);
     void ServiceVlanAdd(ServiceVlan &entry);
     void ServiceVlanDel(ServiceVlan &entry);
-    void ServiceVlanRouteAdd(const ServiceVlan &entry);
+    void ServiceVlanRouteAdd(const ServiceVlan &entry, bool force_update);
     void ServiceVlanRouteDel(const ServiceVlan &entry);
 
-    bool OnResyncFloatingIp(VmInterfaceConfigData *data, bool new_ipv4_active);
     bool OnResyncSecurityGroupList(VmInterfaceConfigData *data,
                                    bool new_ipv4_active);
     bool OnResyncStaticRoute(VmInterfaceConfigData *data, bool new_ipv4_active);
@@ -701,28 +777,29 @@ private:
                   const Ip4Address &old_addr, bool old_need_linklocal_ip,
                   bool old_ipv6_active, const Ip6Address &old_v6_addr,
                   const Ip4Address &old_subnet, const uint8_t old_subnet_plen,
-                  int old_ethernet_tag, const Ip4Address &old_dhcp_addr);
-    void UpdateL2Bridging(bool old_bridging, VrfEntry *old_vrf,
-                          int old_ethernet_tag, bool force_update,
-                          bool policy_change, const Ip4Address &old_addr,
-                          const Ip6Address &old_v6_addr,
-                          bool old_layer3_forwarding);
-    void DeleteL2Bridging(bool old_bridging, VrfEntry *old_vrf, int old_ethernet_tag,
-                          const Ip4Address &old_addr, const Ip6Address &old_v6_addr,
-                          bool old_layer3_forwarding);
+                  int old_ethernet_tag, const Ip4Address &old_dhcp_addr,
+                  bool force_update);
+    void UpdateBridgeRoutes(bool old_bridging, VrfEntry *old_vrf,
+                            int old_ethernet_tag, bool force_update,
+                            bool policy_change, const Ip4Address &old_addr,
+                            const Ip6Address &old_v6_addr,
+                            bool old_layer3_forwarding);
+    void DeleteBridgeRoutes(bool old_bridging, VrfEntry *old_vrf,
+                            int old_ethernet_tag, const Ip4Address &old_addr,
+                            const Ip6Address &old_v6_addr,
+                            bool old_layer3_forwarding, bool force_update);
     void UpdateL2(bool old_l2_active, bool policy_change);
     void DeleteL2(bool old_l2_active);
 
-    void AllocL3MplsLabel(bool force_update, bool policy_change);
+    void AllocL3MplsLabel(bool force_update, bool policy_change,
+                          uint32_t new_label);
     void DeleteL3MplsLabel();
     void UpdateL3TunnelId(bool force_update, bool policy_change);
     void DeleteL3TunnelId();
-    void UpdateMulticastNextHop(bool old_ipv4_active, bool old_l2_active);
-    void DeleteMulticastNextHop();
     void UpdateMacVmBinding();
-    void UpdateL2NextHop(bool old_l2_active);
+    void UpdateL2NextHop();
     void UpdateFlowKeyNextHop();
-    void DeleteL2NextHop(bool old_l2_active);
+    void DeleteL2NextHop();
     void DeleteMacVmBinding(const VrfEntry *old_vrf);
     bool L2Activated(bool old_l2_active);
     bool BridgingActivated(bool old_bridging);
@@ -733,8 +810,8 @@ private:
     bool Ipv4Deactivated(bool old_ipv4_active);
     bool Ipv6Deactivated(bool old_ipv6_active);
     void UpdateIpv4InterfaceRoute(bool old_ipv4_active, bool force_update,
-                             bool policy_change, VrfEntry * old_vrf,
-                             const Ip4Address &old_addr);
+                                  VrfEntry * old_vrf,
+                                  const Ip4Address &old_addr);
     void DeleteIpv4InterfaceRoute(VrfEntry *old_vrf,
                                   const Ip4Address &old_addr);
     void UpdateResolveRoute(bool old_ipv4_active, bool force_update,
@@ -750,10 +827,15 @@ private:
     void UpdateFloatingIp(bool force_update, bool policy_change, bool l2,
                           uint32_t old_ethernet_tag);
     void DeleteFloatingIp(bool l2, uint32_t old_ethernet_tag);
+
+    void CleanupAliasIpList();
+    void UpdateAliasIp(bool force_update, bool policy_change);
+    void DeleteAliasIp();
+
     void UpdateServiceVlan(bool force_update, bool policy_change,
                            bool old_ipv4_active, bool old_ipv6_active);
     void DeleteServiceVlan();
-    void UpdateStaticRoute(bool force_update, bool policy_change);
+    void UpdateStaticRoute(bool force_update);
     void DeleteStaticRoute();
     void UpdateAllowedAddressPair(bool force_update, bool policy_change,
                                   bool l2, bool old_l2_forwarding,
@@ -771,38 +853,39 @@ private:
                                 int old_ethernet_tag,
                                 const MacAddress &mac) const;
 
-    void DeleteL2Route(const std::string &vrf_name,
-                       const MacAddress &mac);
     void UpdateVrfAssignRule();
     void DeleteVrfAssignRule();
     void UpdateIpv4InstanceIp(bool force_update, bool policy_change,
-                              bool l2, uint32_t old_ethernet_tag);
-    void DeleteIpv4InstanceIp(bool l2, uint32_t old_ethernet_tag,
+                              bool l2, uint32_t old_ethernet_tag,
                               VrfEntry *old_vrf);
+    void DeleteIpv4InstanceIp(bool l2, uint32_t old_ethernet_tag,
+                              VrfEntry *old_vrf, bool force_update);
     void UpdateIpv6InstanceIp(bool force_update, bool policy_change,
                               bool l2, uint32_t old_ethernet_tag);
     void DeleteIpv6InstanceIp(bool l2, uint32_t old_ethernet_tag,
-                              VrfEntry *old_vrf);
+                              VrfEntry *old_vrf, bool force_update);
 
     void AddL2ReceiveRoute(bool old_bridging);
     void DeleteL2ReceiveRoute(const VrfEntry *old_vrf, bool old_briding);
 
     bool UpdateIsHealthCheckActive();
     void CopyEcmpLoadBalance(EcmpLoadBalance &ecmp_load_balance);
+    void UpdateCommonNextHop();
 
-    VmEntryRef vm_;
+    VmEntryBackRef vm_;
     VnEntryRef vn_;
     Ip4Address primary_ip_addr_;
     std::auto_ptr<MetaDataIp> mdata_ip_;
     Ip4Address subnet_bcast_addr_;
     Ip6Address primary_ip6_addr_;
-    std::string vm_mac_;
+    MacAddress vm_mac_;
     bool policy_enabled_;
     MirrorEntryRef mirror_entry_;
     Interface::MirrorDirection mirror_direction_;
     std::string cfg_name_;
     bool fabric_port_;
     bool need_linklocal_ip_;
+    bool drop_new_flows_;
     // DHCP flag - set according to the dhcp option in the ifmap subnet object.
     // It controls whether the vrouter sends the DHCP requests from VM interface
     // to agent or if it would flood the request in the VN.
@@ -820,6 +903,10 @@ private:
     bool mac_set_;
     bool ecmp_;
     bool ecmp6_;
+    Ip4Address service_ip_;
+    bool service_ip_ecmp_;
+    Ip6Address service_ip6_;
+    bool service_ip_ecmp6_;
     // disable-policy configuration on VMI. When this is configured, policy
     // dependent features like flows, floating-IP and SG will not work on this
     // VMI. However metadata-services will work because metadata route will
@@ -836,6 +923,7 @@ private:
     // Lists
     SecurityGroupEntryList sg_list_;
     FloatingIpList floating_ip_list_;
+    AliasIpList alias_ip_list_;
     ServiceVlanList service_vlan_list_;
     StaticRouteList static_route_list_;
     AllowedAddressPairList allowed_address_pair_list_;
@@ -862,6 +950,12 @@ private:
     MetaDataIpMap metadata_ip_map_;
     HealthCheckInstanceSet hc_instance_set_;
     VmiEcmpLoadBalance ecmp_load_balance_;
+    IpAddress service_health_check_ip_;
+    NextHopRef l3_interface_nh_policy_;
+    NextHopRef l2_interface_nh_policy_;
+    NextHopRef l3_interface_nh_no_policy_;
+    NextHopRef l2_interface_nh_no_policy_;
+    bool is_vn_qos_config_;
     DISALLOW_COPY_AND_ASSIGN(VmInterface);
 };
 
@@ -902,7 +996,8 @@ struct VmInterfaceData : public InterfaceData {
         IP_ADDR,
         OS_OPER_STATE,
         GLOBAL_VROUTER,
-        HEALTH_CHECK
+        HEALTH_CHECK,
+        DROP_NEW_FLOWS
     };
 
     VmInterfaceData(Agent *agent, IFMapNode *node, Type type,
@@ -1001,6 +1096,7 @@ struct VmInterfaceConfigData : public VmInterfaceData {
     Interface::MirrorDirection mirror_direction_;
     VmInterface::SecurityGroupEntryList sg_list_;
     VmInterface::FloatingIpList floating_ip_list_;
+    VmInterface::AliasIpList alias_ip_list_;
     VmInterface::ServiceVlanList service_vlan_list_;
     VmInterface::StaticRouteList static_route_list_;
     VmInterface::VrfAssignRuleList vrf_assign_rule_list_;
@@ -1020,6 +1116,12 @@ struct VmInterfaceConfigData : public VmInterfaceData {
     uint16_t tx_vlan_id_;
     boost::uuids::uuid logical_interface_;
     VmiEcmpLoadBalance ecmp_load_balance_;
+    IpAddress service_health_check_ip_;
+    Ip4Address service_ip_;
+    bool service_ip_ecmp_;
+    Ip6Address service_ip6_;
+    bool service_ip_ecmp6_;
+    boost::uuids::uuid qos_config_uuid_;
 };
 
 // Definition for structures when request queued from Nova
@@ -1081,6 +1183,15 @@ struct VmInterfaceHealthCheckData : public VmInterfaceData {
     virtual ~VmInterfaceHealthCheckData();
     virtual bool OnResync(const InterfaceTable *table, VmInterface *vmi,
                           bool *force_update) const;
+};
+
+struct VmInterfaceNewFlowDropData : public VmInterfaceData {
+    VmInterfaceNewFlowDropData(bool drop_new_flows);
+    virtual ~VmInterfaceNewFlowDropData();
+    virtual bool OnResync(const InterfaceTable *table, VmInterface *vmi,
+                          bool *force_update) const;
+
+    bool drop_new_flows_;
 };
 
 #endif // vnsw_agent_vm_interface_hpp

@@ -38,6 +38,9 @@
 #include "vrouter/ksync/vrf_assign_ksync.h"
 #include "vrouter/ksync/vxlan_ksync.h"
 #include "vrouter/ksync/sandesh_ksync.h"
+#include "vrouter/ksync/qos_queue_ksync.h"
+#include "vrouter/ksync/forwarding_class_ksync.h"
+#include "vrouter/ksync/qos_config_ksync.h"
 #include "nl_util.h"
 #include "vhost.h"
 #include "vr_message.h"
@@ -56,7 +59,10 @@ KSync::KSync(Agent *agent)
       interface_scanner_(new InterfaceKScan(agent)),
       vnsw_interface_listner_(new VnswInterfaceListener(agent)),
       ksync_flow_memory_(new KSyncFlowMemory(this)),
-      ksync_flow_index_manager_(new KSyncFlowIndexManager(this)) {
+      ksync_flow_index_manager_(new KSyncFlowIndexManager(this)),
+      qos_queue_ksync_obj_(new QosQueueKSyncObject(this)),
+      forwarding_class_ksync_obj_(new ForwardingClassKSyncObject(this)),
+      qos_config_ksync_obj_(new QosConfigKSyncObject(this)) {
       for (uint16_t i = 0; i < agent->flow_thread_count(); i++) {
           FlowTableKSyncObject *obj = new FlowTableKSyncObject(this);
           flow_table_ksync_obj_list_.push_back(obj);
@@ -76,8 +82,10 @@ void KSync::RegisterDBClients(DB *db) {
     mirror_ksync_obj_.get()->RegisterDBClients();
     vrf_assign_ksync_obj_.get()->RegisterDBClients();
     vxlan_ksync_obj_.get()->RegisterDBClients();
+    qos_queue_ksync_obj_.get()->RegisterDBClients();
+    forwarding_class_ksync_obj_.get()->RegisterDBClients();
+    qos_config_ksync_obj_.get()->RegisterDBClients();
     agent_->set_router_id_configured(false);
-    KSyncDebug::set_debug(agent_->debug());
 }
 
 void KSync::Init(bool create_vhost) {
@@ -105,6 +113,10 @@ void KSync::InitDone() {
     }
     uint32_t count = ksync_flow_memory_->flow_table_entries_count();
     ksync_flow_index_manager_->InitDone(count);
+    AgentProfile *profile = agent_->oper_db()->agent_profile();
+    profile->RegisterKSyncStatsCb(boost::bind(&KSync::SetProfileData,
+                                              this, _1));
+    KSyncSock::Get(0)->SetMeasureQueueDelay(agent_->MeasureQueueDelay());
 }
 
 void KSync::InitFlowMem() {
@@ -127,6 +139,39 @@ int KSync::Encode(Sandesh &encoder, uint8_t *buf, int buf_len) {
     int len, error;
     len = encoder.WriteBinary(buf, buf_len, &error);
     return len;
+}
+
+void KSync::SetProfileData(ProfileData *data) {
+    KSyncSock *sock = KSyncSock::Get(0);
+    const KSyncTxQueue *tx_queue = sock->send_queue();
+
+    ProfileData::WorkQueueStats *stats = &data->ksync_tx_queue_count_;
+    stats->name_ = "KSync Send Queue";
+    stats->queue_count_ = tx_queue->queue_len();
+    stats->enqueue_count_ = tx_queue->enqueues();
+    stats->dequeue_count_ = tx_queue->dequeues();
+    stats->max_queue_count_ = tx_queue->max_queue_len();
+    stats->start_count_ = tx_queue->read_events();
+    stats->busy_time_ = tx_queue->busy_time();
+    tx_queue->set_measure_busy_time(agent()->MeasureQueueDelay());
+    if (agent()->MeasureQueueDelay()) {
+        tx_queue->ClearStats();
+    }
+
+    const KSyncSock::KSyncReceiveQueue *rx_queue =
+        sock->get_receive_work_queue(0);
+    stats = &data->ksync_rx_queue_count_;
+    stats->name_ = rx_queue->Description();
+    stats->queue_count_ = rx_queue->Length();
+    stats->enqueue_count_ = rx_queue->NumEnqueues();
+    stats->dequeue_count_ = rx_queue->NumDequeues();
+    stats->max_queue_count_ = rx_queue->max_queue_len();
+    stats->start_count_ = rx_queue->task_starts();
+    stats->busy_time_ = rx_queue->busy_time();
+    rx_queue->set_measure_busy_time(agent()->MeasureQueueDelay());
+    if (agent()->MeasureQueueDelay()) {
+        rx_queue->ClearStats();
+    }
 }
 
 void KSync::VRouterInterfaceSnapshot() {
@@ -286,6 +331,9 @@ void KSync::Shutdown() {
     mirror_ksync_obj_.reset(NULL);
     vrf_assign_ksync_obj_.reset(NULL);
     vxlan_ksync_obj_.reset(NULL);
+    qos_queue_ksync_obj_.reset(NULL);
+    forwarding_class_ksync_obj_.reset(NULL);
+    qos_config_ksync_obj_.reset(NULL);
     STLDeleteValues(&flow_table_ksync_obj_list_);
     KSyncSock::Shutdown();
     KSyncObjectManager::Shutdown();

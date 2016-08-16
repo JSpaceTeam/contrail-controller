@@ -78,6 +78,9 @@ TableState::TableState(RoutePathReplicator *replicator, BgpTable *table)
 }
 
 TableState::~TableState() {
+    if (walk_ref() != NULL) {
+        table()->ReleaseWalker(walk_ref());
+    }
 }
 
 void TableState::ManagedDelete() {
@@ -98,7 +101,7 @@ const LifetimeActor *TableState::deleter() const {
 
 bool TableState::MayDelete() const {
     if (list_.empty() && !route_count() &&
-        !replicator()->BulkSyncExists(table()))
+        ((walk_ref() == NULL) || !walk_ref()->walk_is_active()))
         return true;
     return false;
 }
@@ -167,9 +170,6 @@ RoutePathReplicator::RoutePathReplicator(BgpServer *server,
     : server_(server),
       family_(family),
       vpn_table_(NULL),
-      walk_trigger_(new TaskTrigger(
-          boost::bind(&RoutePathReplicator::StartWalk, this),
-          TaskScheduler::GetInstance()->GetTaskId("bgp::Config"), 0)),
       trace_buf_(SandeshTraceBufferCreate("RoutePathReplicator", 500)) {
 }
 
@@ -179,11 +179,9 @@ RoutePathReplicator::~RoutePathReplicator() {
 
 void RoutePathReplicator::Initialize() {
     assert(!vpn_table_);
-
     RoutingInstanceMgr *mgr = server_->routing_instance_mgr();
     assert(mgr);
-    RoutingInstance *master =
-        mgr->GetRoutingInstance(BgpConfigManager::kMasterInstance);
+    RoutingInstance *master = mgr->GetDefaultRoutingInstance();
     assert(master);
     vpn_table_ = master->GetTable(family_);
     assert(vpn_table_);
@@ -243,75 +241,31 @@ const TableState *RoutePathReplicator::FindTableState(
 
 void
 RoutePathReplicator::RequestWalk(BgpTable *table) {
-    CHECK_CONCURRENCY("bgp::Config");
-    BulkSyncState *state = NULL;
-    BulkSyncOrders::iterator loc = bulk_sync_.find(table);
-    if (loc != bulk_sync_.end()) {
-        // Accumulate the walk request till walk is started.
-        // After the walk is started don't cancel/interrupt the walk
-        // instead remember the request to walk again
-        // Walk will restarted after completion of current walk
-        // This situation is possible in cases where DBWalker yeilds or
-        // config task requests for walk before the previous walk is finished
-        if (loc->second->GetWalkerId() != DBTableWalker::kInvalidWalkerId) {
-            // This will be reset when the walk actually starts
-            loc->second->SetWalkAgain(true);
-        }
-        return;
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
+    TableState *ts = FindTableState(table);
+    assert(ts);
+    if (!ts->walk_ref()) {
+        DBTable::DBTableWalkRef walk_ref = table->AllocWalker(
+          boost::bind(&RoutePathReplicator::RouteListener, this, ts, _1, _2),
+          boost::bind(&RoutePathReplicator::BulkReplicationDone, this, _2));
+        table->WalkTable(walk_ref);
+        ts->set_walk_ref(walk_ref);
     } else {
-        state = new BulkSyncState();
-        state->SetWalkerId(DBTableWalker::kInvalidWalkerId);
-        bulk_sync_.insert(make_pair(table, state));
+        table->WalkAgain(ts->walk_ref());
     }
-}
-
-bool
-RoutePathReplicator::StartWalk() {
-    CHECK_CONCURRENCY("bgp::Config");
-
-    // For each member table, start a walker to replicate
-    for (BulkSyncOrders::iterator it = bulk_sync_.begin();
-         it != bulk_sync_.end(); ++it) {
-        if (it->second->GetWalkerId() != DBTableWalker::kInvalidWalkerId) {
-            // Walk is in progress.
-            continue;
-        }
-        BgpTable *table = it->first;
-        RPR_TRACE(Walk, table->name());
-        TableState *ts = FindTableState(table);
-        assert(ts);
-        DB *db = server()->database();
-        DBTableWalker::WalkId id = db->GetWalker()->WalkTable(table, NULL,
-            boost::bind(&RoutePathReplicator::RouteListener, this, ts, _1, _2),
-            boost::bind(&RoutePathReplicator::BulkReplicationDone, this, _1));
-        it->second->SetWalkerId(id);
-        it->second->SetWalkAgain(false);
-    }
-    return true;
 }
 
 void
 RoutePathReplicator::BulkReplicationDone(DBTableBase *dbtable) {
-    CHECK_CONCURRENCY("db::DBTable");
-    tbb::mutex::scoped_lock lock(mutex_);
+    CHECK_CONCURRENCY("db::Walker");
     BgpTable *table = static_cast<BgpTable *>(dbtable);
     RPR_TRACE(WalkDone, table->name());
-    BulkSyncOrders::iterator loc = bulk_sync_.find(table);
-    assert(loc != bulk_sync_.end());
-    BulkSyncState *bulk_sync_state = loc->second;
-    if (bulk_sync_state->WalkAgain()) {
-        bulk_sync_state->SetWalkerId(DBTableWalker::kInvalidWalkerId);
-        walk_trigger_->Set();
-        return;
-    }
-    delete bulk_sync_state;
-    bulk_sync_.erase(loc);
     TableState *ts = FindTableState(table);
     ts->RetryDelete();
 }
 
 void RoutePathReplicator::JoinVpnTable(RtGroup *group) {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     TableState *vpn_ts = FindTableState(vpn_table_);
     if (!vpn_ts || vpn_ts->FindGroup(group))
         return;
@@ -323,7 +277,7 @@ void RoutePathReplicator::JoinVpnTable(RtGroup *group) {
 }
 
 void RoutePathReplicator::LeaveVpnTable(RtGroup *group) {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     TableState *vpn_ts = FindTableState(vpn_table_);
     if (!vpn_ts)
         return;
@@ -341,15 +295,17 @@ void RoutePathReplicator::LeaveVpnTable(RtGroup *group) {
 //
 void RoutePathReplicator::Join(BgpTable *table, const RouteTarget &rt,
                                bool import) {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
 
+    tbb::mutex::scoped_lock lock(mutex_);
     RPR_TRACE(TableJoin, table->name(), rt.ToString(), import);
 
     bool first = false;
     RtGroup *group = server()->rtarget_group_mgr()->LocateRtGroup(rt);
     if (import) {
         first = group->AddImportTable(family(), table);
-        server()->rtarget_group_mgr()->NotifyRtGroup(rt);
+        if (group->HasDepRoutes())
+            server()->rtarget_group_mgr()->NotifyRtGroup(rt);
         if (family_ == Address::INETVPN)
             server_->NotifyAllStaticRoutes();
         BOOST_FOREACH(BgpTable *sec_table, group->GetExportTables(family())) {
@@ -357,13 +313,11 @@ void RoutePathReplicator::Join(BgpTable *table, const RouteTarget &rt,
                 continue;
             RequestWalk(sec_table);
         }
-        walk_trigger_->Set();
     } else {
         first = group->AddExportTable(family(), table);
         AddTableState(table, group);
         if (!table->empty()) {
             RequestWalk(table);
-            walk_trigger_->Set();
         }
     }
 
@@ -379,15 +333,17 @@ void RoutePathReplicator::Join(BgpTable *table, const RouteTarget &rt,
 //
 void RoutePathReplicator::Leave(BgpTable *table, const RouteTarget &rt,
                                 bool import) {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
 
+    tbb::mutex::scoped_lock lock(mutex_);
     RtGroup *group = server()->rtarget_group_mgr()->GetRtGroup(rt);
     assert(group);
     RPR_TRACE(TableLeave, table->name(), rt.ToString(), import);
 
     if (import) {
         group->RemoveImportTable(family(), table);
-        server()->rtarget_group_mgr()->NotifyRtGroup(rt);
+        if (group->HasDepRoutes())
+            server()->rtarget_group_mgr()->NotifyRtGroup(rt);
         if (family_ == Address::INETVPN)
             server_->NotifyAllStaticRoutes();
         BOOST_FOREACH(BgpTable *sec_table, group->GetExportTables(family())) {
@@ -395,13 +351,11 @@ void RoutePathReplicator::Leave(BgpTable *table, const RouteTarget &rt,
                 continue;
             RequestWalk(sec_table);
         }
-        walk_trigger_->Set();
     } else {
         group->RemoveExportTable(family(), table);
         RemoveTableState(table, group);
         if (!table->empty()) {
             RequestWalk(table);
-            walk_trigger_->Set();
         }
     }
 
@@ -447,14 +401,17 @@ static ExtCommunityPtr UpdateExtCommunity(BgpServer *server,
     if (!ext_community)
         return ExtCommunityPtr(NULL);
 
-    // Nothing to do if we already have the OriginVn community with our AS.
+    // Nothing to do if we already have the OriginVn community with our AS
+    // or with a vn index from the global range.
     BOOST_FOREACH(const ExtCommunity::ExtCommunityValue &comm,
                   ext_community->communities()) {
         if (!ExtCommunity::is_origin_vn(comm))
             continue;
         OriginVn origin_vn(comm);
-        if (origin_vn.as_number() != server->autonomous_system())
+        if (!origin_vn.IsGlobal() &&
+            origin_vn.as_number() != server->autonomous_system()) {
             continue;
+        }
         return ExtCommunityPtr(ext_community);
     }
 
@@ -540,7 +497,8 @@ bool RoutePathReplicator::RouteListener(TableState *ts,
         BgpPath *path = static_cast<BgpPath *>(it.operator->());
 
         // Skip if the source peer is down.
-        if (!path->IsStale() && path->GetPeer() && !path->GetPeer()->IsReady())
+        if (!path->IsStale() && !path->IsLlgrStale() && path->GetPeer() &&
+                !path->GetPeer()->IsReady())
             continue;
 
         // No need to replicate the replicated path.

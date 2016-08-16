@@ -38,16 +38,18 @@ env.Append(LIBPATH = env['TOP'] + '/route')
 env.Append(LIBPATH = env['TOP'] + '/xmpp')
 env.Append(LIBPATH = env['TOP'] + '/xml')
 env.Append(LIBPATH = env['TOP'] + '/schema')
+env.Append(CPPPATH = env['TOP'] + '/tools/sandesh/library/common')
 
 env.Prepend(LIBS = [
                     'task_test',
                     'bgptest',
                     'bgp',
-		    'bgp_ifmap_config',
+                    'bgp_ifmap_config',
                     'bgp_test_factory',
                     'control_node',
                     'extended_community',
                     'peer_sandesh',
+                    'table_sandesh',
                     'origin_vn',
                     'routing_instance',
                     'routing_policy',

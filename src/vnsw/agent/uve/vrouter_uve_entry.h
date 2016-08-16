@@ -12,6 +12,9 @@
 //required for sending VRouter UVE.
 class VrouterUveEntry : public VrouterUveEntryBase {
 public:
+    typedef std::map<string, uint64_t> DerivedStatsMap;
+    typedef std::pair<string, uint64_t> DerivedStatsPair;
+
     VrouterUveEntry(Agent *agent);
     virtual ~VrouterUveEntry();
     L4PortBitmap port_bitmap() { return port_bitmap_; }
@@ -27,15 +30,18 @@ protected:
     uint64_t prev_flow_aged_;
 private:
     void InitPrevStats() const;
-    void FetchDropStats(AgentDropStats &ds) const;
+    void FetchDropStats(DerivedStatsMap &ds) const;
     bool SetVrouterPortBitmap(VrouterStatsAgent &vr_stats);
     uint64_t CalculateBandwitdh(uint64_t bytes, int speed_mbps,
                                int diff_seconds, double *utilization_bps) const;
     uint64_t GetBandwidthUsage(StatsManager::InterfaceStats *s,
                               bool dir_in, int mins, double *util) const;
     bool BuildPhysicalInterfaceBandwidth(std::vector<AgentIfBandwidth> &list,
-                                         uint8_t mins, double *in_util,
-                                         double *out_util) const;
+                                         uint8_t mins) const;
+    bool BuildPhysicalInterfaceBandwidth(map<string,uint64_t> &imp,
+                                         map<string,uint64_t> &omp, 
+                                         uint8_t mins, double &in_util,
+                                         double &out_util) const;
     bool BuildPhysicalInterfaceList(std::vector<AgentIfStats> &list) const;
     std::string GetMacAddress(const MacAddress &mac) const;
     void BuildXmppStatsList(std::vector<AgentXmppStats> &list) const;

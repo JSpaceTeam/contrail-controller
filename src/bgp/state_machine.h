@@ -167,6 +167,7 @@ public:
     void set_state(State state);
     State get_state() const { return state_; }
     const std::string last_state_change_at() const;
+    const uint64_t last_state_change_usecs_at() const;
     void set_last_event(const std::string &event);
     const std::string &last_event() const { return last_event_; }
 
@@ -180,6 +181,10 @@ public:
     void LogEvent(std::string event_name, std::string msg,
                   SandeshLevel::type log_level = SandeshLevel::SYS_DEBUG);
     bool HoldTimerExpired();
+
+protected:
+    virtual void OnNotificationMessage(BgpSession *session,
+                                       BgpProto::BgpMessage *msg);
 
 private:
     friend class StateMachineTest;
@@ -200,11 +205,12 @@ private:
 
     void TimerErrorHanlder(std::string name, std::string error) { }
     void DeleteAllTimers();
-    void BGPPeerInfoSend(BgpPeerInfoData &peer_info);
+    void BGPPeerInfoSend(const BgpPeerInfoData &peer_info);
 
     template <typename Ev> bool Enqueue(const Ev &event);
     bool DequeueEvent(EventContainer ec);
     void DequeueEventDone(bool done);
+    void UpdateFlapCount();
 
     WorkQueue<EventContainer> work_queue_;
     BgpPeer *peer_;

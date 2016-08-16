@@ -35,25 +35,22 @@ BgpAsAService::BgpAsAService(const Agent *agent) :
     agent_(agent),
     bgp_as_a_service_entry_map_(),
     service_delete_cb_() {
-    BindBgpAsAServicePorts(agent->params()->bgp_as_a_service_port_range());
+    BindBgpAsAServicePorts(agent->params()->bgp_as_a_service_port_range_value());
 }
 
 BgpAsAService::~BgpAsAService() {
 }
 
-void BgpAsAService::BindBgpAsAServicePorts(const std::string &port_range) {
-    vector<uint32_t> ports;
-    if (!stringToIntegerList(port_range, "-", ports) ||
-        ports.size() != 2) {
-        BGPASASERVICETRACE(Trace, "Port bind range rejected -"
-                           "parsing failed");
+void BgpAsAService::BindBgpAsAServicePorts(const std::vector<uint16_t> &ports) {
+    if (ports.size() != 2) {
+        BGPASASERVICETRACE(Trace, "Port bind range rejected - parsing failed");
         return;
     }
 
-    uint32_t start = ports[0];
-    uint32_t end = ports[1];
+    uint16_t start = ports[0];
+    uint16_t end = ports[1];
 
-    for (uint32_t port = start; port <= end; port++) {
+    for (uint16_t port = start; port <= end; port++) {
         int port_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         struct sockaddr_in address;
         memset(&address, '0', sizeof(address));
@@ -126,19 +123,8 @@ void BgpAsAService::BuildBgpAsAServiceInfo(IFMapNode *bgp_as_a_service_node,
     autogen::BgpAsAService *bgp_as_a_service =
         dynamic_cast<autogen::BgpAsAService *>(bgp_as_a_service_node->GetObject());
     assert(bgp_as_a_service);
-    boost::system::error_code ec;
-    IpAddress local_peer_ip =
-        IpAddress::from_string(bgp_as_a_service->bgpaas_ip_address(), ec);
-    if (ec.value() != 0) {
-        std::stringstream ss;
-        ss << "Ip address parsing failed for ";
-        ss << bgp_as_a_service->bgpaas_ip_address();
-        BGPASASERVICETRACE(Trace, ss.str().c_str());
-        return;
-    }
 
     //Look for neighbour bgp-router to take the source port
-
     for (DBGraphVertex::adjacency_iterator it = bgp_as_a_service_node->begin(table->GetGraph());
          it != bgp_as_a_service_node->end(table->GetGraph()); ++it) {
         IFMapNode *adj_node = static_cast<IFMapNode *>(it.operator->());
@@ -150,10 +136,22 @@ void BgpAsAService::BuildBgpAsAServiceInfo(IFMapNode *bgp_as_a_service_node,
                 dynamic_cast<autogen::BgpRouter *>(adj_node->GetObject());
             const std::string &vrf_name =
                 GetBgpRouterVrfName(agent_, adj_node);
-            if (vrf_name.empty() || (vrf_name != vm_vrf_name))
+            if (vrf_name.empty() || (vrf_name != vm_vrf_name) ||
+                (strcmp(bgp_router->parameters().router_type.c_str(),
+                        VALID_BGP_ROUTER_TYPE) != 0))
                 continue; //Skip the node with no VRF, notification will come.
-            new_list.insert(BgpAsAServiceEntry(local_peer_ip,
-                                  bgp_router->parameters().source_port));
+            boost::system::error_code ec;
+            IpAddress peer_ip =
+                IpAddress::from_string(bgp_router->parameters().address, ec);
+            if (ec.value() != 0) {
+                std::stringstream ss;
+                ss << "Ip address parsing failed for ";
+                ss << bgp_router->parameters().address;
+                BGPASASERVICETRACE(Trace, ss.str().c_str());
+                continue;
+            }
+            new_list.insert(BgpAsAServiceEntry(peer_ip,
+                                               bgp_router->parameters().source_port));
         }
     }
 }
@@ -188,7 +186,7 @@ void BgpAsAService::ProcessConfig(const std::string &vrf_name,
             new BgpAsAServiceList(new_bgp_as_a_service_entry_list);
     }
 
-    if (changed && service_delete_cb_) {
+    if (changed && !service_delete_cb_.empty()) {
         //Enqueue flow handler request.
         BgpAsAServiceEntryListIterator deleted_list_iter =
             old_bgp_as_a_service_entry_list_iter->second->list_.begin();
@@ -204,7 +202,7 @@ void BgpAsAService::ProcessConfig(const std::string &vrf_name,
 }
 
 void BgpAsAService::DeleteVmInterface(const boost::uuids::uuid &vm_uuid) {
-    if (service_delete_cb_ == NULL)
+    if (service_delete_cb_.empty())
         return;
 
     BgpAsAServiceEntryMapIterator iter =
@@ -247,8 +245,9 @@ bool BgpAsAService::IsBgpService(const VmInterface *vm_intf,
     const VnEntry *vn = vm_intf->vn();
     if (vn == NULL) return false;
 
-    if ((vn->GetGatewayFromIpam(source_ip) == dest_ip) ||
-        (vn->GetDnsFromIpam(source_ip) == dest_ip)) {
+    const IpAddress &vm_ip = vm_intf->primary_ip_addr();
+    if ((vn->GetGatewayFromIpam(vm_ip) == dest_ip) ||
+        (vn->GetDnsFromIpam(vm_ip) == dest_ip)) {
         ret = true;
     }
     return ret;
@@ -262,8 +261,9 @@ bool BgpAsAService::GetBgpRouterServiceDestination(const VmInterface *vm_intf,
     const VnEntry *vn = vm_intf->vn();
     if (vn == NULL) return false;
 
-    const IpAddress &gw = vn->GetGatewayFromIpam(source_ip);
-    const IpAddress &dns = vn->GetDnsFromIpam(source_ip);
+    const IpAddress &vm_ip = vm_intf->primary_ip_addr();
+    const IpAddress &gw = vn->GetGatewayFromIpam(vm_ip);
+    const IpAddress &dns = vn->GetDnsFromIpam(vm_ip);
 
     boost::system::error_code ec;
     BgpAsAServiceEntryMapConstIterator map_it =

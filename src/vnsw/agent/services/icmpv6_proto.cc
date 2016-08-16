@@ -4,12 +4,17 @@
 
 #include "base/os.h"
 #include <cmn/agent_cmn.h>
+#include <init/agent_init.h>
 #include <pkt/pkt_handler.h>
 #include <oper/route_common.h>
 #include <services/icmpv6_proto.h>
 
 Icmpv6Proto::Icmpv6Proto(Agent *agent, boost::asio::io_service &io) :
     Proto(agent, "Agent::Services", PktHandler::ICMPV6, io) {
+    // limit the number of entries in the workqueue
+    work_queue_.SetSize(agent->params()->services_queue_limit());
+    work_queue_.SetBounded(true);
+
     vn_table_listener_id_ = agent->vn_table()->Register(
                              boost::bind(&Icmpv6Proto::VnNotify, this, _2));
     vrf_table_listener_id_ = agent->vrf_table()->Register(
@@ -81,7 +86,12 @@ void Icmpv6Proto::VnNotify(DBEntryBase *entry) {
         static_cast<InetUnicastAgentRouteTable *>
             (vrf->GetInet6UnicastRouteTable())->AddHostRoute(vrf->GetName(),
                                                              addr, 128,
-                                                             vn->GetName());
+                                                             vn->GetName(), false);
+        addr = Ip6Address::from_string(IPV6_ALL_NODES_ADDRESS, ec);
+        static_cast<InetUnicastAgentRouteTable *>
+            (vrf->GetInet6UnicastRouteTable())->AddHostRoute(vrf->GetName(),
+                                                             addr, 128,
+                                                             vn->GetName(), false);
         /* We need route for PKT0_LINKLOCAL_ADDRESS so that vrouter can respond
          * to NDP requests for PKT0_LINKLOCAL_ADDRESS. Even though the nexthop
          * for this route is pkt0, vrouter never sends pkts pointing to this
@@ -91,7 +101,7 @@ void Icmpv6Proto::VnNotify(DBEntryBase *entry) {
         static_cast<InetUnicastAgentRouteTable *>
             (vrf->GetInet6UnicastRouteTable())->AddHostRoute(vrf->GetName(),
                                                              addr, 128,
-                                                             vn->GetName());
+                                                             vn->GetName(), false);
         state->set_default_routes_added(true);
     }
 }
@@ -104,19 +114,24 @@ void Icmpv6Proto::VrfNotify(DBTablePartBase *part, DBEntryBase *entry) {
     Icmpv6VrfState *state = static_cast<Icmpv6VrfState *>(vrf->GetState(
                              vrf->get_table_partition()->parent(),
                              vrf_table_listener_id_));
-    if (state && entry->IsDeleted()) {
-        boost::system::error_code ec;
-        Ip6Address addr = Ip6Address::from_string(IPV6_ALL_ROUTERS_ADDRESS, ec);
-        // enqueue delete request on fabric VRF
-        agent_->fabric_inet4_unicast_table()->DeleteReq(agent_->local_peer(),
-                                                        vrf->GetName(),
-                                                        addr, 128, NULL);
-        addr = Ip6Address::from_string(PKT0_LINKLOCAL_ADDRESS, ec);
-        agent_->fabric_inet4_unicast_table()->DeleteReq(agent_->local_peer(),
-                                                        vrf->GetName(),
-                                                        addr, 128, NULL);
-        state->set_default_routes_added(false);
-        state->Delete();
+    if (entry->IsDeleted()) {
+        if (state) {
+            boost::system::error_code ec;
+            Ip6Address addr =
+                Ip6Address::from_string(IPV6_ALL_ROUTERS_ADDRESS, ec);
+            // enqueue delete request on fabric VRF
+            agent_->fabric_inet4_unicast_table()->DeleteReq(
+                    agent_->local_peer(), vrf->GetName(), addr, 128, NULL);
+            addr = Ip6Address::from_string(IPV6_ALL_NODES_ADDRESS, ec);
+            agent_->fabric_inet4_unicast_table()->DeleteReq(
+                    agent_->local_peer(), vrf->GetName(), addr, 128, NULL);
+            addr = Ip6Address::from_string(PKT0_LINKLOCAL_ADDRESS, ec);
+            agent_->fabric_inet4_unicast_table()->DeleteReq(
+                    agent_->local_peer(), vrf->GetName(), addr, 128, NULL);
+            state->set_default_routes_added(false);
+            state->Delete();
+        }
+        return;
     }
     if (!state) {
         CreateAndSetVrfState(vrf);
@@ -188,17 +203,24 @@ bool Icmpv6VrfState::DeleteRouteState(DBTablePartBase *part, DBEntryBase *ent) {
 }
 
 void Icmpv6VrfState::Delete() {
+    if (walk_id_ != DBTableWalker::kInvalidWalkerId)
+        return;
     deleted_ = true;
     DBTableWalker *walker = agent_->db()->GetWalker();
-    walker->WalkTable(rt_table_, NULL,
+    walk_id_ = walker->WalkTable(rt_table_, NULL,
             boost::bind(&Icmpv6VrfState::DeleteRouteState, this, _1, _2),
-            boost::bind(&Icmpv6VrfState::WalkDone, this, _1, this));
+            boost::bind(&Icmpv6VrfState::WalkDone, _1, this));
 }
 
-void Icmpv6VrfState::WalkDone(DBTableBase *partition, Icmpv6VrfState *state) {
+void Icmpv6VrfState::PreWalkDone(DBTableBase *partition) {
     icmp_proto_->ValidateAndClearVrfState(vrf_);
     rt_table_->Unregister(route_table_listener_id_);
     table_delete_ref_.Reset(NULL);
+    walk_id_ = DBTableWalker::kInvalidWalkerId;
+}
+
+void Icmpv6VrfState::WalkDone(DBTableBase *partition, Icmpv6VrfState *state) {
+    state->PreWalkDone(partition);
     delete state;
 }
 
@@ -207,7 +229,7 @@ Icmpv6VrfState::Icmpv6VrfState(Agent *agent_ptr, Icmpv6Proto *proto,
     agent_(agent_ptr), icmp_proto_(proto), vrf_(vrf_entry), rt_table_(table),
     route_table_listener_id_(DBTableBase::kInvalidId),
     table_delete_ref_(this, table->deleter()), deleted_(false),
-    default_routes_added_(false) {
+    default_routes_added_(false), walk_id_(DBTableWalker::kInvalidWalkerId) {
 }
 
 Icmpv6VrfState::~Icmpv6VrfState() {
@@ -250,7 +272,7 @@ bool Icmpv6RouteState::SendNeighborSolicit() {
             continue;
         }
         it->second++;
-        handler.SendNeighborSolicit(gw_ip_.to_v6(), vm_ip_.to_v6(), it->first,
+        handler.SendNeighborSolicit(gw_ip_.to_v6(), vm_ip_.to_v6(), vm_intf,
                                     vrf_id_);
         vrf_state_->icmp_proto()->IncrementStatsNeighborSolicit(vm_intf);
         ret = true;
@@ -372,10 +394,18 @@ void Icmpv6Proto::IncrementStatsNeighborSolicit(VmInterface *vmi) {
     }
 }
 
-void Icmpv6Proto::IncrementStatsNeighborAdvert(VmInterface *vmi) {
-    stats_.icmpv6_neighbor_advert_++;
+void Icmpv6Proto::IncrementStatsNeighborAdvertSolicited(VmInterface *vmi) {
+    stats_.icmpv6_neighbor_advert_solicited_++;
     Icmpv6Stats *stats = VmiToIcmpv6Stats(vmi);
     if (stats) {
-        stats->icmpv6_neighbor_advert_++;
+        stats->icmpv6_neighbor_advert_solicited_++;
+    }
+}
+
+void Icmpv6Proto::IncrementStatsNeighborAdvertUnSolicited(VmInterface *vmi) {
+    stats_.icmpv6_neighbor_advert_unsolicited_++;
+    Icmpv6Stats *stats = VmiToIcmpv6Stats(vmi);
+    if (stats) {
+        stats->icmpv6_neighbor_advert_unsolicited_++;
     }
 }

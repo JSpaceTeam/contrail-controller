@@ -291,13 +291,17 @@ def get_svc_uve_status(svc_name, debug, timeout):
 def check_svc_status(service_name, debug, detail, timeout):
     service_sock = service_name.replace('-', '_')
     service_sock = service_sock.replace('supervisor_', 'supervisord_') + '.sock'
-    cmd = 'supervisorctl -s unix:///tmp/' + service_sock + ' status'
+    cmd = 'supervisorctl -s unix:///var/run/' + service_sock + ' status'
     cmdout = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE).communicate()[0]
     if cmdout.find('refused connection') == -1:
         cmdout = cmdout.replace('   STARTING', 'initializing')
         cmdout = cmdout.replace('   RUNNING', 'active')
         cmdout = cmdout.replace('   STOPPED', 'inactive')
         cmdout = cmdout.replace('   FATAL', 'failed')
+        cmdout = cmdout.replace('   STOPPING', 'failed')
+        cmdout = cmdout.replace('   EXITED', 'failed')
+        cmdout = cmdout.replace('   FATAL', 'failed')
+        cmdout = cmdout.replace('   UNKNOWN', 'failed')
         cmdoutlist = cmdout.split('\n')
         if debug:
             print '%s: %s' % (str(service_name), cmdoutlist)
@@ -363,11 +367,14 @@ def supervisor_status(nodetype, options):
     elif nodetype == 'database':
         print "== Contrail Database =="
         check_svc('contrail-database', initd_svc=True)
+        print ""
+        print "== Contrail Supervisor Database =="
         check_status('supervisor-database', options)
     elif nodetype == 'webui':
         print "== Contrail Web UI =="
         check_status('supervisor-webui', options)
-    elif nodetype == 'support-service':
+    elif nodetype == 'support-service' and \
+         distribution == 'debian':
         print "== Contrail Support Services =="
         check_status('supervisor-support-service', options)
 

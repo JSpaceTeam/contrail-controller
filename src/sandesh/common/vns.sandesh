@@ -87,6 +87,7 @@ const u16 DiscoveryServerPort = 5998
 const u16 RedisQueryPort = 6379
 const u16 RedisUvePort = 6379
 const u16 RedisWebuiPort = 6383
+const u16 KeystonePort = 35357
 const u16 WebConsolePort = 8080
 const u16 OpServerPort = 8081
 const u16 ApiServerPort = 8082
@@ -102,6 +103,7 @@ const u16 MetadataProxyVrouterAgentPort = 8097   // TCP
 const u16 VrouterAgentMirrorClientUdpPort = 8097 // UDP
 const u16 VrouterAgentDnsClientUdpPort = 8098    // UDP
 const u16 ContrailDnsClientUdpPort = 8092        // UDP
+const u16 OpServerAdminPort = 8181
 
 const map<string, u16> ServiceHttpPortMap = {
     SERVICE_VROUTER_AGENT : HttpPortAgent,
@@ -490,3 +492,19 @@ const list<string> RepairNeededKeyspaces = [
 
 // Set to default of 10 days
 const u32 CASSANDRA_DEFAULT_GC_GRACE_SECONDS = 864000
+
+// Define the threadpool names
+const string READSTAGE = "ReadStage"
+const string MUTATIONSTAGE = "MutationStage"
+const string MEMTABLEFLUSHWRITER = "MemtableFlushWriter"
+const string NATIVETRANSPORTREQUESTS = "Native-Transport-Requests"
+const string COMPACTIONEXECUTOR = "CompactionExecutor"
+const list<string> ThreadPoolNames = [
+    READSTAGE,
+    MUTATIONSTAGE,
+    MEMTABLEFLUSHWRITER,
+    NATIVETRANSPORTREQUESTS,
+    COMPACTIONEXECUTOR,
+]
+
+const string CLOUD_ADMIN_ROLE = "cloud-admin"

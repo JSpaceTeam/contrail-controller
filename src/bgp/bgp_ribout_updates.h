@@ -21,6 +21,7 @@ class RibUpdateMonitor;
 class RibOut;
 class RouteUpdate;
 class RouteUpdatePtr;
+class ShowRibOutStatistics;
 class UpdateQueue;
 struct UpdateInfo;
 struct UpdateMarker;
@@ -73,22 +74,37 @@ public:
     QueueVec &queue_vec() { return queue_vec_; }
     const QueueVec &queue_vec() const { return queue_vec_; }
 
+    void FillStatisticsInfo(int queue_id, ShowRibOutStatistics *sros) const;
+
     // Testing only
     void SetMessageBuilder(MessageBuilder *builder) { builder_ = builder; }
 
 private:
     friend class RibOutUpdatesTest;
 
-    bool DequeueCommon(UpdateMarker *marker, RouteUpdate *rt_update,
-                       RibPeerSet *blocked);
+    struct Stats {
+        uint64_t messages_built_count_;
+        uint64_t messages_sent_count_;
+        uint64_t reach_count_;
+        uint64_t unreach_count_;
+        uint64_t tail_dequeue_count_;
+        uint64_t peer_dequeue_count_;
+        uint64_t marker_split_count_;
+        uint64_t marker_merge_count_;
+        uint64_t marker_move_count_;
+    };
+
+    bool DequeueCommon(UpdateQueue *queue, UpdateMarker *marker,
+                       RouteUpdate *rt_update, RibPeerSet *blocked);
 
     // Add additional updates.
     void UpdatePack(int queue_id, Message *message, UpdateInfo *start_uinfo,
                     const RibPeerSet &isect);
 
     // Transmit the updates to a set of peers.
-    void UpdateSend(Message *message, const RibPeerSet &dst,
+    void UpdateSend(int queue_id, Message *message, const RibPeerSet &dst,
                     RibPeerSet *blocked);
+    void UpdateFlush(const RibPeerSet &dst, RibPeerSet *blocked);
 
     // Remove the advertised bits on an update. This updates the history
     // information. Returns true if the UpdateInfo should be deleted.
@@ -105,6 +121,7 @@ private:
     RibOut *ribout_;
     MessageBuilder *builder_;
     QueueVec queue_vec_;
+    Stats stats_[QCOUNT];
     boost::scoped_ptr<RibUpdateMonitor> monitor_;
 
     DISALLOW_COPY_AND_ASSIGN(RibOutUpdates);

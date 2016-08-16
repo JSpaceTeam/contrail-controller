@@ -21,6 +21,22 @@ using std::set;
 using std::pair;
 using std::make_pair;
 
+struct Centroid {
+};
+
+void
+StatsSelect::DeleteCentroid (Centroid *t) {
+    free(t);
+}
+
+struct TDigest {
+};
+
+void 
+StatsSelect::DeleteTDigest(TDigest *t) {
+    TDigest_destroy(t);
+}
+
 bool
 StatsSelect::Jsonify(const std::map<std::string, StatVal>&  uniks, 
         const QEOpServerProxy::AggRowT& aggs, std::string& jstr) {
@@ -79,6 +95,10 @@ StatsSelect::Jsonify(const std::map<std::string, StatVal>&  uniks,
                 sname = string("MAX(") + it->first.second + string(")");
             } else if (it->first.first == QEOpServerProxy::MIN) {
                 sname = string("MIN(") + it->first.second + string(")");
+            } else if (it->first.first == QEOpServerProxy::PERCENTILES) {
+                sname = string("PERCENTILES(") + it->first.second + string(")");
+            } else if (it->first.first == QEOpServerProxy::AVG) {
+                sname = string("AVG(") + it->first.second + string(")");
             } else {
                 QE_ASSERT(0);
             }
@@ -96,6 +116,42 @@ StatsSelect::Jsonify(const std::map<std::string, StatVal>&  uniks,
                         double mapit = boost::get<double>(it->second);
                         rapidjson::Value val(rapidjson::kNumberType);
                         val.SetDouble(mapit);
+                        dd.AddMember(sname.c_str(), dd.GetAllocator(),
+                            val, dd.GetAllocator());
+                    }
+                    break;
+                case QEOpServerProxy::TDIGEST : {
+                        boost::shared_ptr<TDigest> mapit =
+                            boost::get<boost::shared_ptr<TDigest> >(it->second);
+                        
+                        rapidjson::Value val(rapidjson::kObjectType);
+                        float ptiles[7] = {.01,.05,.25,.5,.75,.95,.99};
+                        std::string stiles[7] = {"01","05","25","50","75","95","99"};
+#if 0
+                        size_t jj = TDigest_get_ncentroids(mapit.get());
+                        for (size_t kk=0; kk < jj; kk++) {
+                            Centroid *c = TDigest_get_centroid(mapit.get(), kk);
+                            std::cout << "Parse Centroid " <<
+                               Centroid_get_mean(c) << " " <<
+                               Centroid_get_count(c) << " " <<
+                               Centroid_quantile(c, mapit.get()) << std::endl;
+                        }
+#endif
+                        for (size_t idx=0; idx<7; idx++) {
+                            rapidjson::Value sval(rapidjson::kNumberType);
+                            sval.SetDouble(TDigest_percentile(mapit.get(), ptiles[idx]));
+                            val.AddMember(stiles[idx].c_str(), dd.GetAllocator(),
+                                sval, dd.GetAllocator());
+                        }
+                        dd.AddMember(sname.c_str(), dd.GetAllocator(),
+                            val, dd.GetAllocator());
+                    }
+                    break;
+                case QEOpServerProxy::CENTROID : {
+                        boost::shared_ptr<Centroid> mapit =
+                            boost::get<boost::shared_ptr<Centroid> >(it->second);
+                        rapidjson::Value val(rapidjson::kNumberType);
+                        val.SetDouble(Centroid_get_mean(mapit.get()));
                         dd.AddMember(sname.c_str(), dd.GetAllocator(),
                             val, dd.GetAllocator());
                     }
@@ -163,8 +219,7 @@ void StatsSelect::Merge(const MapBufT& input, MapBufT& output) {
 StatsSelect::StatsSelect(AnalyticsQuery * m_query,
 		const std::vector<std::string> & select_fields) :
 			main_query(m_query), select_fields_(select_fields),
-			ts_period_(0), isT_(false),
-                        isTC_(false), isTBC_(false), count_field_() {
+			ts_period_(0), isT_(false), count_field_() {
 
     QE_ASSERT(main_query->is_stat_table_query(main_query->table()));
     status_ = false;
@@ -172,7 +227,7 @@ StatsSelect::StatsSelect(AnalyticsQuery * m_query,
     for (size_t j=0; j<select_fields_.size(); j++) {
 
         if (select_fields_[j] == g_viz_constants.STAT_TIME_FIELD) {
-            if (ts_period_ || isTBC_) {
+            if (ts_period_) {
                 QE_LOG(INFO, "StatsSelect cannot accept both T and T="); 
                 return;
             }
@@ -182,7 +237,7 @@ StatsSelect::StatsSelect(AnalyticsQuery * m_query,
 
         } else if (select_fields_[j].substr(0, g_viz_constants.STAT_TIMEBIN_FIELD.size()) ==
                 g_viz_constants.STAT_TIMEBIN_FIELD) {
-            if (isT_ || isTC_) { 
+            if (isT_) {
                 QE_LOG(INFO, "StatsSelect cannot accept both T and T="); 
                 return;
             }
@@ -198,35 +253,9 @@ StatsSelect::StatsSelect(AnalyticsQuery * m_query,
             std::string sfield = select_fields_[j];
             QEOpServerProxy::AggOper agg =
                 StatsQuery::ParseAgg(select_fields_[j], sfield);
-            if (main_query->stats().is_stat_table_static()) {
-                if (agg != QEOpServerProxy::COUNT) {
-                    StatsQuery::column_t c = main_query->stats().get_column_desc(sfield);
-                    if (sfield == g_viz_constants.STAT_TIME_FIELD) {
-                        if (ts_period_ || isTBC_) { 
-                            QE_TRACE(DEBUG, "StatsSelect cannot aggregate " <<
-                                sfield << "with T=");
-                        }
-                        isTC_ = true;
-                    } else if (sfield == g_viz_constants.STAT_TIMEBIN_FIELD) {
-                        if (isT_ || isTC_) { 
-                            QE_TRACE(DEBUG, "StatsSelect cannot aggregate " <<
-                                sfield << " with T");
-                        }
-                        isTBC_ = true;
-                    } else if (c.datatype == QEOpServerProxy::BLANK) {
-                        QE_TRACE(DEBUG, "StatsSelect unknown field " << select_fields_[j]);
-                        return;
-                    }
-                } else {
-                    if (sfield != main_query->stats().attr()) {
-                        QE_TRACE(DEBUG,"StatsSelect Invalid COUNT field " << sfield);
-                        return;
-                    }
-                }
-            }
             if (agg == QEOpServerProxy::INVALID) {
                 unik_cols_.insert(select_fields_[j]);
-                QE_TRACE(DEBUG, "StatsSelect unik field " << select_fields_[j]);                 
+                QE_TRACE(DEBUG, "StatsSelect unik field " << select_fields_[j]);
             } else if (agg == QEOpServerProxy::COUNT) {
                 count_field_ = sfield;
                 QE_TRACE(DEBUG, "StatsSelect COUNT " << sfield);
@@ -242,6 +271,12 @@ StatsSelect::StatsSelect(AnalyticsQuery * m_query,
             } else if (agg == QEOpServerProxy::MIN) {
                 min_field_.insert(sfield);
                 QE_TRACE(DEBUG, "StatsSelect MIN " << sfield);
+            } else if (agg == QEOpServerProxy::PERCENTILES) {
+                percentile_cols_.insert(sfield);
+                QE_TRACE(DEBUG, "StatsSelect PERCENTILES " << sfield);
+            } else if (agg == QEOpServerProxy::AVG) {
+                avg_field_.insert(sfield);
+                QE_TRACE(DEBUG, "StatsSelect AVG " << sfield);
             } else {
                 QE_ASSERT(0);
             }
@@ -375,10 +410,49 @@ void StatsSelect::MergeAggRow(QEOpServerProxy::AggRowT &arows,
                     QE_ASSERT(0);
                 }     
             }
+            if (jt->first.first == QEOpServerProxy::AVG) {
+                StatsSelect::StatVal & sv = jt->second;
+                try {
+                    if (sv.which() == QEOpServerProxy::CENTROID) {
+                        boost::shared_ptr<Centroid>& pt =
+                            boost::get<boost::shared_ptr<Centroid> >(jt->second);
 
+                        boost::shared_ptr<Centroid> pt2 =
+                            boost::get<boost::shared_ptr<Centroid> >(kt->second);
+                        Centroid_add(pt.get(),
+                                Centroid_get_mean(pt2.get()),
+                                Centroid_get_count(pt2.get()));
+                    }
+                } catch (boost::bad_get& ex) {
+                    QE_ASSERT(0);
+                }
+            }
+            if (jt->first.first == QEOpServerProxy::PERCENTILES) {
+                StatsSelect::StatVal & sv = jt->second;
+                try {
+                    if (sv.which() == QEOpServerProxy::TDIGEST) {
+                        boost::shared_ptr<TDigest>& pt =
+                            boost::get<boost::shared_ptr<TDigest> >(jt->second);
+                        
+                        boost::shared_ptr<TDigest> pt2 =
+                            boost::get<boost::shared_ptr<TDigest> >(kt->second);
+                        size_t j, ncentroids = TDigest_get_ncentroids(pt2.get());
+                        for (j = 0; j < ncentroids; j++) {
+                            Centroid * c = TDigest_get_centroid(pt2.get(), j);
+                            TDigest* nd = TDigest_add(pt.get(),
+                                Centroid_get_mean(c),
+                                Centroid_get_count(c));
+                            if (nd) {
+                                pt.reset(nd);
+                            }
+                        }
+                    }
+                } catch (boost::bad_get& ex) {
+                    QE_ASSERT(0);
+                }     
+            }
         }
     }
-
 }
 
 namespace boost {
@@ -458,8 +532,50 @@ bool StatsSelect::LoadRow(boost::uuids::uuid u,
             pair<QEOpServerProxy::AggOper,string> aggkey(QEOpServerProxy::MIN,it->name);
             narows.insert(make_pair(aggkey, it->value)); 
         }
-    }
+        uit = avg_field_.find(it->name);
+        if (uit!=avg_field_.end()) {
+            pair<QEOpServerProxy::AggOper,string> aggkey(QEOpServerProxy::AVG,it->name);
+            try {
+                Centroid *t = Centroid_create(0, 0);
+                StatsSelect::StatVal sv = it->value;
+                double val;
+                if (sv.which() == QEOpServerProxy::UINT64) {
+                    val = boost::get<uint64_t>(sv);
+                } else {
+                    val = boost::get<double>(sv);
+                }
+                Centroid_add(t, val, 1);
+                boost::shared_ptr<Centroid> pt(t, &StatsSelect::DeleteCentroid);
+                narows.insert(make_pair(aggkey, pt));
+            } catch (boost::bad_get& ex) {
+                QE_ASSERT(0);
+            } catch (const std::out_of_range& oor) {
+                QE_ASSERT(0);
+            }
+        }
+        uit = percentile_cols_.find(it->name);
+        if (uit!=percentile_cols_.end()) {
+            pair<QEOpServerProxy::AggOper,string> aggkey(QEOpServerProxy::PERCENTILES,it->name);
 
+	    try {
+		TDigest *t = TDigest_create(0.01, 100);
+		StatsSelect::StatVal sv = it->value;
+		double val;
+		if (sv.which() == QEOpServerProxy::UINT64) {
+                    val = boost::get<uint64_t>(sv);
+		} else {
+                    val = boost::get<double>(sv);
+		}                   
+		TDigest_add(t, val, 1);
+		boost::shared_ptr<TDigest> pt(t, &StatsSelect::DeleteTDigest);
+		narows.insert(make_pair(aggkey, pt)); 
+	    } catch (boost::bad_get& ex) {
+		QE_ASSERT(0);
+	    } catch (const std::out_of_range& oor) {
+		QE_ASSERT(0);
+	    }                        
+        }
+    }
     
     for (std::set<std::string>::const_iterator ct = class_cols_.begin();
             ct!=class_cols_.end(); ct++) {
@@ -484,7 +600,7 @@ bool StatsSelect::LoadRow(boost::uuids::uuid u,
         pair<QEOpServerProxy::AggOper,string> aggkey(QEOpServerProxy::COUNT,count_field_);
         narows.insert(make_pair(aggkey, (uint64_t) 1));            
     }
-
+    
     MergeFullRow(ukey, uniks, narows, output);
 
     return true;

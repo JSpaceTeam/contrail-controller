@@ -41,14 +41,14 @@ size_t ErmVpnTable::Hash(const DBEntry *entry) const {
     const ErmVpnRoute *rt_entry = static_cast<const ErmVpnRoute *>(entry);
     const ErmVpnPrefix &ermvpnprefix = rt_entry->GetPrefix();
     size_t value = ErmVpnTable::HashFunction(ermvpnprefix);
-    return value % DB::PartitionCount();
+    return value % kPartitionCount;
 }
 
 size_t ErmVpnTable::Hash(const DBRequestKey *key) const {
     const RequestKey *rkey = static_cast<const RequestKey *>(key);
     Ip4Prefix prefix(rkey->prefix.group(), 32);
     size_t value = InetTable::HashFunction(prefix);
-    return value % DB::PartitionCount();
+    return value % kPartitionCount;
 }
 
 BgpRoute *ErmVpnTable::TableFind(DBTablePartition *rtp,
@@ -120,7 +120,7 @@ BgpRoute *ErmVpnTable::RouteReplicate(BgpServer *server,
             src_path->GetSource(), src_path->GetPeer(),
             src_path->GetPathId());
     if (dest_path != NULL) {
-        if (new_attr != dest_path->GetAttr()) {
+        if (new_attr != dest_path->GetOriginalAttr()) {
             bool success = dest_route->RemoveSecondaryPath(src_rt,
                 src_path->GetSource(), src_path->GetPeer(),
                 src_path->GetPathId());

@@ -33,7 +33,7 @@ SFlowGenerator::SFlowGenerator(const std::string& ip_address,
 SFlowGenerator::~SFlowGenerator() {
 }
 
-bool SFlowGenerator::EnqueueSFlowPacket(boost::asio::const_buffer& buffer,
+bool SFlowGenerator::EnqueueSFlowPacket(const boost::asio::const_buffer& buffer,
                                         size_t length, uint64_t timestamp) {
     num_packets_++;
     time_last_pkt_seen_ = timestamp;
@@ -94,7 +94,8 @@ bool SFlowGenerator::ProcessSFlowPacket(
     }
     if (samples.size()) {
         flow_data.set_flow(samples);
-        db_handler_->UnderlayFlowSampleInsert(flow_data, qentry->timestamp);
+        db_handler_->UnderlayFlowSampleInsert(flow_data, qentry->timestamp,
+            GenDb::GenDbIf::DbAddColumnCb());
     }
     return true;
 }

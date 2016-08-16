@@ -190,7 +190,8 @@ static void DecodeSandeshMessages(char *buf, uint32_t buf_len,
 KSyncSock::KSyncSock() :
     send_queue_(this),
     max_bulk_msg_count_(kMaxBulkMsgCount), max_bulk_buf_size_(kMaxBulkMsgSize),
-    bulk_seq_no_(-1), tx_count_(0), err_count_(0), read_inline_(true) {
+    bulk_seq_no_(kInvalidBulkSeqNo), tx_count_(0), err_count_(0),
+    read_inline_(true) {
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
     uint32_t task_id = 0;
     for(int i = 0; i < IoContext::MAX_WORK_QUEUES; i++) {
@@ -199,6 +200,9 @@ KSyncSock::KSyncSock() :
             new WorkQueue<char *>(task_id, 0,
                                   boost::bind(&KSyncSock::ProcessKernelData,
                                               this, _1));
+        char name[128];
+        sprintf(name, "KSync Receive Queue-%d", i);
+        receive_work_queue[i]->set_name(name);
     }
     task_id = scheduler->GetTaskId("Ksync::AsyncSend");
     nl_client_ = (nl_client *)malloc(sizeof(nl_client));
@@ -239,6 +243,13 @@ void KSyncSock::Init(bool use_work_queue) {
     shutdown_ = false;
 }
 
+void KSyncSock::SetMeasureQueueDelay(bool val) {
+    sock_->send_queue_.set_measure_busy_time(val);
+    for (int i = 0; i < IoContext::MAX_WORK_QUEUES; i++) {
+        receive_work_queue[i]->set_measure_busy_time(val);
+    }
+}
+
 void KSyncSock::Start(bool read_inline) {
     sock_->read_inline_ = read_inline;
     if (sock_->read_inline_) {
@@ -261,13 +272,25 @@ void KSyncSock::SetNetlinkFamilyId(int id) {
     InitNetlink(sock_->nl_client_);
 }
 
-int KSyncSock::AllocSeqNo(bool is_uve) { 
-    int seq;
+uint32_t KSyncSock::WaitTreeSize() const {
+    return wait_tree_.size();
+}
+
+void KSyncSock::SetSeqno(uint32_t seq) {
+    seqno_ = seq;
+    uve_seqno_ = seq;
+}
+
+uint32_t KSyncSock::AllocSeqNo(bool is_uve) {
+    uint32_t seq;
     if (is_uve) {
         seq = uve_seqno_.fetch_and_add(2);
     } else {
         seq = seqno_.fetch_and_add(2);
         seq |= KSYNC_DEFAULT_Q_ID_SEQ;
+    }
+    if (seq == kInvalidBulkSeqNo) {
+        return AllocSeqNo(is_uve);
     }
     return seq;
 }
@@ -397,7 +420,7 @@ void KSyncSock::WriteHandler(const boost::system::error_code& error,
 
 // End of messages in the work-queue. Send messages pending in bulk context
 void KSyncSock::OnEmptyQueue(bool done) {
-    if (bulk_seq_no_ == -1)
+    if (bulk_seq_no_ == kInvalidBulkSeqNo)
         return;
     tbb::mutex::scoped_lock lock(mutex_);
     WaitTree::iterator it = wait_tree_.find(bulk_seq_no_);
@@ -430,7 +453,7 @@ int KSyncSock::SendBulkMessage(KSyncBulkSandeshContext *bulk_context,
             ValidateAndEnqueue(rxbuf);
         } while(more_data);
     }
-    bulk_seq_no_ = -1;
+    bulk_seq_no_ = kInvalidBulkSeqNo;
     return true;
 }
 
@@ -438,7 +461,7 @@ int KSyncSock::SendBulkMessage(KSyncBulkSandeshContext *bulk_context,
 KSyncBulkSandeshContext *KSyncSock::LocateBulkContext(uint32_t seqno,
                               IoContext::IoContextWorkQId io_context_type) {
     tbb::mutex::scoped_lock lock(mutex_);
-    if (bulk_seq_no_ == -1) {
+    if (bulk_seq_no_ == kInvalidBulkSeqNo) {
         bulk_seq_no_ = seqno;
         bulk_buf_size_ = 0;
         bulk_msg_count_ = 0;
@@ -886,7 +909,7 @@ void KSyncIoContext::Handler() {
 }
 
 void KSyncIoContext::ErrorHandler(int err) {
-    entry_->ErrorHandler(err, GetSeqno());
+    entry_->ErrorHandler(err, GetSeqno(), event_);
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -994,6 +1017,16 @@ void KSyncBulkSandeshContext::RouteMsgHandler(vr_route_req *req) {
 void KSyncBulkSandeshContext::MplsMsgHandler(vr_mpls_req *req) {
     AgentSandeshContext *context = GetSandeshContext();
     context->MplsMsgHandler(req);
+}
+
+void KSyncBulkSandeshContext::QosConfigMsgHandler(vr_qos_map_req *req) {
+    AgentSandeshContext *context = GetSandeshContext();
+    context->QosConfigMsgHandler(req);
+}
+
+void KSyncBulkSandeshContext::ForwardingClassMsgHandler(vr_fc_map_req *req) {
+    AgentSandeshContext *context = GetSandeshContext();
+    context->ForwardingClassMsgHandler(req);
 }
 
 // vr_response message is treated as delimiter in a bulk-context. So, move to

@@ -13,21 +13,23 @@ using namespace std;
 using namespace xmsm;
 
 XmppChannelMux::XmppChannelMux(XmppConnection *connection) 
-    : connection_(connection), rx_message_trace_cb_(NULL), closing_count_(0) {
+    : connection_(connection), rx_message_trace_cb_(NULL),
+      tx_message_trace_cb_(NULL) {
+        closing_count_ = 0;
 }
 
 XmppChannelMux::~XmppChannelMux() {
 }
 
 void XmppChannelMux::Close() {
-    if (closing_count_)
-        return;
-    InitializeClosingCount();
-    connection_->Clear();
+    if (InitializeClosingCount())
+        connection_->Clear();
 }
 
 // Track clients who close gracefully. At the moment, only BGP cares about this.
-void XmppChannelMux::InitializeClosingCount() {
+bool XmppChannelMux::InitializeClosingCount() {
+    if (closing_count_)
+        return false;
 
     BOOST_FOREACH(const ReceiveCbMap::value_type &value, rxmap_) {
         switch (value.first) {
@@ -43,6 +45,8 @@ void XmppChannelMux::InitializeClosingCount() {
             break;
         }
     }
+
+    return true;
 }
 
 // Check if the channel is being closed (Graceful Restart)
@@ -92,6 +96,10 @@ bool XmppChannelMux::Send(const uint8_t *msg, size_t msgsize,
         RegisterWriteReady(id, cb);
     }
     return res;
+}
+
+int XmppChannelMux::GetTaskInstance() const {
+    return connection_->GetTaskInstance();
 }
 
 void XmppChannelMux::RegisterReceive(xmps::PeerId id, ReceiveCb cb) {
@@ -198,7 +206,7 @@ void XmppChannelMux::HandleStateEvent(xmsm::XmState state) {
         // Event to create the peer on server
         XmppServer *server = static_cast<XmppServer *>(connection_->server());
         if (st == xmps::NOT_READY)
-            InitializeClosingCount();
+            (void) InitializeClosingCount();
         server->NotifyConnectionEvent(this, st);
     }
 }
@@ -246,6 +254,9 @@ std::string XmppChannelMux::LastFlap() const {
 void XmppChannelMux::RegisterRxMessageTraceCallback(RxMessageTraceCb cb) {
     rx_message_trace_cb_ = cb;
 }
+void XmppChannelMux::RegisterTxMessageTraceCallback(TxMessageTraceCb cb) {
+    tx_message_trace_cb_ = cb;
+}
 
 bool XmppChannelMux::RxMessageTrace(const std::string &to_address,
                                     int port,
@@ -254,6 +265,17 @@ bool XmppChannelMux::RxMessageTrace(const std::string &to_address,
                                     const XmppStanza::XmppMessage *xmpp_msg) {
     if (rx_message_trace_cb_) {
         return rx_message_trace_cb_(to_address, port, msg_size, msg, xmpp_msg);
+    }
+    return false;
+}
+
+bool XmppChannelMux::TxMessageTrace(const std::string &to_address,
+                                    int port,
+                                    int msg_size,
+                                    const std::string &msg,
+                                    const XmppStanza::XmppMessage *xmpp_msg) {
+    if (tx_message_trace_cb_) {
+        return tx_message_trace_cb_(to_address, port, msg_size, msg, xmpp_msg);
     }
     return false;
 }

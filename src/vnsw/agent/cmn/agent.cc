@@ -39,6 +39,7 @@
 #include <filter/acl.h>
 
 #include <cmn/agent_factory.h>
+#include <base/task_tbbkeepawake.h>
 
 const std::string Agent::null_string_ = "";
 const std::set<std::string> Agent::null_string_list_;
@@ -51,6 +52,7 @@ const std::string Agent::link_local_vn_name_ =
 const std::string Agent::link_local_vrf_name_ =
     "default-domain:default-project:__link_local__:__link_local__";
 const MacAddress Agent::vrrp_mac_(0x00, 0x00, 0x5E, 0x00, 0x01, 0x00);
+const MacAddress Agent::pkt_interface_mac_(0x00, 0x00, 0x00, 0x00, 0x00, 0x01);
 const std::string Agent::bcast_mac_ = "FF:FF:FF:FF:FF:FF";
 const std::string Agent::config_file_ = "/etc/contrail/contrail-vrouter-agent.conf";
 const std::string Agent::log_file_ = "/var/log/contrail/vrouter.log";
@@ -127,10 +129,13 @@ void Agent::SetAgentTaskPolicy() {
 
     const char *db_exclude_list[] = {
         kTaskFlowEvent,
+        kTaskFlowKSync,
         kTaskFlowUpdate,
+        kTaskFlowDelete,
         kTaskFlowAudit,
         "Agent::Services",
         "Agent::StatsCollector",
+        kTaskFlowStatsCollector,
         "sandesh::RecvQueue",
         "Agent::Uve",
         "Agent::KSync",
@@ -138,27 +143,40 @@ void Agent::SetAgentTaskPolicy() {
         "Agent::Profile",
         "Agent::PktHandler",
         kTaskHealthCheck,
+        kTaskDBExclude,
         AGENT_SHUTDOWN_TASKNAME,
-        AGENT_INIT_TASKNAME
+        AGENT_INIT_TASKNAME,
+        AGENT_SANDESH_TASKNAME,
+        kTaskConfigManager,
+        INSTANCE_MANAGER_TASK_NAME
     };
     SetTaskPolicyOne("db::DBTable", db_exclude_list, 
                      sizeof(db_exclude_list) / sizeof(char *));
 
+    // ConfigManager task
+    const char *config_manager_exclude_list[] = {
+        AGENT_SHUTDOWN_TASKNAME,
+        AGENT_INIT_TASKNAME
+    };
+    SetTaskPolicyOne(kTaskConfigManager, config_manager_exclude_list,
+                     sizeof(config_manager_exclude_list) / sizeof(char *));
+
     const char *flow_table_exclude_list[] = {
-         "Agent::PktFlowResponder",
-         "sandesh::RecvQueue",
-         AGENT_SHUTDOWN_TASKNAME,
+        "Agent::PktFlowResponder",
+        AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne(kTaskFlowEvent, flow_table_exclude_list,
                      sizeof(flow_table_exclude_list) / sizeof(char *));
 
-    const char *flow_exclude_list[] = {
-        AGENT_SHUTDOWN_TASKNAME,
-        AGENT_INIT_TASKNAME
-    };
-    SetTaskPolicyOne(kTaskFlowUpdate, flow_exclude_list, 
-                     sizeof(flow_exclude_list) / sizeof(char *));
+    SetTaskPolicyOne(kTaskFlowKSync, flow_table_exclude_list,
+                     sizeof(flow_table_exclude_list) / sizeof(char *));
+
+    SetTaskPolicyOne(kTaskFlowUpdate, flow_table_exclude_list,
+                     sizeof(flow_table_exclude_list) / sizeof(char *));
+
+    SetTaskPolicyOne(kTaskFlowDelete, flow_table_exclude_list,
+                     sizeof(flow_table_exclude_list) / sizeof(char *));
 
     const char *sandesh_exclude_list[] = {
         "db::DBTable",
@@ -167,7 +185,8 @@ void Agent::SetAgentTaskPolicy() {
         "io::ReaderTask",
         "Agent::PktFlowResponder",
         AGENT_SHUTDOWN_TASKNAME,
-        AGENT_INIT_TASKNAME
+        AGENT_INIT_TASKNAME,
+        AGENT_SANDESH_TASKNAME
     };
     SetTaskPolicyOne("sandesh::RecvQueue", sandesh_exclude_list, 
                      sizeof(sandesh_exclude_list) / sizeof(char *));
@@ -189,6 +208,7 @@ void Agent::SetAgentTaskPolicy() {
                      sizeof(xmpp_config_exclude_list) / sizeof(char *));
 
     const char *controller_xmpp_exclude_list[] = {
+        "Agent::Services",
         "io::ReaderTask",
         "db::DBTable",
         AGENT_SHUTDOWN_TASKNAME,
@@ -215,9 +235,7 @@ void Agent::SetAgentTaskPolicy() {
                      sizeof(walk_cancel_exclude_list) / sizeof(char *));
 
     const char *ksync_exclude_list[] = {
-        "Agent::StatsCollector",
         "db::DBTable",
-        "Agent::PktFlowResponder",
         AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
@@ -232,6 +250,13 @@ void Agent::SetAgentTaskPolicy() {
     SetTaskPolicyOne("Agent::StatsCollector", stats_collector_exclude_list,
                      sizeof(stats_collector_exclude_list) / sizeof(char *));
 
+    const char *flow_stats_exclude_list[] = {
+        AGENT_SHUTDOWN_TASKNAME,
+        AGENT_INIT_TASKNAME
+    };
+    SetTaskPolicyOne(kTaskFlowStatsCollector, flow_stats_exclude_list,
+                     sizeof(flow_stats_exclude_list) / sizeof(char *));
+
     const char *metadata_exclude_list[] = {
         "xmpp::StateMachine",
         "http::RequestHandlerTask"
@@ -239,10 +264,17 @@ void Agent::SetAgentTaskPolicy() {
     SetTaskPolicyOne("http client", metadata_exclude_list,
                      sizeof(metadata_exclude_list) / sizeof(char *));
 
+    const char *xmpp_state_machine_exclude_list[] = {
+        "io::ReaderTask"
+    };
+    SetTaskPolicyOne("xmpp::StateMachine", xmpp_state_machine_exclude_list,
+                     sizeof(xmpp_state_machine_exclude_list) / sizeof(char *));
+
     const char *agent_init_exclude_list[] = {
         "xmpp::StateMachine",
         "http client",
         "db::DBTable",
+        AGENT_SANDESH_TASKNAME,
         AGENT_SHUTDOWN_TASKNAME
     };
     SetTaskPolicyOne(AGENT_INIT_TASKNAME, agent_init_exclude_list,
@@ -250,7 +282,8 @@ void Agent::SetAgentTaskPolicy() {
 
     const char *flow_stats_manager_exclude_list[] = {
         "Agent::StatsCollector",
-        "Flow::Management",
+        kTaskFlowStatsCollector,
+        kTaskFlowMgmt,
         AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
@@ -261,6 +294,24 @@ void Agent::SetAgentTaskPolicy() {
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
     scheduler->RegisterLog(boost::bind(&Agent::TaskTrace, this,
                                        _1, _2, _3, _4, _5));
+
+    const char *db_exclude_task_exclude_list[] = {
+        "Agent::Uve",
+        "sandesh::RecvQueue",
+        "Agent::ControllerXmpp",
+        "bgp::Config",
+        AGENT_SHUTDOWN_TASKNAME,
+        AGENT_INIT_TASKNAME
+    };
+    SetTaskPolicyOne(kTaskDBExclude, db_exclude_task_exclude_list,
+                     sizeof(db_exclude_task_exclude_list) / sizeof(char *));
+
+    const char *profile_task_exclude_list[] = {
+        AGENT_SHUTDOWN_TASKNAME,
+        AGENT_INIT_TASKNAME
+    };
+    SetTaskPolicyOne("Agent::Profile", profile_task_exclude_list,
+                     sizeof(profile_task_exclude_list) / sizeof(char *));
 }
 
 void Agent::CreateLifetimeManager() {
@@ -334,11 +385,16 @@ void Agent::CopyConfig(AgentParam *params) {
 
     headless_agent_mode_ = params_->headless_mode();
     simulate_evpn_tor_ = params->simulate_evpn_tor();
-    debug_ = params_->debug();
     test_mode_ = params_->test_mode();
     tsn_enabled_ = params_->isTsnAgent();
     tor_agent_enabled_ = params_->isTorAgent();
+    server_gateway_mode_ = params_->isServerGatewayMode();
     flow_thread_count_ = params_->flow_thread_count();
+    flow_trace_enable_ = params_->flow_trace_enable();
+    flow_add_tokens_ = params_->flow_add_tokens();
+    flow_ksync_tokens_ = params_->flow_ksync_tokens();
+    flow_del_tokens_ = params_->flow_del_tokens();
+    flow_update_tokens_ = params_->flow_update_tokens();
     tbb_keepawake_timeout_ = params_->tbb_keepawake_timeout();
 }
 
@@ -391,28 +447,18 @@ void Agent::InitCollector() {
 
 }
 
-bool Agent::TbbKeepAwake() {
-    tbb_awake_count_++;
-    return true;
-}
-
 void Agent::InitDone() {
     // Its observed that sometimes TBB doesnt scheduler misses spawn events
     // and doesnt schedule a task till its triggered again. As a work around
     // start a dummy timer that fires and awake TBB periodically
     if (tbb_keepawake_timeout_) {
-        uint32_t task_id = task_scheduler_->GetTaskId("Agent::TbbKeepAwake");
-        tbb_awake_timer_ = TimerManager::CreateTimer(*event_mgr_->io_service(),
-                                                     "TBB Keep Awake",
-                                                     task_id, 0);
-        tbb_awake_timer_->Start(tbb_keepawake_timeout_,
-                                boost::bind(&Agent::TbbKeepAwake, this));
+        tbb_awake_task_->StartTbbKeepAwakeTask(TaskScheduler::GetInstance(),
+                             event_manager(),tbb_keepawake_timeout_);
     }
 }
 
 void Agent::Shutdown() {
-    if (tbb_awake_timer_)
-        TimerManager::DeleteTimer(tbb_awake_timer_);
+    tbb_awake_task_->ShutTbbKeepAwakeTask();
 }
 
 static bool interface_exist(string &name) {
@@ -471,6 +517,7 @@ void Agent::InitPeers() {
     ecmp_peer_.reset(new Peer(Peer::ECMP_PEER, ECMP_PEER_NAME, true));
     vgw_peer_.reset(new Peer(Peer::VGW_PEER, VGW_PEER_NAME, true));
     evpn_peer_.reset(new EvpnPeer());
+    inet_evpn_peer_.reset(new InetEvpnPeer());
     multicast_peer_.reset(new Peer(Peer::MULTICAST_PEER, MULTICAST_PEER_NAME,
                                    false));
     multicast_tor_peer_.reset(new Peer(Peer::MULTICAST_TOR_PEER,
@@ -488,11 +535,12 @@ Agent::Agent() :
     stats_collector_(NULL), flow_stats_manager_(NULL), pkt_(NULL),
     services_(NULL), vgw_(NULL), rest_server_(NULL), oper_db_(NULL),
     diag_table_(NULL), controller_(NULL), event_mgr_(NULL),
-    agent_xmpp_channel_(), ifmap_channel_(), xmpp_client_(), xmpp_init_(),
-    dns_xmpp_channel_(), dns_xmpp_client_(), dns_xmpp_init_(),
-    agent_stale_cleaner_(NULL), cn_mcast_builder_(NULL), ds_client_(NULL),
-    metadata_server_port_(0), host_name_(""), agent_name_(""), prog_name_(""),
-    introspect_port_(0), instance_id_(g_vns_constants.INSTANCE_ID_DEFAULT),
+    tbb_awake_task_(NULL), agent_xmpp_channel_(), ifmap_channel_(),
+    xmpp_client_(), xmpp_init_(), dns_xmpp_channel_(), dns_xmpp_client_(),
+    dns_xmpp_init_(), agent_stale_cleaner_(NULL), cn_mcast_builder_(NULL),
+    ds_client_(NULL), metadata_server_port_(0), host_name_(""), agent_name_(""),
+    prog_name_(""), introspect_port_(0),
+    instance_id_(g_vns_constants.INSTANCE_ID_DEFAULT),
     module_type_(Module::VROUTER_AGENT), module_name_(), send_ratelimit_(0),
     db_(NULL), task_scheduler_(NULL), agent_init_(NULL), fabric_vrf_(NULL),
     intf_table_(NULL), health_check_table_(NULL), metadata_ip_allocator_(NULL),
@@ -501,7 +549,6 @@ Agent::Agent() :
     vm_table_(NULL), vn_table_(NULL), sg_table_(NULL), mpls_table_(NULL),
     acl_table_(NULL), mirror_table_(NULL), vrf_assign_table_(NULL),
     vxlan_table_(NULL), service_instance_table_(NULL),
-    loadbalancer_table_(NULL), loadbalancer_pool_table_(NULL),
     physical_device_table_(NULL), physical_device_vn_table_(NULL),
     config_manager_(), mirror_cfg_table_(NULL), intf_mirror_cfg_table_(NULL),
     intf_cfg_table_(NULL), router_id_(0), prefix_len_(0), 
@@ -522,17 +569,17 @@ Agent::Agent() :
     lifetime_manager_(NULL), ksync_sync_mode_(false), mgmt_ip_(""),
     vxlan_network_identifier_mode_(AUTOMATIC), headless_agent_mode_(false), 
     vhost_interface_(NULL),
-    connection_state_(NULL), debug_(false), test_mode_(false),
+    connection_state_(NULL), test_mode_(false),
+    xmpp_dns_test_mode_(false),
     init_done_(false), simulate_evpn_tor_(false), tsn_enabled_(false),
-    tor_agent_enabled_(false),
-    flow_table_size_(0), flow_thread_count_(0), max_vm_flows_(0),
-    ovsdb_client_(NULL), vrouter_server_ip_(0),
+    tor_agent_enabled_(false), server_gateway_mode_(false),
+    flow_table_size_(0), flow_thread_count_(0), flow_trace_enable_(true),
+    max_vm_flows_(0), ovsdb_client_(NULL), vrouter_server_ip_(0),
     vrouter_server_port_(0), vrouter_max_labels_(0), vrouter_max_nexthops_(0),
     vrouter_max_interfaces_(0), vrouter_max_vrfs_(0),
     vrouter_max_mirror_entries_(0), vrouter_max_bridge_entries_(0),
     vrouter_max_oflow_bridge_entries_(0), flow_stats_req_handler_(NULL),
-    tbb_keepawake_timeout_(kDefaultTbbKeepawakeTimeout), tbb_awake_timer_(NULL),
-    tbb_awake_count_(0) {
+    tbb_keepawake_timeout_(kDefaultTbbKeepawakeTimeout) {
 
     assert(singleton_ == NULL);
     singleton_ = this;
@@ -541,6 +588,9 @@ Agent::Agent() :
 
     event_mgr_ = new EventManager();
     assert(event_mgr_);
+
+    tbb_awake_task_ = new TaskTbbKeepAwake();
+    assert(tbb_awake_task_);
 
     SetAgentTaskPolicy();
     CreateLifetimeManager();
@@ -691,6 +741,14 @@ void Agent::set_rest_server(RESTServer *r) {
     rest_server_ = r;
 }
 
+PortIpcHandler *Agent::port_ipc_handler() const {
+    return port_ipc_handler_;
+}
+
+void Agent::set_port_ipc_handler(PortIpcHandler *r) {
+    port_ipc_handler_ = r;
+}
+
 OperDB *Agent::oper_db() const {
     return oper_db_;
 }
@@ -717,8 +775,9 @@ bool Agent::isVmwareVcenterMode() const {
 void Agent::ConcurrencyCheck() {
     if (test_mode_) {
        CHECK_CONCURRENCY("db::DBTable", "Agent::KSync", AGENT_INIT_TASKNAME,
-                         "Flow::Management", kTaskFlowUpdate,
-                         kTaskFlowEvent);
+                         kTaskFlowMgmt, kTaskFlowUpdate,
+                         kTaskFlowEvent, kTaskFlowDelete, kTaskFlowKSync,
+                         kTaskHealthCheck);
     }
 }
 
@@ -801,3 +860,26 @@ void Agent::TaskTrace(const char *file_name, uint32_t line_no,
                         description, delay, task->Description());
 }
 
+bool Agent::MeasureQueueDelay() {
+    return params_->measure_queue_delay();
+}
+
+void Agent::SetMeasureQueueDelay(bool val) {
+    return params_->set_measure_queue_delay(val);
+}
+
+VrouterObjectLimits Agent::GetVrouterObjectLimits() {
+   VrouterObjectLimits vr_limits;
+   vr_limits.set_max_labels(vrouter_max_labels());
+   vr_limits.set_max_nexthops(vrouter_max_nexthops());
+   vr_limits.set_max_interfaces(vrouter_max_interfaces());
+   vr_limits.set_max_vrfs(vrouter_max_vrfs());
+   vr_limits.set_max_mirror_entries(vrouter_max_mirror_entries());
+   vr_limits.set_vrouter_max_bridge_entries(vrouter_max_bridge_entries());
+   vr_limits.set_vrouter_max_oflow_bridge_entries(
+           vrouter_max_oflow_bridge_entries());
+   vr_limits.set_vrouter_build_info(vrouter_build_info());
+   vr_limits.set_vrouter_max_flow_entries(vrouter_max_flow_entries());
+   vr_limits.set_vrouter_max_oflow_entries(vrouter_max_oflow_entries());
+   return vr_limits;
+}

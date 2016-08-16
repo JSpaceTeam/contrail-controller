@@ -5,3 +5,5 @@ coverage==4.1
 pyaml
 httpretty==0.8.10
 memoized==0.2
+junitxml
+

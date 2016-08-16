@@ -82,7 +82,7 @@ class LogQuerier(object):
     def parse_args(self):
         """
         Eg. python log.py --analytics-api-ip 127.0.0.1
-                          --analytics-api-port 8081
+                          --analytics-api-port 8181
                           --source 127.0.0.1
                           --node-type Control
                           --module bgp | cfgm | vnswad
@@ -105,7 +105,7 @@ class LogQuerier(object):
         """
         defaults = {
             'analytics_api_ip': '127.0.0.1',
-            'analytics_api_port': '8081',
+            'analytics_api_port': '8181',
         }
 
         parser = argparse.ArgumentParser(
@@ -158,6 +158,9 @@ class LogQuerier(object):
         parser.add_argument("--output-file", "-o", help="redirect output to file")
         parser.add_argument("--json", help="Dump output as json", action="store_true")
         parser.add_argument("--all", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument("--admin-user", help="Name of admin user", default="admin")
+        parser.add_argument("--admin-password", help="Password of admin user",
+            default="contrail123")
         self._args = parser.parse_args()
         return 0
     # end parse_args
@@ -214,9 +217,14 @@ class LogQuerier(object):
         and_filter = []
         or_filter = []
         if self._args.source is not None:
+            if self._args.source.endswith('*'):
+                val = self._args.source[:-1]
+                oper = OpServerUtils.MatchOp.PREFIX
+            else:
+                val = self._args.source
+                oper = OpServerUtils.MatchOp.EQUAL
             source_match = OpServerUtils.Match(name=VizConstants.SOURCE,
-                                               value=self._args.source,
-                                               op=OpServerUtils.MatchOp.EQUAL)
+                                               value=val, op=oper)
             where_msg.append(source_match.__dict__)
 
         if self._args.module is not None:
@@ -226,17 +234,27 @@ class LogQuerier(object):
             where_msg.append(module_match.__dict__)
 
         if self._args.category is not None:
+            if self._args.category.endswith('*'):
+                val = self._args.category[:-1]
+                oper = OpServerUtils.MatchOp.PREFIX
+            else:
+                val = self._args.category
+                oper = OpServerUtils.MatchOp.EQUAL
             category_match = OpServerUtils.Match(
                 name=VizConstants.CATEGORY,
-                value=self._args.category,
-                op=OpServerUtils.MatchOp.EQUAL)
+                value=val, op=oper)
             where_msg.append(category_match.__dict__)
 
         if self._args.message_type is not None:
+            if self._args.message_type.endswith('*'):
+                val = self._args.message_type[:-1]
+                oper = OpServerUtils.MatchOp.PREFIX
+            else:
+                val = self._args.message_type
+                oper = OpServerUtils.MatchOp.EQUAL
             message_type_match = OpServerUtils.Match(
                 name=VizConstants.MESSAGE_TYPE,
-                value=self._args.message_type,
-                op=OpServerUtils.MatchOp.EQUAL)
+                value=val, op=oper)
             where_msg.append(message_type_match.__dict__)
 
         if self._args.level is not None:
@@ -442,13 +460,15 @@ class LogQuerier(object):
             print 'Performing query: {0}'.format(
                 json.dumps(messages_query.__dict__))
         resp = OpServerUtils.post_url_http(
-            messages_url, json.dumps(messages_query.__dict__))
+            messages_url, json.dumps(messages_query.__dict__),
+            self._args.admin_user, self._args.admin_password)
         result = {}
         if resp is not None:
             resp = json.loads(resp)
             qid = resp['href'].rsplit('/', 1)[1]
             result = OpServerUtils.get_query_result(
-                self._args.analytics_api_ip, self._args.analytics_api_port, qid)
+                self._args.analytics_api_ip, self._args.analytics_api_port, qid,
+                self._args.admin_user, self._args.admin_password)
         return result
     # end query
 

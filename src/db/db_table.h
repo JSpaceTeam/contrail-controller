@@ -8,6 +8,7 @@
 #include <memory>
 #include <vector>
 #include <boost/function.hpp>
+#include <boost/intrusive_ptr.hpp>
 #include <tbb/atomic.h>
 
 #include "base/util.h"
@@ -18,6 +19,7 @@ class DBEntryBase;
 class DBEntry;
 class DBTablePartBase;
 class DBTablePartition;
+class DBTableWalk;
 class ShowTableListener;
 
 class DBRequestKey {
@@ -129,9 +131,13 @@ public:
     uint64_t walk_request_count() const { return walk_request_count_; }
     uint64_t walk_complete_count() const { return walk_complete_count_; }
     uint64_t walk_cancel_count() const { return walk_cancel_count_; }
+    uint64_t walk_again_count() const { return walk_again_count_; }
+    uint64_t walk_count() const { return walk_count_; }
     void incr_walk_request_count() { walk_request_count_++; }
     void incr_walk_complete_count() { walk_complete_count_++; }
     void incr_walk_cancel_count() { walk_cancel_count_++; }
+    void incr_walk_again_count() { walk_again_count_++; }
+    void incr_walk_count() { walk_count_++; }
 
 private:
     class ListenerInfo;
@@ -142,9 +148,11 @@ private:
     uint64_t input_count_;
     uint64_t notify_count_;
     tbb::atomic<uint64_t> walker_count_;
+    tbb::atomic<uint64_t> walk_count_;
     tbb::atomic<uint64_t> walk_request_count_;
     tbb::atomic<uint64_t> walk_complete_count_;
     tbb::atomic<uint64_t> walk_cancel_count_;
+    tbb::atomic<uint64_t> walk_again_count_;
 };
 
 // An implementation of DBTableBase that uses boost::set as data-store
@@ -156,7 +164,19 @@ private:
 // functionality
 class DBTable : public DBTableBase {
 public:
-    static bool WalkCallback(DBTablePartBase *tpart, DBEntryBase *entry);
+    typedef boost::intrusive_ptr<DBTableWalk> DBTableWalkRef;
+
+    // Walker function:
+    // Called for each DBEntry under a db::DBTable task that corresponds to the
+    // specific partition.
+    // arguments: DBTable partition and DBEntry.
+    // returns: true (continue); false (stop).
+    typedef boost::function<bool(DBTablePartBase *, DBEntryBase *)> WalkFn;
+
+    // Called when all partitions are done iterating.
+    typedef boost::function<void(DBTableWalkRef, DBTableBase *)> WalkCompleteFn;
+
+    static const int kIterationToYield = 256;
 
     DBTable(DB *db, const std::string &name);
     virtual ~DBTable();
@@ -195,7 +215,6 @@ public:
     // Delete hook for user function
     virtual bool Delete(DBEntry *entry, const DBRequest *req);
 
-    void WalkCompleteCallback(DBTableBase *tbl_base);
     void NotifyAllEntries();
 
     ///////////////////////////////////////////////////////////
@@ -236,7 +255,63 @@ public:
     // Not thread-safe. Used to shutdown and cleanup the process.
     static void DBStateClear(DBTable *table, ListenerId id);
 
+
+    // Walk APIs
+    // Create a DBTable Walker
+    // Concurrency : can be invoked from any task
+    DBTableWalkRef AllocWalker(WalkFn walk_fn, WalkCompleteFn walk_complete);
+
+    // Release the Walker
+    // Concurrency : can be invoked from any task
+    void ReleaseWalker(DBTableWalkRef &walk);
+
+    // Start a walk on the table.
+    // Concurrency : should be invoked from a task which is mutually exclusive
+    // "db::Walker" task
+    void WalkTable(DBTableWalkRef walk);
+
+    // Walk the table again
+    // Concurrency : should be invoked from a task which is mutually exclusive
+    // "db::Walker" task
+    void WalkAgain(DBTableWalkRef walk);
+
+    void SetWalkIterationToYield(int count) {
+        max_walk_iteration_to_yield_ = count;
+    }
+
+    int GetWalkIterationToYield() {
+        return max_walk_iteration_to_yield_;
+    }
+
+    void SetWalkTaskId(int task_id) {
+        walker_task_id_ = task_id;
+    }
+
+    int GetWalkerTaskId() {
+        return walker_task_id_;
+    }
 private:
+    friend class DBTableWalkMgr;
+    class TableWalker;
+    // A Job for walking through the DBTablePartition
+    class WalkWorker;
+
+    static void db_walker_wait() {
+        static int walk_sleep_usecs_;
+        static bool once;
+
+        if (!once) {
+            once = true;
+
+            char *wait = getenv("DB_WALKER_WAIT_USECS");
+            if (wait) walk_sleep_usecs_ = strtoul(wait, NULL, 0);
+        }
+
+        if (walk_sleep_usecs_) {
+            usleep(walk_sleep_usecs_);
+        }
+    }
+
     ///////////////////////////////////////////////////////////
     // Utility methods
     ///////////////////////////////////////////////////////////
@@ -245,10 +320,97 @@ private:
     // Hash entry to a partition id
     int GetPartitionId(const DBEntry *entry);
 
+    // Called from DBTableWalkMgr to start the walk
+    void StartWalk();
+
+    // Call DBTableWalkMgr to notify the walkers
+    bool InvokeWalkCb(DBTablePartBase *part, DBEntryBase *entry);
+
+    // Call DBTableWalkMgr::WalkDone
+    void WalkDone();
+
+    // Walker callback for NotifyAllEntries()
+    bool WalkCallback(DBTablePartBase *tpart, DBEntryBase *entry);
+    void WalkCompleteCallback(DBTableBase *tbl_base);
+
+    std::auto_ptr<TableWalker> walker_;
     std::vector<DBTablePartition *> partitions_;
-    int walk_id_;
+    DBTable::DBTableWalkRef walk_ref_;
+    int walker_task_id_;
+    int max_walk_iteration_to_yield_;
 
     DISALLOW_COPY_AND_ASSIGN(DBTable);
 };
 
+class DBTableWalk {
+public:
+    enum WalkState {
+        INIT = 1,
+        WALK_REQUESTED = 2,
+        WALK_IN_PROGRESS = 3,
+        WALK_DONE = 4,
+        WALK_STOPPED = 5,
+    };
+
+    DBTableWalk(DBTable *table, DBTable::WalkFn walk_fn,
+                DBTable::WalkCompleteFn walk_complete)
+        : table_(table), walk_fn_(walk_fn), walk_complete_(walk_complete) {
+        walk_state_ = INIT;
+        walk_again_ = false;
+        refcount_ = 0;
+    }
+
+    DBTable *table() const { return table_;}
+    DBTable::WalkFn walk_fn() const { return walk_fn_;}
+    DBTable::WalkCompleteFn walk_complete() const { return walk_complete_;}
+
+    bool requested() const { return (walk_state_ == WALK_REQUESTED);}
+    bool in_progress() const { return (walk_state_ == WALK_IN_PROGRESS);}
+    bool done() const { return (walk_state_ == WALK_DONE);}
+    bool stopped() const { return (walk_state_ == WALK_STOPPED);}
+    bool walk_again() const { return walk_again_;}
+    bool walk_is_active() const {
+        return ((walk_state_ == WALK_REQUESTED) ||
+                (walk_state_ == WALK_IN_PROGRESS));
+    }
+
+    WalkState walk_state() const { return walk_state_;}
+
+private:
+    friend class DBTableWalkMgr;
+
+    friend void intrusive_ptr_add_ref(DBTableWalk *walker);
+    friend void intrusive_ptr_release(DBTableWalk *walker);
+
+    void set_walk_again() { walk_again_ = true;}
+    void reset_walk_again() { walk_again_ = false;}
+
+    void set_walk_done() { walk_state_ = WALK_DONE;}
+    void set_walk_requested() { walk_state_ = WALK_REQUESTED;}
+    void set_in_progress() { walk_state_ = WALK_IN_PROGRESS;}
+    void set_walk_stopped() { walk_state_ = WALK_STOPPED;}
+
+    DBTable *table_;
+    DBTable::WalkFn walk_fn_;
+    DBTable::WalkCompleteFn walk_complete_;
+    tbb::atomic<WalkState> walk_state_;
+    tbb::atomic<bool> walk_again_;
+    tbb::atomic<int> refcount_;
+
+    DISALLOW_COPY_AND_ASSIGN(DBTableWalk);
+};
+
+inline void intrusive_ptr_add_ref(DBTableWalk *walker) {
+    walker->refcount_.fetch_and_increment();
+}
+
+inline void intrusive_ptr_release(DBTableWalk *walker) {
+    int prev = walker->refcount_.fetch_and_decrement();
+    if (prev == 1) {
+        DBTable *table = walker->table();
+        delete walker;
+        table->decr_walker_count();
+        table->RetryDelete();
+    }
+}
 #endif

@@ -33,6 +33,8 @@ import subprocess
 import requests
 import json
 import os
+import shlex
+
 
 from linux import ip_lib
 import haproxy_process
@@ -54,14 +56,14 @@ class NetnsManager(object):
     RIGH_DEV_PREFIX = 'gw-'
     TAP_PREFIX = 'veth'
     PORT_TYPE = 'NameSpacePort'
-    LBAAS_PROCESS = 'haproxy'
     BASE_URL = "http://localhost:9091/port"
     HEADERS = {'content-type': 'application/json'}
+    LBAAS_DIR = "/var/lib/contrail/loadbalancer"
 
     def __init__(self, vm_uuid, nic_left, nic_right, other_nics=None,
                  root_helper='sudo', cfg_file=None, update=False,
                  pool_id=None, gw_ip=None, namespace_name=None,
-                 keystone_auth_cfg_file=None, loadbalancer_id=None):
+                 loadbalancer_id=None):
         self.vm_uuid = vm_uuid
         if namespace_name is None:
             self.namespace = self.NETNS_PREFIX + self.vm_uuid
@@ -88,7 +90,7 @@ class NetnsManager(object):
         self.cfg_file = cfg_file
         self.update = update
         self.gw_ip = gw_ip
-        self.keystone_auth_cfg_file = keystone_auth_cfg_file
+        self.loadbalancer_id = loadbalancer_id
 
     def _get_tap_name(self, uuid_str):
             return (self.TAP_PREFIX + uuid_str)[:self.DEV_NAME_LEN]
@@ -133,28 +135,66 @@ class NetnsManager(object):
                                  self.SNAT_RT_TABLES_ID, 'via',  self.gw_ip,
                                  'dev', str(self.nic_left['name'])])
 
+    def find_lbaas_type(self, cfg_file):
+        lbaas_type = '';
+        if not os.path.exists(cfg_file):
+            return lbaas_type
+        f = open(cfg_file)
+        content = f.read()
+        f.close()
+        kvps = content.split(':::::')
+        for kvp in kvps or []:
+            lbaas_type = kvp.split('::::')[0]
+            if (lbaas_type == 'haproxy_config'):
+                break;
+        return lbaas_type
+
+    def remove_cfg_file(self, cfg_file):
+        cmd = "rm " + cfg_file
+        cmd_list = shlex.split(cmd)
+        p = subprocess.Popen(cmd_list)
+        p.communicate()
+
     def set_lbaas(self):
         if not self.ip_ns.netns.exists(self.namespace):
             self.create()
 
-        haproxy_process.start_update_haproxy(self.cfg_file, self.namespace, True,
-                                             self.keystone_auth_cfg_file)
-
+        if not (os.path.isfile(self.cfg_file)):
+            msg = "%s is missing for "\
+                  "Loadbalancer-ID %s" %(self.cfg_file, self.loadbalancer_id)
+            raise ValueError(msg)
+        lbaas_type = self.find_lbaas_type(self.cfg_file)
+        if (lbaas_type == ''):
+            raise ValueError('LBAAS_TYPE does not exist %s' % self.cfg_file)
+        if (lbaas_type == 'haproxy_config'):
+            ret = haproxy_process.start_update_haproxy(
+                          self.loadbalancer_id, self.cfg_file,
+                          self.namespace, True)
+            if (ret == False):
+                self.remove_cfg_file(self.cfg_file)
+                return False
         try:
             self.ip_ns.netns.execute(['route', 'add', 'default', 'gw', self.gw_ip])
         except RuntimeError:
             pass
+        return True
 
-    def release_lbaas(self):
+    def release_lbaas(self, caller):
         if not self.ip_ns.netns.exists(self.namespace):
             raise ValueError('Need to create the network namespace before '
                              'relasing lbaas')
-
-        haproxy_process.stop_haproxy(self.cfg_file, True)
+        cfg_file = self.LBAAS_DIR + "/" + self.loadbalancer_id + ".conf"
+        lbaas_type = self.find_lbaas_type(cfg_file)
+        if (lbaas_type == ''):
+            return
+        elif (lbaas_type == 'haproxy_config'):
+            haproxy_process.stop_haproxy(self.loadbalancer_id, True)
         try:
             self.ip_ns.netns.execute(['route', 'del', 'default'])
         except RuntimeError:
             pass
+        if (caller == 'destroy'):
+            self.remove_cfg_file(cfg_file)
 
     def destroy(self):
         if not self.ip_ns.netns.exists(self.namespace):
@@ -329,10 +369,6 @@ class VRouterNetns(object):
             "--loadbalancer-id",
             default=None,
             help=("Loadbalancer"))
-        create_parser.add_argument(
-            "--keystone-auth-cfg-file",
-            default=None,
-            help=("Keystone auth config file for lbaas"))
         create_parser.set_defaults(func=self.create)
 
         destroy_parser = subparsers.add_parser('destroy')
@@ -399,15 +435,14 @@ class VRouterNetns(object):
                              cfg_file=self.args.cfg_file,
                              update=self.args.update, gw_ip=self.args.gw_ip,
                              pool_id=self.args.pool_id,
-                             loadbalancer_id=self.args.loadbalancer_id,
-                             keystone_auth_cfg_file=self.args.keystone_auth_cfg_file)
+                             loadbalancer_id=self.args.loadbalancer_id)
 
         if (self.args.update is False):
             if netns_mgr.is_netns_already_exists():
                 # If the netns already exists, destroy it to be sure to set it
                 # with new parameters like another external network
                 if self.args.service_type == self.LOAD_BALANCER:
-                    netns_mgr.release_lbaas()
+                    netns_mgr.release_lbaas('create')
                 netns_mgr.unplug_namespace_interface()
                 netns_mgr.destroy()
             netns_mgr.create()
@@ -415,7 +450,10 @@ class VRouterNetns(object):
         if self.args.service_type == self.SOURCE_NAT:
             netns_mgr.set_snat()
         elif self.args.service_type == self.LOAD_BALANCER:
-            netns_mgr.set_lbaas()
+            if (netns_mgr.set_lbaas() == False):
+                netns_mgr.destroy()
+                msg = 'Falied to Launch LOADBALANCER'
+                raise Exception(msg)
         else:
             msg = ('The %s service type is not supported' %
                    self.args.service_type)
@@ -442,7 +480,7 @@ class VRouterNetns(object):
         if self.args.service_type == self.SOURCE_NAT:
             netns_mgr.destroy()
         elif self.args.service_type == self.LOAD_BALANCER:
-            netns_mgr.release_lbaas()
+            netns_mgr.release_lbaas('destroy')
             netns_mgr.destroy()
         else:
             msg = ('The %s service type is not supported' %

@@ -74,6 +74,8 @@ void Options::Initialize(EventManager &evm,
         ("DEFAULT.bgp_config_file",
              opt::value<string>()->default_value("bgp_config.xml"),
              "BGP Configuration file")
+        ("DEFAULT.bgp_end_of_rib_timeout", opt::value<uint32_t>()->default_value(30),
+             "BGP end of rib timeout")
         ("DEFAULT.bgp_port",
              opt::value<uint16_t>()->default_value(default_bgp_port),
              "BGP listener port")
@@ -81,6 +83,13 @@ void Options::Initialize(EventManager &evm,
            opt::value<vector<string> >()->default_value(
                default_collector_server_list_, "127.0.0.1:8086"),
              "Collector server list")
+
+        ("DEFAULT.gr_helper_bgp_enable",
+            opt::bool_switch(&gr_helper_bgp_enable_),
+            "Enable Graceful Restart Helper functionality for BGP peers")
+        ("DEFAULT.gr_helper_xmpp_enable",
+            opt::bool_switch(&gr_helper_xmpp_enable_),
+            "Enable Graceful Restart Helper functionality for XMPP agents")
 
         ("DEFAULT.hostip", opt::value<string>()->default_value(host_ip),
              "IP address of control-node")
@@ -113,11 +122,17 @@ void Options::Initialize(EventManager &evm,
              "Enable logging to syslog")
         ("DEFAULT.syslog_facility", opt::value<string>()->default_value("LOG_LOCAL0"),
              "Syslog facility to receive log lines")
+        ("DEFAULT.task_track_run_time", opt::bool_switch(&task_track_run_time_),
+             "Enable tracking of run time per task id")
         ("DEFAULT.test_mode", opt::bool_switch(&test_mode_),
              "Enable control-node to run in test-mode")
         ("DEFAULT.tcp_hold_time", opt::value<int>()->default_value(30),
              "Configurable TCP hold time")
+        ("DEFAULT.optimize_snat", opt::bool_switch(&optimize_snat_),
+             "Enable control-node optimizations for SNAT (deprecated)")
 
+        ("DEFAULT.xmpp_end_of_rib_timeout",
+             opt::value<uint32_t>()->default_value(30), "XMPP end of rib timeout")
         ("DEFAULT.xmpp_server_port",
              opt::value<uint16_t>()->default_value(default_xmpp_port),
              "XMPP listener port")
@@ -150,11 +165,17 @@ void Options::Initialize(EventManager &evm,
              "Certificates store to use for communication with IFMAP server")
         ("IFMAP.password", opt::value<string>()->default_value("control-node"),
              "IFMAP server password")
-        ("IFMAP.server_url",
-             opt::value<string>()->default_value(ifmap_server_url_),
-             "IFMAP server URL")
+        ("IFMAP.server_url", opt::value<string>()->default_value(
+             ifmap_config_options_.server_url), "IFMAP server URL")
         ("IFMAP.user", opt::value<string>()->default_value("control-node"),
              "IFMAP server username")
+        ("IFMAP.stale_entries_cleanup_timeout",
+             opt::value<int>()->default_value(300),
+             "IFMAP stale entries cleanup timeout")
+        ("IFMAP.end_of_rib_timeout", opt::value<int>()->default_value(10),
+             "IFMAP end of rib timeout")
+        ("IFMAP.peer_response_wait_time", opt::value<int>()->default_value(60),
+             "IFMAP peer response wait time")
         ;
 
     config_file_options_.add(config);
@@ -263,13 +284,16 @@ bool Options::Process(int argc, char *argv[],
     GetOptValue<int>(var_map, log_files_count_, "DEFAULT.log_files_count");
     GetOptValue<long>(var_map, log_file_size_, "DEFAULT.log_file_size");
     GetOptValue<string>(var_map, log_level_, "DEFAULT.log_level");
-    GetOptValue<bool>(var_map, use_syslog_, "DEFAULT.use_syslog");
     GetOptValue<string>(var_map, syslog_facility_, "DEFAULT.syslog_facility");
     GetOptValue<int>(var_map, tcp_hold_time_, "DEFAULT.tcp_hold_time");
     GetOptValue<uint16_t>(var_map, xmpp_port_, "DEFAULT.xmpp_server_port");
     GetOptValue<string>(var_map, xmpp_server_cert_, "DEFAULT.xmpp_server_cert");
     GetOptValue<string>(var_map, xmpp_server_key_, "DEFAULT.xmpp_server_key");
     GetOptValue<string>(var_map, xmpp_ca_cert_, "DEFAULT.xmpp_ca_cert");
+    GetOptValue<uint32_t>(var_map, bgp_end_of_rib_timeout_,
+                              "DEFAULT.bgp_end_of_rib_timeout");
+    GetOptValue<uint32_t>(var_map, xmpp_end_of_rib_timeout_,
+                              "DEFAULT.xmpp_end_of_rib_timeout");
     GetOptValue<uint32_t>(var_map, sandesh_ratelimit_,
                               "DEFAULT.sandesh_send_rate_limit");
 
@@ -277,10 +301,22 @@ bool Options::Process(int argc, char *argv[],
     GetOptValue<string>(var_map, discovery_server_, "DISCOVERY.server");
 
 
-    GetOptValue<string>(var_map, ifmap_password_, "IFMAP.password");
-    GetOptValue<string>(var_map, ifmap_server_url_, "IFMAP.server_url");
-    GetOptValue<string>(var_map, ifmap_user_, "IFMAP.user");
-    GetOptValue<string>(var_map, ifmap_certs_store_, "IFMAP.certs_store");
+    GetOptValue<string>(var_map, ifmap_config_options_.password,
+                        "IFMAP.password");
+    GetOptValue<string>(var_map, ifmap_config_options_.server_url,
+                        "IFMAP.server_url");
+    GetOptValue<string>(var_map, ifmap_config_options_.user,
+                        "IFMAP.user");
+    GetOptValue<string>(var_map, ifmap_config_options_.certs_store,
+                        "IFMAP.certs_store");
+    GetOptValue<int>(var_map,
+                     ifmap_config_options_.stale_entries_cleanup_timeout,
+                     "IFMAP.stale_entries_cleanup_timeout");
+    GetOptValue<int>(var_map, ifmap_config_options_.end_of_rib_timeout,
+                     "IFMAP.end_of_rib_timeout");
+    GetOptValue<int>(var_map,
+                     ifmap_config_options_.peer_response_wait_time,
+                     "IFMAP.peer_response_wait_time");
 
     return true;
 }

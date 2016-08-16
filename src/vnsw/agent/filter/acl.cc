@@ -30,6 +30,7 @@
 #include <oper/agent_sandesh.h>
 #include <oper/nexthop.h>
 #include <oper/mirror_table.h>
+#include <oper/qos_config.h>
 
 static AclTable *acl_table_;
 
@@ -120,7 +121,23 @@ DBEntry *AclTable::OperDBAdd(const DBRequest *req) {
 bool AclTable::OperDBOnChange(DBEntry *entry, const DBRequest *req) {
     bool changed = false;
     AclDBEntry *acl = static_cast<AclDBEntry *>(entry);
-    AclData *data = static_cast<AclData *>(req->data.get());
+    AclData *data = dynamic_cast<AclData *>(req->data.get());
+    AclResyncQosConfigData *qos_config_data =
+        dynamic_cast<AclResyncQosConfigData *>(req->data.get());
+
+    DeleteUnresolvedEntry(acl);
+
+    if (qos_config_data != NULL) {
+        changed = acl->ResyncQosConfigEntries();
+        if (acl->IsQosConfigResolved() == false) {
+            AddUnresolvedEntry(acl);
+        }
+        return changed;
+    }
+
+    if (!data) {
+        return false;
+    }
 
     if (data->ace_id_to_del_) {
         acl->DeleteAclEntry(data->ace_id_to_del_);
@@ -162,12 +179,21 @@ bool AclTable::OperDBOnChange(DBEntry *entry, const DBRequest *req) {
             delete ae;
         }
     }
+
+    if (acl->IsQosConfigResolved() == false) {
+        AddUnresolvedEntry(acl);
+    }
     return changed;
+}
+
+bool AclTable::OperDBResync(DBEntry *entry, const DBRequest *req) {
+    return OperDBOnChange(entry, req);
 }
 
 bool AclTable::OperDBDelete(DBEntry *entry, const DBRequest *req) {
     AclDBEntry *acl = static_cast<AclDBEntry *>(entry);
     ACL_TRACE(Info, "Delete " + UuidToString(acl->GetUuid()));
+    DeleteUnresolvedEntry(acl);
     acl->DeleteAllAclEntries();
     return true;
 }
@@ -187,6 +213,52 @@ AclTable::ConvertActionString(std::string action_str) const {
     } else {
         return TrafficAction::UNKNOWN;
     }
+}
+
+void AclTable::AddUnresolvedEntry(AclDBEntry *entry) {
+    unresolved_acl_entries_.insert(entry);
+}
+
+void AclTable::DeleteUnresolvedEntry(AclDBEntry *entry) {
+    unresolved_acl_entries_.erase(entry);
+}
+
+void AclTable::Notify(DBTablePartBase *partition,
+                      DBEntryBase *e) {
+    AgentQosConfig *qc = static_cast<AgentQosConfig *>(e);
+    DBState *state = qc->GetState(partition->parent(), qos_config_listener_id_);
+
+    if (qc->IsDeleted()) {
+        qc->ClearState(partition->parent(), qos_config_listener_id_);
+        delete state;
+    }
+
+    if (state) {
+        return;
+    }
+
+    state = new DBState();
+    qc->SetState(partition->parent(), qos_config_listener_id_, state);
+
+    UnResolvedAclEntries::const_iterator it = unresolved_acl_entries_.begin();
+    for (; it != unresolved_acl_entries_.end(); it++) {
+        DBRequest req;
+        req.oper = DBRequest::DB_ENTRY_ADD_CHANGE;
+
+        AclKey *key = new AclKey((*it)->GetUuid());
+        key->sub_op_ = AgentKey::RESYNC;
+
+        req.key.reset(key);
+        req.data.reset(new AclResyncQosConfigData(NULL, NULL));
+        Enqueue(&req);
+    }
+    unresolved_acl_entries_.clear();
+}
+
+void AclTable::ListenerInit() {
+    qos_config_listener_id_ = agent()->qos_config_table()->Register(
+                boost::bind(&AclTable::Notify, this, _1, _2));
+
 }
 
 DBTableBase *AclTable::CreateTable(DB *db, const std::string &name) {
@@ -401,6 +473,33 @@ void AclDBEntry::SetAclEntries(AclEntries &entries)
     }
 }
 
+bool AclDBEntry::IsQosConfigResolved() {
+    AclEntries::iterator it;
+    it = acl_entries_.begin();
+    while (it != acl_entries_.end()) {
+        AclEntry *ae = it.operator->();
+        if (ae->IsQosConfigResolved() == false) {
+            return false;
+        }
+        it++;
+    }
+    return true;
+}
+
+bool AclDBEntry::ResyncQosConfigEntries() {
+    bool ret = false;
+    AclEntries::iterator it;
+    it = acl_entries_.begin();
+    while (it != acl_entries_.end()) {
+        AclEntry *ae = it.operator->();
+        if (ae->ResyncQosConfigEntries()) {
+            ret = true;
+        }
+        it++;
+    }
+    return ret;
+}
+
 AclEntry *AclDBEntry::AddAclEntry(const AclEntrySpec &acl_entry_spec, AclEntries &entries)
 {
     AclEntries::iterator iter;
@@ -508,6 +607,19 @@ bool AclDBEntry::PacketMatch(const PacketHeader &packet_header,
                                                          a->ignore_acl());
              m_acl.action_info.vrf_translate_action_ = vrf_translate_action;
          }
+         if (ta->action_type() == TrafficAction::QOS_ACTION) {
+             const QosConfigAction *a =
+                 static_cast<const QosConfigAction *>(*al_it.operator->());
+             if (a->qos_config_ref() != NULL) {
+                 QosConfigActionSpec qos_action_spec(a->name());
+                 if (a->qos_config_ref() &&
+                     a->qos_config_ref()->IsDeleted() == false) {
+                     qos_action_spec.set_id(a->qos_config_ref()->id());
+                     m_acl.action_info.qos_config_action_ = qos_action_spec;
+                 }
+             }
+         }
+
          if (info && ta->IsDrop()) {
              if (!info->drop) {
                  info->drop = true;
@@ -540,6 +652,21 @@ bool AclDBEntry::PacketMatch(const PacketHeader &packet_header,
         }
     }
     return ret_val;
+}
+
+const AclEntry*
+AclDBEntry::GetAclEntryAtIndex(uint32_t index) const {
+    uint32_t i = 0;
+    AclEntries::const_iterator it = acl_entries_.begin();
+    while (it != acl_entries_.end()) {
+        if (i == index) {
+            return it.operator->();
+        }
+        it++;
+        i++;
+    }
+
+    return NULL;
 }
 
 bool AclDBEntry::Changed(const AclEntries &new_entries) const {
@@ -817,9 +944,28 @@ void AclEntrySpec::AddMirrorEntry(Agent *agent) const {
         }
 
         IpAddress sip = agent->GetMirrorSourceIp(action.ma.ip);
-        agent->mirror_table()->AddMirrorEntry(action.ma.analyzer_name,
-            action.ma.vrf_name, sip, agent->mirror_port(), action.ma.ip,
-            action.ma.port);
+         MirrorEntryData::MirrorEntryFlags mirror_flag =
+             MirrorTable::DecodeMirrorFlag(action.ma.nh_mode,
+                                           action.ma.juniper_header);
+        if (mirror_flag == MirrorEntryData::DynamicNH_With_JuniperHdr) {
+            agent->mirror_table()->AddMirrorEntry(action.ma.analyzer_name,
+                action.ma.vrf_name, sip, agent->mirror_port(), action.ma.ip,
+                action.ma.port);
+        } else if (mirror_flag == MirrorEntryData::DynamicNH_Without_JuniperHdr) {
+            // remote_vm_analyzer mac provided from the config
+            agent->mirror_table()->AddMirrorEntry(action.ma.analyzer_name,
+                    action.ma.vrf_name, sip, agent->mirror_port(), action.ma.ip,
+                    action.ma.port, 0, mirror_flag,  action.ma.mac);
+        } else if (mirror_flag == MirrorEntryData::StaticNH_Without_JuniperHdr) {
+            // Vtep dst ip & Vni will be provided from the config
+            agent->mirror_table()->AddMirrorEntry(action.ma.analyzer_name,
+                    action.ma.vrf_name, sip, agent->mirror_port(),
+                    action.ma.staticnhdata.vtep_dst_ip, action.ma.port,
+                    action.ma.staticnhdata.vni, mirror_flag,
+                    action.ma.staticnhdata.vtep_dst_mac);
+        } else {
+            LOG(ERROR, "Mirror nh mode not supported");
+        }
     }
 }
 
@@ -852,6 +998,25 @@ void AclEntrySpec::PopulateAction(const AclTable *acl_table,
         maction.ma.analyzer_name = action_list.mirror_to.analyzer_name;
         maction.ma.ip =
             IpAddress::from_string(action_list.mirror_to.analyzer_ip_address, ec);
+        maction.ma.juniper_header = action_list.mirror_to.juniper_header;
+        maction.ma.nh_mode = action_list.mirror_to.nh_mode;
+        MirrorEntryData::MirrorEntryFlags mirror_flag =
+            MirrorTable::DecodeMirrorFlag (maction.ma.nh_mode,
+                                           maction.ma.juniper_header);
+        if (mirror_flag == MirrorEntryData::StaticNH_Without_JuniperHdr) {
+            maction.ma.staticnhdata.vtep_dst_ip =
+                IpAddress::from_string(
+                action_list.mirror_to.static_nh_header.vtep_dst_ip_address, ec);
+            maction.ma.staticnhdata.vtep_dst_mac =
+               MacAddress::FromString(action_list.mirror_to.static_nh_header.vtep_dst_mac_address);
+            maction.ma.staticnhdata.vni =
+                action_list.mirror_to.static_nh_header.vni;
+        }  else if(mirror_flag == MirrorEntryData::DynamicNH_Without_JuniperHdr) {
+           maction.ma.vrf_name = action_list.mirror_to.routing_instance;
+           maction.ma.mac =
+               MacAddress::FromString(action_list.mirror_to.analyzer_mac_address);
+        }
+
         if (ec.value() == 0) {
             if (action_list.mirror_to.udp_port) {
                 maction.ma.port = action_list.mirror_to.udp_port;
@@ -875,6 +1040,15 @@ void AclEntrySpec::PopulateAction(const AclTable *acl_table,
             action_list.assign_routing_instance);
         vrf_translate_spec.vrf_translate.set_ignore_acl(false);
         action_l.push_back(vrf_translate_spec);
+    }
+
+    if (!action_list.qos_action.empty()) {
+        ActionSpec qos_translate_spec;
+        qos_translate_spec.ta_type = TrafficAction::QOS_ACTION;
+        qos_translate_spec.simple_action = TrafficAction::APPLY_QOS;
+        qos_translate_spec.qos_config_action.set_name(
+                action_list.qos_action);
+        action_l.push_back(qos_translate_spec);
     }
 }
 

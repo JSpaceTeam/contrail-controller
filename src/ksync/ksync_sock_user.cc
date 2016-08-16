@@ -184,7 +184,8 @@ void KSyncSockTypeMap::FlowNatResponse(uint32_t seq_num, vr_flow_req *req) {
     sock->AddNetlinkTxBuff(&cl);
 }
 
-void KSyncSockTypeMap::InitNetlinkDoneMsg(struct nlmsghdr *nlh, int seq_num) {
+void KSyncSockTypeMap::InitNetlinkDoneMsg(struct nlmsghdr *nlh,
+                                          uint32_t seq_num) {
     nlh->nlmsg_seq = seq_num;
     nlh->nlmsg_type = NLMSG_DONE;
     nlh->nlmsg_len = NLMSG_HDRLEN;
@@ -605,6 +606,7 @@ void KSyncSockTypeMap::SetFlowEntry(vr_flow_req *req, bool set) {
         f->fe_flags &= ~VR_FLOW_FLAG_ACTIVE;
         f->fe_stats.flow_bytes = 0;
         f->fe_stats.flow_packets = 0;
+        f->fe_gen_id = 0;
         return;
     }
 
@@ -615,6 +617,7 @@ void KSyncSockTypeMap::SetFlowEntry(vr_flow_req *req, bool set) {
     f->fe_flags = VR_FLOW_FLAG_ACTIVE;
     f->fe_stats.flow_bytes = 30;
     f->fe_stats.flow_packets = 1;
+    f->fe_gen_id = req->get_fr_gen_id();
     if (sip.is_v4()) {
         f->fe_key.flow4_sip = htonl(sip.to_v4().to_ulong());
         f->fe_key.flow4_dip = htonl(dip.to_v4().to_ulong());
@@ -630,6 +633,21 @@ void KSyncSockTypeMap::SetFlowEntry(vr_flow_req *req, bool set) {
     f->fe_key.flow_nh_id = req->get_fr_flow_nh_id();
     f->fe_key.flow_proto = req->get_fr_flow_proto();
 }
+
+void KSyncSockTypeMap::SetEvictedFlag(int idx) {
+    vr_flow_entry *f = &flow_table_[idx];
+    if (f->fe_flags & VR_FLOW_FLAG_ACTIVE) {
+        f->fe_flags |= VR_FLOW_FLAG_EVICTED;
+    }
+}
+
+void KSyncSockTypeMap::ResetEvictedFlag(int idx) {
+    vr_flow_entry *f = &flow_table_[idx];
+    if (f->fe_flags & VR_FLOW_FLAG_ACTIVE) {
+        f->fe_flags &= ~VR_FLOW_FLAG_EVICTED;
+    }
+}
+
 
 void KSyncSockTypeMap::IncrFlowStats(int idx, int pkts, int bytes) {
     vr_flow_entry *f = &flow_table_[idx];
@@ -755,13 +773,18 @@ void KSyncUserSockFlowContext::Process() {
         //Deactivate the flow-entry in flow mmap
         KSyncSockTypeMap::SetFlowEntry(req_, false);
     } else {
-        /* Send reverse-flow index as one more than fwd-flow index */
         uint32_t fwd_flow_idx = req_->get_fr_index();
         if (fwd_flow_idx == 0xFFFFFFFF) {
             if (flow_error == 0) {
                 /* Allocate entry only of no error case */
-                fwd_flow_idx = rand() % 50000;
+                if (sock->is_incremental_index()) {
+                    /* Send reverse-flow index as one more than fwd-flow index */
+                    fwd_flow_idx = req_->get_fr_rindex() + 1;
+                } else {
+                    fwd_flow_idx = rand() % 50000;
+                }
                 req_->set_fr_index(fwd_flow_idx);
+                req_->set_fr_gen_id((fwd_flow_idx % 255));
             }
         }          
 
@@ -903,6 +926,14 @@ void KSyncUserSockContext::RouteMsgHandler(vr_route_req *req) {
         rtctx->Process();
         delete rtctx;
     }
+}
+
+void KSyncUserSockContext::QosConfigMsgHandler(vr_qos_map_req *req) {
+    assert(0);
+}
+
+void KSyncUserSockContext::ForwardingClassMsgHandler(vr_fc_map_req *req) {
+    assert(0);
 }
 
 void KSyncUserSockContext::MirrorMsgHandler(vr_mirror_req *req) {

@@ -66,7 +66,8 @@ protected:
     typedef map<string, IFMapNode *> NodeMap;
 
     IFMapUpdateSenderTest()
-        : server_(&db_, &graph_, evm_.io_service()), tbl_(NULL),
+        : db_(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable")),
+          server_(&db_, &graph_, evm_.io_service()), tbl_(NULL),
           sender_(server_.sender()), queue_(server_.queue()) {
     }
 
@@ -125,6 +126,7 @@ protected:
 TEST_F(IFMapUpdateSenderTest, BasicQTraversal) {
     TestClient c0("c0");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
 
     IFMapUpdate *u1 = CreateUpdate("u1", true);
     IFMapUpdate *u2 = CreateUpdate("u2", false);
@@ -168,7 +170,9 @@ TEST_F(IFMapUpdateSenderTest, QTraversalNoInterest) {
     TestClient c0("c0");
     TestClient c1("c1");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
     server_.ClientRegister(&c1);
+    server_.ClientExporterSetup(&c1);
 
     IFMapUpdate *u1 = CreateUpdate("u1", true);
     IFMapUpdate *u2 = CreateUpdate("u2", false);
@@ -217,7 +221,9 @@ TEST_F(IFMapUpdateSenderTest, ClientBlockedAndGoTest) {
     TestClient c0("c0");
     TestClient c1("c1");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
     server_.ClientRegister(&c1);
+    server_.ClientExporterSetup(&c1);
 
     IFMapUpdate *u1 = CreateUpdate("u1", true);
     IFMapUpdate *u2 = CreateUpdate("u2", true);
@@ -330,7 +336,9 @@ TEST_F(IFMapUpdateSenderTest, ClientBlockedTestWithDiffRecvSets) {
     TestClient c0("c0");
     TestClient c1("c1");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
     server_.ClientRegister(&c1);
+    server_.ClientExporterSetup(&c1);
 
     IFMapUpdate *u0 = CreateUpdate("u0", true);
     IFMapUpdate *u1 = CreateUpdate("u1", true);
@@ -451,8 +459,11 @@ TEST_F(IFMapUpdateSenderTest, MarkerMergeTest) {
     TestClient c1("c1");
     TestClient c2("c2");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
     server_.ClientRegister(&c1);
+    server_.ClientExporterSetup(&c1);
     server_.ClientRegister(&c2);
+    server_.ClientExporterSetup(&c2);
 
     IFMapUpdate *u1 = CreateUpdate("u1", true);
     IFMapUpdate *u2 = CreateUpdate("u2", true);
@@ -644,8 +655,11 @@ TEST_F(IFMapUpdateSenderTest, RegularMarkerMergeIntoTM) {
     TestClient c1("c1");
     TestClient c2("c2");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
     server_.ClientRegister(&c1);
+    server_.ClientExporterSetup(&c1);
     server_.ClientRegister(&c2);
+    server_.ClientExporterSetup(&c2);
 
     IFMapUpdate *u1 = CreateUpdate("u1", true);
     IFMapUpdate *u2 = CreateUpdate("u2", true);
@@ -718,8 +732,11 @@ TEST_F(IFMapUpdateSenderTest, MultipleBlockAndGo3Clients) {
     TestClient c1("c1");
     TestClient c2("c2");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
     server_.ClientRegister(&c1);
+    server_.ClientExporterSetup(&c1);
     server_.ClientRegister(&c2);
+    server_.ClientExporterSetup(&c2);
 
     IFMapUpdate *u0 = CreateUpdate("u0", true);
     IFMapUpdate *u1 = CreateUpdate("u1", false);
@@ -855,8 +872,11 @@ TEST_F(IFMapUpdateSenderTest, SingleBlockAndGo3Clients) {
     TestClient c1("c1");
     TestClient c2("c2");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
     server_.ClientRegister(&c1);
+    server_.ClientExporterSetup(&c1);
     server_.ClientRegister(&c2);
+    server_.ClientExporterSetup(&c2);
 
     IFMapUpdate *u0 = CreateUpdate("u0", true);
     IFMapUpdate *u1 = CreateUpdate("u1", false);
@@ -952,9 +972,13 @@ TEST_F(IFMapUpdateSenderTest, MarkerMergeTest2) {
     TestClient c2("c2");
     TestClient c3("c3");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
     server_.ClientRegister(&c1);
+    server_.ClientExporterSetup(&c1);
     server_.ClientRegister(&c2);
+    server_.ClientExporterSetup(&c2);
     server_.ClientRegister(&c3);
+    server_.ClientExporterSetup(&c3);
 
     IFMapUpdate *u1 = CreateUpdate("u1", false);
     IFMapUpdate *u2 = CreateUpdate("u2", true);
@@ -1132,7 +1156,9 @@ TEST_F(IFMapUpdateSenderTest, Bug228) {
     TestClient c0("c0");
     TestClient c1("c1");
     server_.ClientRegister(&c0);
+    server_.ClientExporterSetup(&c0);
     server_.ClientRegister(&c1);
+    server_.ClientExporterSetup(&c1);
 
     IFMapUpdate *u1 = CreateUpdate("u1", true);
     IFMapUpdate *u2 = CreateUpdate("u2", false);

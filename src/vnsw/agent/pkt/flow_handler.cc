@@ -61,21 +61,16 @@ bool FlowHandler::Run() {
     PktFlowInfo info(agent_, pkt_info_,
                      flow_proto_->GetTable(flow_table_index_));
     std::auto_ptr<FlowTaskMsg> ipc;
+    bool allow_reentrant = true;
 
     if (pkt_info_->type == PktType::INVALID) {
-        // packet parsing is not done, invoke the same here
-        uint8_t *pkt = pkt_info_->packet_buffer()->data();
-        PktHandler::PktModuleName mod = agent_->pkt()->pkt_handler()->
-                                        ParseFlowPacket(pkt_info_, pkt);
-        // if packet wasnt for flow module, it would've got enqueued to the
-        // correct module in the above call. Nothing else to do.
-        if (mod != PktHandler::FLOW) {
-            return true;
-        }
-        flow_proto_->FreeBuffer(pkt_info_.get());
         info.SetPktInfo(pkt_info_);
         info.l3_flow = pkt_info_->l3_forwarding = IsL3ModeFlow();
     } else if (pkt_info_->type == PktType::MESSAGE) {
+        // we don't allow reentrancy to different partition if it is
+        // a reevaluation for an existing flow which will only exist
+        // in this partition
+        allow_reentrant = false;
         ipc = std::auto_ptr<FlowTaskMsg>(static_cast<FlowTaskMsg *>(pkt_info_->ipc));
         pkt_info_->ipc = NULL;
         FlowEntry *fe = ipc->fe_ptr.get();
@@ -83,11 +78,8 @@ bool FlowHandler::Run() {
         // forward flow only take lock only on forward flow
         tbb::mutex::scoped_lock lock1(fe->mutex());
         assert(flow_table_index_ == fe->flow_table()->table_index());
-        if (fe->deleted() || fe->is_flags_set(FlowEntry::ShortFlow)) {
-            return true;
-        }
 
-        if (fe->is_flags_set(FlowEntry::ShortFlow)) {
+        if (fe->deleted() || fe->is_flags_set(FlowEntry::ShortFlow)) {
             return true;
         }
 
@@ -123,16 +115,19 @@ bool FlowHandler::Run() {
         info.short_flow = true;
     }
 
-    //Identify port nat and enqueue port nat to specific flow table
-    if (((pkt_info_->sport != info.nat_sport) ||
-        (pkt_info_->dport != info.nat_dport)) &&
-        (info.nat_sport != 0) && (info.nat_dport != 0) &&
-        (flow_table_index_ != FlowTable::kPortNatFlowTableInstance)) {
-        //Enqueue flow evaluation to
-        //FlowTable::kPortNatFlowTableInstance instance.
-        flow_proto_->EnqueueReentrant(pkt_info_,
-                                      FlowTable::kPortNatFlowTableInstance);
-        return true;
+    // Flows that change port-numbers are always processed in thread-0.
+    // Identify flows that change port and enqueue to thread-0
+    if (allow_reentrant && ((pkt_info_->sport != info.nat_sport) ||
+                            (pkt_info_->dport != info.nat_dport))) {
+        if ((info.nat_sport != 0 || info.nat_dport != 0)) {
+            if (flow_table_index_ != FlowTable::kPortNatFlowTableInstance) {
+                // Enqueue flow evaluation to
+                // FlowTable::kPortNatFlowTableInstance instance.
+                flow_proto_->EnqueueReentrant
+                    (pkt_info_, FlowTable::kPortNatFlowTableInstance);
+                return true;
+            }
+        }
     }
 
     if (in.intf_ && ((in.intf_->type() != Interface::VM_INTERFACE) &&

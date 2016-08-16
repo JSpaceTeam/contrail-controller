@@ -30,6 +30,7 @@
 #include <oper/interface_common.h>
 #include <oper/vrf_assign.h>
 #include <oper/vxlan.h>
+#include <oper/qos_config.h>
 #include <oper/ifmap_dependency_manager.h>
 
 #include <vnc_cfg_types.h>
@@ -197,6 +198,23 @@ bool InterfaceTable::OperDBOnChange(DBEntry *entry, const DBRequest *req) {
 bool InterfaceTable::OperDBResync(DBEntry *entry, const DBRequest *req) {
     InterfaceKey *key = static_cast<InterfaceKey *>(req->key.get());
 
+    //RESYNC for QOS config handling for vhost and fabric interface
+    InterfaceQosConfigData *qos_config_data =
+        dynamic_cast<InterfaceQosConfigData *>(req->data.get());
+    if (qos_config_data) {
+        Interface *intf = static_cast<Interface *>(entry);
+        AgentQosConfigKey key(qos_config_data->qos_config_uuid_);
+
+        AgentQosConfig *qos_config = static_cast<AgentQosConfig *>
+            (agent()->qos_config_table()->FindActiveEntry(&key));
+
+        if (intf->qos_config_ != qos_config) {
+            intf->qos_config_ = qos_config;
+            return true;
+        }
+        return false;
+    }
+
     if (key->type_ != Interface::VM_INTERFACE)
         return false;
 
@@ -325,7 +343,8 @@ Interface::Interface(Type type, const uuid &uuid, const string &name,
     type_(type), uuid_(uuid), name_(name),
     vrf_(vrf, this), label_(MplsTable::kInvalidLabel),
     l2_label_(MplsTable::kInvalidLabel), ipv4_active_(true),
-    ipv6_active_(false), is_hc_active_(true), metadata_ip_active_(true),
+    ipv6_active_(false), is_hc_active_(true),
+    metadata_ip_active_(true), metadata_l2_active_(true),
     l2_active_(true), id_(kInvalidIndex), dhcp_enabled_(true),
     dns_enabled_(true), mac_(), os_index_(kInvalidIndex), os_oper_state_(true),
     admin_state_(true), test_oper_state_(true), transport_(TRANSPORT_INVALID) {
@@ -419,7 +438,8 @@ void Interface::GetOsParams(Agent *agent) {
     assert(fd >= 0);
     if (ioctl(fd, SIOCGIFHWADDR, (void *)&ifr) < 0) {
         LOG(ERROR, "Error <" << errno << ": " << strerror(errno) <<
-            "> querying mac-address for interface <" << name << ">");
+            "> querying mac-address for interface <" << name << "> " <<
+            "Agent-index <" << id_ << ">");
         os_oper_state_ = false;
         close(fd);
         return;
@@ -428,7 +448,8 @@ void Interface::GetOsParams(Agent *agent) {
 
     if (ioctl(fd, SIOCGIFFLAGS, (void *)&ifr) < 0) {
         LOG(ERROR, "Error <" << errno << ": " << strerror(errno) <<
-            "> querying mac-address for interface <" << name << ">");
+            "> querying flags for interface <" << name << "> " <<
+            "Agent-index <" << id_ << ">");
         os_oper_state_ = false;
         close(fd);
         return;
@@ -446,11 +467,9 @@ void Interface::GetOsParams(Agent *agent) {
     mac_ = ifr.ifr_addr;
 #endif
 
-    if (os_index_ == kInvalidIndex) {
-        int idx = if_nametoindex(name.c_str());
-        if (idx)
-            os_index_ = idx;
-    }
+    int idx = if_nametoindex(name.c_str());
+    if (idx)
+        os_index_ = idx;
 }
 
 void Interface::SetKey(const DBRequestKey *key) {
@@ -493,7 +512,8 @@ DBEntryBase::KeyPtr PacketInterface::GetDBRequestKey() const {
 }
 
 void PacketInterface::PostAdd() {
-    InterfaceNH::CreatePacketInterfaceNh(name_);
+    InterfaceTable *table = static_cast<InterfaceTable *>(get_table());
+    InterfaceNH::CreatePacketInterfaceNh(table->agent(), name_);
 }
 
 bool PacketInterface::Delete(const DBRequest *req) {
@@ -632,6 +652,8 @@ static string DeviceTypeToString(VmInterface::DeviceType type) {
         return "Tap";
     } else if (type == VmInterface::VM_VLAN_ON_VMI) {
         return "VMI vlan-sub-if";
+    } else if (type == VmInterface::REMOTE_VM_VLAN_ON_VMI) {
+        return "Remote VM";
     }
     return "Invalid";
 }
@@ -647,6 +669,8 @@ static string VmiTypeToString(VmInterface::VmiType type) {
         return "Baremetal";
     } else if (type == VmInterface::GATEWAY) {
         return "Gateway";
+    } else if (type == VmInterface::REMOTE_VM) {
+        return "Remote VM";
     } else if (type == VmInterface::SRIOV) {
         return "Sriov";
     }
@@ -726,6 +750,10 @@ void Interface::SetItfSandeshData(ItfSandeshData &data) const {
     data.set_vmi_type("--NA--");
     data.set_flood_unknown_unicast(false);
 
+    if (qos_config_.get()) {
+        data.set_qos_config(UuidToString(qos_config_->uuid()));
+    }
+
     switch (type_) {
     case Interface::PHYSICAL:
         data.set_type("eth");
@@ -756,7 +784,7 @@ void Interface::SetItfSandeshData(ItfSandeshData &data) const {
             data.set_vm_uuid(UuidToString(vintf->vm()->GetUuid()));
         data.set_ip_addr(vintf->primary_ip_addr().to_string());
         data.set_ip6_addr(vintf->primary_ip6_addr().to_string());
-        data.set_mac_addr(vintf->vm_mac());
+        data.set_mac_addr(vintf->vm_mac().ToString());
         data.set_mdata_ip_addr(vintf->mdata_ip_addr().to_string());
         data.set_vxlan_id(vintf->vxlan_id());
         if (vintf->policy_enabled()) {
@@ -863,6 +891,30 @@ void Interface::SetItfSandeshData(ItfSandeshData &data) const {
             it++;
         }
         data.set_fip_list(fip_list);
+
+        std::vector<AliasIpSandeshList> aip_list;
+        VmInterface::AliasIpSet::const_iterator a_it = 
+            vintf->alias_ip_list().list_.begin();
+        while (a_it != vintf->alias_ip_list().list_.end()) {
+            const VmInterface::AliasIp &ip = *a_it;
+            AliasIpSandeshList entry;
+            entry.set_ip_addr(ip.alias_ip_.to_string());
+            if (ip.vrf_.get()) {
+                entry.set_vrf_name(ip.vrf_.get()->GetName());
+            } else {
+                entry.set_vrf_name("--ERROR--");
+            }
+
+            if (ip.installed_) {
+                entry.set_installed("Y");
+            } else {
+                entry.set_installed("N");
+            }
+            aip_list.push_back(entry);
+            a_it++;
+        }
+        data.set_alias_ip_list(aip_list);
+
         data.set_logical_interface_uuid(to_string(vintf->logical_interface()));
 
         // Add Service VLAN list
@@ -1013,6 +1065,10 @@ void Interface::SetItfSandeshData(ItfSandeshData &data) const {
             vrf_assign_acl.assign(UuidToString(vintf->vrf_assign_acl()->GetUuid()));
             data.set_vrf_assign_acl_uuid(vrf_assign_acl);
         }
+
+        data.set_service_health_check_ip(
+                vintf->service_health_check_ip().to_string());
+        data.set_drop_new_flows(vintf->drop_new_flows());
 
         break;
     }

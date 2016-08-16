@@ -4,11 +4,13 @@
 
 #include "Thrift.h"
 
+#include <string>
+
 #include "io/event_manager.h"
 #include "base/logging.h"
 #include "io/io_log.h"
 
-using namespace boost::asio;
+using boost::asio::io_service;
 
 SandeshTraceBufferPtr IOTraceBuf(SandeshTraceBufferCreate(IO_TRACE_BUF, 1000));
 
@@ -18,29 +20,11 @@ EventManager::EventManager() {
 
 void EventManager::Shutdown() {
     shutdown_ = true;
-
-    // TODO: make sure that are no users of this event manager.
     io_service_.stop();
 }
 
 void EventManager::Run() {
-    assert(mutex_.try_lock());
-    io_service::work work(io_service_);
-    do {
-        if (shutdown_) break;
-        boost::system::error_code ec;
-        io_service_.run(ec);
-        if (ec) {
-            EVENT_MANAGER_LOG_ERROR("io_service run failed: " << ec.message());
-            continue;
-        }
-    } while(0);
-    mutex_.unlock();
-}
-
-// Run method to handle exceptions coming during io_service run
-void EventManager::RunWithExceptionHandling() {
-    using namespace apache::thrift;
+    using apache::thrift::TException;
 
     assert(mutex_.try_lock());
     io_service::work work(io_service_);
@@ -50,25 +34,26 @@ void EventManager::RunWithExceptionHandling() {
         try {
             io_service_.run(ec);
             if (ec) {
-                EVENT_MANAGER_LOG_ERROR("io_service run failed: " << ec.message());
+                EVENT_MANAGER_LOG_ERROR("io_service run failed: " <<
+                                        ec.message());
                 break;
             }
-        } catch(const TException &except) {
+        } catch (const TException &except) {
             // ignore thrift exceptions
             EVENT_MANAGER_LOG_ERROR("Thrift exception caught : " <<
                                     except.what() << "; ignoring");
             continue;
         } catch (std::exception &except) {
             static std::string what = except.what();
-            EVENT_MANAGER_LOG_ERROR("Exception caught in io_service run : "
-                                    << what);
-            exit(-1);
-        } catch(...) {
+            EVENT_MANAGER_LOG_ERROR("Exception caught in io_service run : " <<
+                                    what);
+            assert(false);
+        } catch (...) {
             EVENT_MANAGER_LOG_ERROR("Exception caught in io_service run : "
                                     "bailing out");
-            exit(-1);
+            assert(false);
         }
-    } while(true);
+    } while (true);
     mutex_.unlock();
 }
 

@@ -50,7 +50,10 @@ from loadbalancer_agent import LoadbalancerAgent
 from port_tuple import PortTupleAgent
 from snat_agent import SNATAgent
 
-from novaclient import exceptions as nc_exc
+try:
+    from novaclient import exceptions as nc_exc
+except ImportError:
+    pass
 
 # zookeeper client connection
 _zookeeper_client = None
@@ -96,9 +99,12 @@ class SvcMonitor(object):
         # api server
         self._vnc_lib = vnc_lib
 
-        self._nova_client = importutils.import_object(
-            'svc_monitor.nova_client.ServiceMonitorNovaClient',
-            self._args, self.logger)
+        try:
+            self._nova_client = importutils.import_object(
+                'svc_monitor.nova_client.ServiceMonitorNovaClient',
+                self._args, self.logger)
+        except Exception as e:
+            self._nova_client = None
 
         # agent manager
         self._agent_manager = AgentManager()
@@ -214,11 +220,35 @@ class SvcMonitor(object):
                     self.logger.error("upgrade instance ip to service ip failed %s" % (iip.name))
                     continue
 
+    def _upgrade_auto_policy(self, si, st):
+        if st.name != 'netns-snat-template':
+            return
+        if not si.params['auto_policy']:
+            return
+
+        si_obj = ServiceInstance()
+        si_obj.uuid = si.uuid
+        si_obj.fq_name = si.fq_name
+        si_props = ServiceInstanceType(**si.params)
+        si_props.set_auto_policy(False)
+        si_obj.set_service_instance_properties(si_props)
+        try:
+            self._vnc_lib.service_instance_update(si_obj)
+            self.logger.notice("snat policy upgraded for %s" % (si.name))
+        except NoIdError:
+            self.logger.error("snat policy upgrade failed for %s" % (si.name))
+            return
+
     def upgrade(self):
+        for lr in LogicalRouterSM.values():
+            self.snat_agent.upgrade(lr)
+
         for si in ServiceInstanceSM.values():
             st = ServiceTemplateSM.get(si.service_template)
             if not st:
                 continue
+
+            self._upgrade_auto_policy(si, st)
 
             vm_id_list = list(si.virtual_machines)
             for vm_id in vm_id_list:
@@ -273,6 +303,14 @@ class SvcMonitor(object):
 
         # Load the loadbalancer driver
         self.loadbalancer_agent.load_drivers()
+
+        # Invoke the loadbalancers
+        for lb in LoadbalancerSM.values():
+            lb.add()
+
+        # Invoke the loadbalancer listeners
+        for lb_listener in LoadbalancerListenerSM.values():
+            lb_listener.add()
 
         # Invoke the loadbalancer pools
         for lb_pool in LoadbalancerPoolSM.values():
@@ -508,7 +546,7 @@ def timer_callback(monitor):
             continue
         iip_delete_list.append(iip)
     for iip in iip_delete_list:
-        monitor.port_tuple_agent.delete_shared_iip(iip.uuid)
+        monitor.port_tuple_agent.delete_shared_iip(iip)
 
     # delete vms without si
     vm_delete_list = []
@@ -552,8 +590,6 @@ def timer_callback(monitor):
             if not vn or vn.virtual_machine_interfaces:
                 continue
             if vn.name in svc_info.get_shared_vn_list():
-                monitor._delete_shared_vn(vn.uuid)
-            elif vn.name.startswith(svc_info.get_snat_left_vn_prefix()):
                 monitor._delete_shared_vn(vn.uuid)
 
 
@@ -655,6 +691,12 @@ def parse_args(args_str):
         'logger_class': None,
         'sandesh_send_rate_limit': SandeshSystem.get_sandesh_send_rate_limit(),
         'check_service_interval': '60',
+        'nova_endpoint_type': 'internalURL',
+        'rabbit_use_ssl': False,
+        'kombu_ssl_version': '',
+        'kombu_ssl_keyfile': '',
+        'kombu_ssl_certfile': '',
+        'kombu_ssl_ca_certs': '',
     }
     secopts = {
         'use_certs': False,

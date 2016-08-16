@@ -10,6 +10,7 @@ env = BuildEnv.Clone()
 env.Append(CPPPATH = [env['TOP'],
                       env['TOP'] + '/db',
                       env['TOP'] + '/io',
+                      env['TOP'] + '/tools/sandesh/library/common',
                      ])
 
 env.Append(LIBPATH = env['TOP'] + '/base')
@@ -43,9 +44,10 @@ env.Prepend(LIBS = [
                     'task_test',
                     'bgptest',
                     'bgp',
-		    'bgp_ifmap_config',
+                    'bgp_ifmap_config',
                     'extended_community',
                     'peer_sandesh',
+                    'table_sandesh',
                     'control_node',
                     'origin_vn',
                     'routing_instance',

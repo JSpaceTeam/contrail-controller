@@ -409,7 +409,8 @@ MulticastHandler::GetInterfaceComponentNHKeyList(MulticastGroupObject *obj,
     for (std::list<uuid>::const_iterator it = obj->GetLocalOlist().begin();
             it != obj->GetLocalOlist().end(); it++) {
         ComponentNHKeyPtr component_nh_key(new ComponentNHKey(0, (*it),
-                                                              interface_flags));
+                                                        interface_flags,
+                                                        MacAddress::ZeroMac()));
         component_nh_key_list.push_back(component_nh_key);
     }
     return component_nh_key_list;
@@ -664,7 +665,7 @@ void MulticastHandler::ModifyEvpnMembers(const Peer *peer,
 
     TriggerRemoteRouteChange(obj, peer, vrf_name, olist,
                              peer_identifier, delete_op, Composite::EVPN,
-                             ethernet_tag, false, ethernet_tag);
+                             MplsTable::kInvalidLabel, false, ethernet_tag);
     MCTRACE(Log, "Add EVPN TOR Olist ", vrf_name, grp.to_string(), 0);
 }
 

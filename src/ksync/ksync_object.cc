@@ -35,7 +35,6 @@ KSyncObject::FwdRefTree  KSyncObject::fwd_ref_tree_;
 KSyncObject::BackRefTree  KSyncObject::back_ref_tree_;
 KSyncObjectManager *KSyncObjectManager::singleton_ = NULL;
 std::auto_ptr<KSyncEntry> KSyncObjectManager::default_defer_entry_;
-bool KSyncDebug::debug_;
 
 typedef std::map<uint32_t, std::string> VrouterErrorDescriptionMap;
 VrouterErrorDescriptionMap g_error_description =
@@ -109,6 +108,7 @@ KSyncEntry *KSyncObject::Find(const KSyncEntry *key) {
 }
 
 KSyncEntry *KSyncObject::Next(const KSyncEntry *entry) const {
+    tbb::recursive_mutex::scoped_lock lock(lock_);
     Tree::const_iterator it;
     if (entry == NULL) {
         it = tree_.begin();
@@ -238,9 +238,24 @@ void KSyncObject::Delete(KSyncEntry *entry) {
 void KSyncObject::ChangeKey(KSyncEntry *entry, uint32_t arg) {
     tbb::recursive_mutex::scoped_lock lock(lock_);
     assert(tree_.erase(*entry) > 0);
+    uint32_t old_key = GetKey(entry);
     UpdateKey(entry, arg);
-    // assert for tree insertion failures till we handle it
-    assert(tree_.insert(*entry).second == true);
+    std::pair<Tree::iterator, bool> ret = tree_.insert(*entry);
+    if (ret.second == false) {
+        // entry with the same key already exist, to proceed further
+        // switch place with the existing entry
+        KSyncEntry *current = ret.first.operator->();
+        assert(tree_.erase(*current) > 0);
+        UpdateKey(current, old_key);
+        // following tree insertions should always pass
+        assert(tree_.insert(*current).second == true);
+        assert(tree_.insert(*entry).second == true);
+    }
+}
+
+uint32_t KSyncObject::GetKey(KSyncEntry *entry) {
+    assert(false);
+    return 0;
 }
 
 void KSyncObject::FreeInd(KSyncEntry *entry, uint32_t index) {
@@ -352,8 +367,8 @@ void KSyncDBObject::Notify(DBTablePartBase *partition, DBEntryBase *e) {
     DBEntry *entry = static_cast<DBEntry *>(e);
     DBTableBase *table = partition->parent();
     assert(table_ == table);
-    DBState *state = entry->GetState(table, id_);
-    KSyncDBEntry *ksync = static_cast<KSyncDBEntry *>(state);
+    KSyncDBEntry *ksync =
+        static_cast<KSyncDBEntry *>(entry->GetState(table, id_));
     DBFilterResp resp = DBFilterAccept;
 
     // cleanup is in-process, ignore All db notifications.
@@ -367,104 +382,121 @@ void KSyncDBObject::Notify(DBTablePartBase *partition, DBEntryBase *e) {
         resp = DBEntryFilter(entry, ksync);
     }
 
-    if (entry->IsDeleted() || resp == DBFilterDelete) {
-        if (state == NULL) {
-            return;
-        }
-        // Check if there is any entry present in dup_entry_list
-        if (!ksync->dup_entry_list_.empty()) {
-            // Check if entry getting deleted is actively associated with
-            // Ksync Entry.
-            if (entry == ksync->GetDBEntry()) {
-                // clean up db entry state.
-                CleanupOnDel(ksync);
-                ksync->SetDBEntry(ksync->dup_entry_list_.front());
-                ksync->dup_entry_list_.pop_front();
-
-                // DB entry association changed, trigger re-sync.
-                if (ksync->Sync(ksync->GetDBEntry())) {
-                    NotifyEvent(ksync, KSyncEntry::ADD_CHANGE_REQ);
-                }
-            } else {
-                // iterate through entries and delete the corresponding DB ref.
-                KSyncDBEntry::DupEntryList::iterator it_dup;
-                for (it_dup = ksync->dup_entry_list_.begin();
-                        it_dup != ksync->dup_entry_list_.end(); ++it_dup) {
-                    if (entry == *it_dup)
-                        break;
-                }
-                // something bad has happened if we fail to find the entry.
-                assert(it_dup != ksync->dup_entry_list_.end());
-                ksync->dup_entry_list_.erase(it_dup);
-                entry->ClearState(table_, id_);
-            }
-        } else {
-            // We may get duplicate delete notification in
-            // case of db entry reuse
-            // add -> change ->delete(Notify) -> change -> delete(Notify)
-            // delete and change gets suppresed as delete and we get
-            // a duplicate delete notification
-            if (ksync->IsDeleted() == false) {
-                NotifyEvent(ksync, KSyncEntry::DEL_REQ);
-            }
-        }
-    } else {
-        if (resp == DBFilterIgnore) {
-            // DB filter tells us to ignore this Add/Change.
-            return;
-        }
-        bool need_sync = false;
-        if (ksync == NULL) {
-            KSyncEntry *key, *found;
-
-            // TODO : Memory is allocated and freed only for lookup. Fix this.
-            key = DBToKSyncEntry(entry);
-            found = Find(key);
-            if (found == NULL) { 
-                ksync = static_cast<KSyncDBEntry *>(CreateImpl(key));
-            } else {
-                ksync = static_cast<KSyncDBEntry *>(found);
-                if (ksync->stale()) {
-                    // Clear stale marked entry and remove from stale entry tree
-                    ClearStale(ksync);
-                }
-            }
-            delete key;
-            entry->SetState(table, id_, ksync);
-            // Allow reuse of KSync Entry if the previous associated DB Entry
-            // is marked deleted. This can happen when Key for OPER DB entry
-            // deferes from that used in KSync Object.
-            DBEntry *old_db_entry = ksync->GetDBEntry();
-            if (old_db_entry != NULL) {
-                // cleanup previous state id the old db entry is delete marked.
-                if (old_db_entry->IsDeleted()) {
+    if (entry->IsDeleted() || resp == DBFilterDelete ||
+        resp == DBFilterDelAdd) {
+        if (ksync != NULL) {
+            // Check if there is any entry present in dup_entry_list
+            if (!ksync->dup_entry_list_.empty()) {
+                // Check if entry getting deleted is actively associated with
+                // Ksync Entry.
+                if (entry == ksync->GetDBEntry()) {
+                    // clean up db entry state.
                     CleanupOnDel(ksync);
+                    ksync->SetDBEntry(ksync->dup_entry_list_.front());
+                    ksync->dup_entry_list_.pop_front();
+
+                    // DB entry association changed, trigger re-sync.
+                    if (ksync->Sync(ksync->GetDBEntry())) {
+                        NotifyEvent(ksync, KSyncEntry::ADD_CHANGE_REQ);
+                    }
                 } else {
-                    // In case Oper DB and Ksync use different Keys, its
-                    // possible to have multiple Oper DB entries pointing to
-                    // same Ksync Entry.
-                    // add the entry to dup_entry_list and return
-                    ksync->dup_entry_list_.push_back(entry);
-                    return;
+                    // iterate through entries and delete the
+                    // corresponding DB ref.
+                    KSyncDBEntry::DupEntryList::iterator it_dup;
+                    for (it_dup = ksync->dup_entry_list_.begin();
+                            it_dup != ksync->dup_entry_list_.end(); ++it_dup) {
+                        if (entry == *it_dup)
+                            break;
+                    }
+                    // something bad has happened if we fail to find the entry.
+                    assert(it_dup != ksync->dup_entry_list_.end());
+                    ksync->dup_entry_list_.erase(it_dup);
+                    entry->ClearState(table_, id_);
+                }
+            } else {
+                if (resp == DBFilterDelAdd) {
+                    // clean up db entry state, so that other ksync entry can
+                    // replace the states appropriately.
+                    // cleanup needs to be triggered before notifying delete
+                    // after that ksync entry might be already free'd
+                    CleanupOnDel(ksync);
+                }
+                // We may get duplicate delete notification in
+                // case of db entry reuse
+                // add -> change ->delete(Notify) -> change -> delete(Notify)
+                // delete and change gets suppresed as delete and we get
+                // a duplicate delete notification
+                if (ksync->IsDeleted() == false) {
+                    NotifyEvent(ksync, KSyncEntry::DEL_REQ);
                 }
             }
-            ksync->SetDBEntry(entry);
-            need_sync = true;
+        }
+        if (resp != DBFilterDelAdd) {
+            // return from here except for DBFilterDelAdd case, where
+            // ADD needs to be triggered after Delete
+            return;
+        }
+        // reset ksync entry pointer, as ksync and DB entry is already
+        // dissassociated
+        ksync = NULL;
+    }
+
+    if (resp == DBFilterIgnore) {
+        // DB filter tells us to ignore this Add/Change.
+        return;
+    }
+
+    bool need_sync = false;
+    if (ksync == NULL) {
+        KSyncEntry *key, *found;
+
+        // TODO : Memory is allocated and freed only for lookup. Fix this.
+        key = DBToKSyncEntry(entry);
+        found = Find(key);
+        if (found == NULL) {
+            ksync = static_cast<KSyncDBEntry *>(CreateImpl(key));
         } else {
-            // ignore change on non-associated entry. 
-            if (entry != ksync->GetDBEntry()) {
+            ksync = static_cast<KSyncDBEntry *>(found);
+            if (ksync->stale()) {
+                // Clear stale marked entry and remove from stale entry tree
+                ClearStale(ksync);
+            }
+        }
+        delete key;
+        entry->SetState(table, id_, ksync);
+        // Allow reuse of KSync Entry if the previous associated DB Entry
+        // is marked deleted. This can happen when Key for OPER DB entry
+        // deferes from that used in KSync Object.
+        DBEntry *old_db_entry = ksync->GetDBEntry();
+        if (old_db_entry != NULL) {
+            // cleanup previous state id the old db entry is delete marked.
+            if (old_db_entry->IsDeleted()) {
+                CleanupOnDel(ksync);
+            } else {
+                // In case Oper DB and Ksync use different Keys, its
+                // possible to have multiple Oper DB entries pointing to
+                // same Ksync Entry.
+                // add the entry to dup_entry_list and return
+                ksync->dup_entry_list_.push_back(entry);
                 return;
             }
         }
-
-        if (ksync->IsDeleted()) {
-            // ksync entry was marked as delete, sync required.
-            need_sync = true;
+        ksync->SetDBEntry(entry);
+        need_sync = true;
+    } else {
+        // ignore change on non-associated entry.
+        if (entry != ksync->GetDBEntry()) {
+            return;
         }
+    }
 
-        if (ksync->Sync(entry) || need_sync) {
-            NotifyEvent(ksync, KSyncEntry::ADD_CHANGE_REQ);
-        }
+    if (ksync->IsDeleted()) {
+        // ksync entry was marked as delete, sync required.
+        need_sync = true;
+    }
+
+    if (ksync->Sync(entry) || need_sync) {
+        NotifyEvent(ksync, KSyncEntry::ADD_CHANGE_REQ);
     }
 }
 
@@ -492,40 +524,40 @@ std::string KSyncEntry::VrouterError(uint32_t error) const {
     return VrouterErrorToString(error);
 }
 
-void KSyncEntry::ErrorHandler(int err, uint32_t seq_no) const {
+void KSyncEntry::ErrorHandler(int err, uint32_t seq_no,
+                              KSyncEvent event) const {
     if (err == 0) {
         return;
     }
     std::string error_msg = VrouterError(err);
     KSYNC_ERROR(VRouterError, "VRouter operation failed. Error <", err,
                 ":", error_msg, ">. Object <", ToString(),
-                ">. Operation <", OperationString(), ">. Message number :",
-                seq_no);
+                ">. Operation <", AckOperationString(event),
+                ">. Message number :", seq_no);
 
     std::stringstream sstr;
     sstr << "VRouter operation failed. Error <" << err << ":" << error_msg <<
             ">. Object <" << ToString() << ">. Operation <" <<
-            OperationString() << ">. Message number :" << seq_no;
+            AckOperationString(event) << ">. Message number :" << seq_no;
     KSYNC_ERROR_TRACE(Trace, sstr.str().c_str());
     LOG(ERROR, sstr.str().c_str());
-    KSYNC_ASSERT(err == 0);
 }
 
-std::string KSyncEntry::OperationString() const {
-    switch(state_) {
-    case INIT:
-    case TEMP:
-    case ADD_DEFER:
+std::string KSyncEntry::AckOperationString(KSyncEvent event) const {
+    switch(event) {
+    case ADD_ACK:
         return "Addition";
 
-    case CHANGE_DEFER:
-    case IN_SYNC:
-    case SYNC_WAIT:
-    case NEED_SYNC:
+    case CHANGE_ACK:
         return "Change";
 
-    default:
+    case DEL_ACK:
         return "Deletion";
+
+    default:
+        // AckOperationString should track only acks, if something else is
+        // passed convert it to EventString
+        return EventString(event);
     }
 }
 
@@ -594,7 +626,7 @@ std::string KSyncEntry::StateString() const {
     return str.str();
 }
 
-std::string KSyncEntry::EventString(KSyncEvent event) {
+std::string KSyncEntry::EventString(KSyncEvent event) const {
     std::stringstream str;
     switch (event) {
     case ADD_CHANGE_REQ:
@@ -1484,12 +1516,15 @@ void KSyncObject::BackRefReEval(KSyncEntry *key) {
 bool KSyncObjectManager::Process(KSyncObjectEvent *event) {
     switch(event->event_) {
     case KSyncObjectEvent::UNREGISTER:
-        delete event->obj_;
+        if (event->obj_->Size() == 0) {
+            delete event->obj_;
+        }
         break;
     case KSyncObjectEvent::DELETE:
         {
             int count = 0;
-            KSyncEntry *entry;
+            // hold reference to entry to ensure the pointer sanity
+            KSyncEntry::KSyncEntryPtr entry(NULL);
             if (event->ref_.get() == NULL) {
                 event->obj_->set_delete_scheduled();
                 if (event->obj_->IsEmpty()) {
@@ -1504,23 +1539,30 @@ bool KSyncObjectManager::Process(KSyncObjectEvent *event) {
                 entry = event->ref_.get();
             }
 
-            while (entry != NULL) {
-                KSyncEntry *next_entry = event->obj_->Next(entry);
+            // hold reference to entry to ensure the pointer sanity
+            // next entry can get free'd in certain cases while processing
+            // current entry
+            KSyncEntry::KSyncEntryPtr next_entry(NULL);
+            while (entry.get() != NULL) {
+                next_entry = event->obj_->Next(entry.get());
                 count++;
                 if (entry->IsDeleted() == false) {
                     // trigger delete if entry is not marked delete already.
-                    event->obj_->Delete(entry);
+                    event->obj_->Delete(entry.get());
                 }
 
-                if (count == kMaxEntriesProcess && next_entry != NULL) {
+                if (count == kMaxEntriesProcess && next_entry.get() != NULL) {
                     // update reference with which entry to start with
                     // in next iteration.
-                    event->ref_ = next_entry;
+                    event->ref_ = next_entry.get();
                     // yeild and re-enqueue event for processing later.
                     event_queue_->Enqueue(event);
+
+                    // release reference to deleted entry.
+                    entry = NULL;
                     return false;
                 }
-                entry = next_entry;
+                entry = next_entry.get();
             }
             break;
         }

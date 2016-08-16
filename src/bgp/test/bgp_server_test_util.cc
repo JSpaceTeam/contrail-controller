@@ -6,6 +6,7 @@
 
 #include <boost/foreach.hpp>
 
+#include "base/task_annotations.h"
 #include "bgp/bgp_config_ifmap.h"
 #include "bgp/bgp_config_parser.h"
 #include "bgp/bgp_factory.h"
@@ -40,21 +41,22 @@ typedef ip::tcp::socket Socket;
 BgpServerTest::BgpServerTest(EventManager *evm, const string &localname,
                              DB *config_db, DBGraph *config_graph) :
     BgpServer(evm), config_db_(config_db), config_graph_(config_graph) {
+    ConcurrencyScope scope("bgp::Config");
     BgpIfmapConfigManager *config_manager =
             static_cast<BgpIfmapConfigManager *>(config_mgr_.get());
     config_manager->Initialize(config_db_.get(), config_graph_.get(),
                                localname);
     cleanup_config_ = false;
     rtarget_group_mgr_->Initialize();
-    GetIsPeerCloseGraceful_fnc_ =
-        boost::bind(&BgpServerTest::BgpServerIsPeerCloseGraceful, this);
 }
 
 BgpServerTest::BgpServerTest(EventManager *evm, const string &localname)
-        : BgpServer(evm),
-          name_(localname),
-          config_db_(new DB()),
-          config_graph_(new DBGraph()) {
+    : BgpServer(evm),
+      name_(localname),
+      config_db_(
+          new DB(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable"))),
+      config_graph_(new DBGraph()) {
+    ConcurrencyScope scope("bgp::Config");
     cleanup_config_ = true;
     IFMapLinkTable_Init(config_db_.get(), config_graph_.get());
     vnc_cfg_Server_ModuleInit(config_db_.get(), config_graph_.get());
@@ -64,8 +66,6 @@ BgpServerTest::BgpServerTest(EventManager *evm, const string &localname)
     config_manager->Initialize(config_db_.get(), config_graph_.get(),
                                localname);
     rtarget_group_mgr_->Initialize();
-    GetIsPeerCloseGraceful_fnc_ =
-        boost::bind(&BgpServerTest::BgpServerIsPeerCloseGraceful, this);
 }
 
 void BgpServerTest::PostShutdown() {
@@ -138,6 +138,7 @@ BgpPeer *BgpServerTest::FindMatchingPeer(const string &routing_instance,
 }
 
 void BgpServerTest::DisableAllPeers() {
+    ConcurrencyScope scope("bgp::Config");
     for (BgpPeerList::iterator it = peer_list_.begin();
          it != peer_list_.end(); ++it) {
         it->second->SetAdminState(true);
@@ -145,6 +146,7 @@ void BgpServerTest::DisableAllPeers() {
 }
 
 void BgpServerTest::EnableAllPeers() {
+    ConcurrencyScope scope("bgp::Config");
     for (BgpPeerList::iterator it = peer_list_.begin();
          it != peer_list_.end(); ++it) {
         it->second->SetAdminState(false);
@@ -186,7 +188,9 @@ void BgpPeerTest::SetDataCollectionKey(BgpPeerInfo *peer_info) const {
 //
 BgpPeerTest::BgpPeerTest(BgpServer *server, RoutingInstance *rtinst,
                          const BgpNeighborConfig *config)
-        : BgpPeer(server, rtinst, config), id_(0) {
+        : BgpPeer(server, rtinst, config), id_(0),
+          work_queue_(TaskScheduler::GetInstance()->GetTaskId("bgp::Config"), 0,
+                      boost::bind(&BgpPeerTest::ProcessRequest, this, _1)) {
     SendUpdate_fnc_ = boost::bind(&BgpPeerTest::BgpPeerSendUpdate, this,
                                   _1, _2);
     MpNlriAllowed_fnc_ = boost::bind(&BgpPeerTest::BgpPeerMpNlriAllowed, this,
@@ -195,6 +199,26 @@ BgpPeerTest::BgpPeerTest(BgpServer *server, RoutingInstance *rtinst,
 }
 
 BgpPeerTest::~BgpPeerTest() {
+}
+
+// Process requests and run them off bgp::Config exclusive task
+bool BgpPeerTest::ProcessRequest(Request *request) {
+    CHECK_CONCURRENCY("bgp::Config");
+    switch (request->type) {
+        case ADMIN_UP:
+            BgpPeer::SetAdminState(false);
+            request->result = true;
+            break;
+        case ADMIN_DOWN:
+            BgpPeer::SetAdminState(true);
+            request->result = true;
+            break;
+    }
+
+    // Notify waiting caller with the result
+    tbb::mutex::scoped_lock lock(work_mutex_);
+    cond_var_.notify_all();
+    return true;
 }
 
 //

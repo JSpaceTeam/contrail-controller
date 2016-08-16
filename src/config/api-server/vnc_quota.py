@@ -3,6 +3,7 @@ from gen.resource_common import *
 from pprint import pformat
 import cfgm_common.exceptions
 
+QUOTA_OVER_ERROR_CODE = 412
 
 class QuotaHelper(object):
 
@@ -23,10 +24,9 @@ class QuotaHelper(object):
     @classmethod
     def get_quota_limit(cls, proj_dict, obj_type):
         quota = proj_dict.get('quota') or cls.default_quota
-        quota_type = obj_type.replace('-', '_')
-        quota_limit = quota.get(quota_type)
+        quota_limit = quota.get(obj_type)
         if quota_limit is None:
-            quota_limit = cls.default_quota.get(quota_type)
+            quota_limit = cls.default_quota.get(obj_type)
         if quota_limit is None:
             quota_limit = cls.default_quota['defaults']
         return quota_limit
@@ -71,7 +71,7 @@ class QuotaHelper(object):
                 return (False, (500, 'Internal error : Failed to read current '
                                 'resource count'))
         else:
-            (ok, res_list) = db_conn.dbe_list(obj_type, 
+            (ok, res_list) = db_conn.dbe_list(obj_type,
                                               back_ref_uuids=[proj_uuid])
             if not ok:
                 return (False, (500, 'Internal error : Failed to read %s '
@@ -81,6 +81,6 @@ class QuotaHelper(object):
         if quota_count >= quota_limit:
             msg = ('quota limit (%d) exceeded for resource %s'
                    % (quota_limit, obj_type))
-            return (False, (403, pformat(fq_name) + ' : ' + msg))
+            return (False, (QUOTA_OVER_ERROR_CODE, pformat(fq_name) + ' : ' + msg))
 
         return True, ""

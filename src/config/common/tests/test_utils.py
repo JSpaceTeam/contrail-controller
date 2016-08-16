@@ -21,9 +21,9 @@ import six
 import contextlib
 from lxml import etree
 try:
-    from collections import OrderedDict
+    from collections import OrderedDict, defaultdict
 except ImportError:
-    from ordereddict import OrderedDict
+    from ordereddict import OrderedDict, defaultdict
 import pycassa
 import Queue
 from collections import deque
@@ -96,13 +96,13 @@ class CassandraCFs(object):
     _all_cfs = {}
 
     @classmethod
-    def add_cf(cls, name, cf):
-        CassandraCFs._all_cfs[name] = cf
+    def add_cf(cls, keyspace, cf_name, cf):
+        CassandraCFs._all_cfs[keyspace + '_' + cf_name] = cf
     # end add_cf
 
     @classmethod
-    def get_cf(cls, name):
-        return CassandraCFs._all_cfs[name]
+    def get_cf(cls, keyspace, cf_name):
+        return CassandraCFs._all_cfs[keyspace + '_' + cf_name]
     # end get_cf
 
     @classmethod
@@ -115,18 +115,30 @@ class CassandraCFs(object):
         cls._all_cfs = {}
 # end CassandraCFs
 
+class FakeConnectionPool(object):
+
+    def __init__(*args, **kwargs):
+        self = args[0]
+        if "keyspace" in kwargs:
+            self.keyspace = kwargs['keyspace']
+        else:
+            self.keyspace = args[2]
+    # end __init__
+# end FakeConnectionPool
+
 class FakeCF(object):
 
     def __init__(*args, **kwargs):
         self = args[0]
+        self._pool = args[2]
         self._name = args[3]
         try:
-            old_cf = CassandraCFs.get_cf(self._name)
+            old_cf = CassandraCFs.get_cf(self._pool.keyspace, self._name)
             self._rows = old_cf._rows
         except KeyError:
             self._rows = OrderedDict({})
         self.column_validators = {}
-        CassandraCFs.add_cf(self._name, self)
+        CassandraCFs.add_cf(self._pool.keyspace, self._name, self)
     # end __init__
 
     def get_range(self, *args, **kwargs):
@@ -255,28 +267,18 @@ class FakeCF(object):
 
     def xget(self, key, column_start=None, column_finish=None,
              column_count=0, include_timestamp=False, include_ttl=False):
-        col_names = []
-        if key in self._rows:
-            col_names = self._rows[key].keys()
+        try:
+            col_dict = self.get(key,
+                                column_start=column_start,
+                                column_finish=column_finish,
+                                column_count=column_count,
+                                include_timestamp=include_timestamp,
+                                include_ttl=include_ttl)
+        except pycassa.NotFoundException:
+            col_dict = {}
 
-        for col_name in col_names:
-            if not self._column_within_range(col_name,
-                                column_start, column_finish):
-                continue
-
-            col_value = self._rows[key][col_name][0]
-            if include_timestamp or include_ttl:
-                ret = (col_value,)
-                if include_timestamp:
-                    col_tstamp = self._rows[key][col_name][1]
-                    ret += (col_tstamp,)
-                if include_ttl:
-                    col_ttl = self._rows[key][col_name][2]
-                    ret += (col_ttl,)
-                yield (col_name, ret)
-            else:
-                yield (col_name, col_value)
-
+        for k, v in col_dict.items():
+            yield (k, v)
     # end xget
 
     def get_count(self, key, column_start=None, column_finish=None):
@@ -644,7 +646,7 @@ class FakeIfmapClient(object):
                         r_item.append(cls._graph[ident_name]['ident'])
                         r_item.append(link_info['meta'])
 
-                    if (result_filter != 'all' and 
+                    if (result_filter != 'all' and
                         meta_name not in result_filter):
                         continue
                     result_items.append(copy.deepcopy(r_item))
@@ -703,22 +705,25 @@ class FakeIfmapClient(object):
 
 
 class FakeKombu(object):
-    _queues = {}
+    _exchange = defaultdict(dict)
 
     @classmethod
-    def is_empty(cls, qname):
-        for name, q in FakeKombu._queues.items():
+    def is_empty(cls, vhost, qname):
+        _vhost = ''.join(vhost)
+        for name, q in FakeKombu._exchange[_vhost].items():
             if name.startswith(qname) and q.qsize() > 0:
                 return False
         return True
     # end is_empty
 
+    @classmethod
+    def new_queues(self, vhost, q_name, q_gevent_obj):
+        FakeKombu._exchange[vhost][q_name] = q_gevent_obj
+    # end new_queues
+
     class Exchange(object):
         def __init__(self, *args, **kwargs):
-            pass
-
-        def _new_queue(self, q_name, q_obj):
-            FakeKombu._queues[q_name] = q_obj
+            self.exchange = args[1]
         # end __init__
     # end Exchange
 
@@ -739,7 +744,6 @@ class FakeKombu(object):
             self._sync_q = gevent.queue.Queue()
             self._name = q_name
             self._exchange = q_exchange
-            self._exchange._new_queue(q_name, self._sync_q)
         # end __init__
 
         def __call__(self, *args):
@@ -764,16 +768,23 @@ class FakeKombu(object):
 
     # end class Queue
 
+    class FakeChannel(object):
+        def __init__(self, vhost):
+            self.vhost = vhost
+        # end __init__
+    # end class Channel
+
     class Connection(object):
         class ConnectionException(Exception): pass
         class ChannelException(Exception): pass
 
         def __init__(self, *args, **kwargs):
-            pass
+            self.vhost = args[1]
         # end __init__
 
         def channel(self):
-            pass
+            chan = FakeKombu.FakeChannel(self.vhost)
+            return chan
         # end channel
 
         def close(self):
@@ -809,6 +820,9 @@ class FakeKombu(object):
         def __init__(self, *args, **kwargs):
             self.queues = kwargs['queues']
             self.callbacks = kwargs['callbacks']
+            self.vhost = ''.join(args[1].vhost)
+            FakeKombu._exchange[self.vhost][self.queues._name] \
+                                            = self.queues._sync_q
         # end __init__
 
         def consume(self):
@@ -830,10 +844,12 @@ class FakeKombu(object):
     class Producer(object):
         def __init__(self, *args, **kwargs):
             self.exchange = kwargs['exchange']
+            self.vhost = ''.join(args[1].vhost)
         # end __init__
 
-        def publish(self, payload, **kwargs):
-            for q in FakeKombu._queues.values():
+
+        def publish(self, payload):
+            for q in FakeKombu._exchange[self.vhost].values():
                 msg_obj = FakeKombu.Queue.Message(payload)
                 q.put(msg_obj, None)
         #end publish
@@ -843,10 +859,11 @@ class FakeKombu(object):
         # end close
 
     # end class Producer
-
     @classmethod
-    def reset(cls):
-        cls._queues = {}
+    def reset(cls, vhost):
+        _vhost = ''.join(vhost)
+        cls._exchange[_vhost].clear()
+        pass
 # end class FakeKombu
 
 class FakeRedis(object):
@@ -948,7 +965,7 @@ class FakeExtensionManager(object):
         self._ep_name = ep_name
         for cls in classes or []:
             ext_obj = FakeExtensionManager.FakeExtObj(
-                ep_name, cls, **kwargs) 
+                ep_name, cls, **kwargs)
             self._ext_objs.append(ext_obj)
     # end __init__
 
@@ -996,7 +1013,7 @@ class FakeAuthProtocol(object):
     def __init__(self, app, conf, *args, **kwargs):
         self.app = app
         self.conf = conf
- 
+
         auth_protocol = conf['auth_protocol']
         auth_host = conf['auth_host']
         auth_port = conf['auth_port']
@@ -1015,7 +1032,7 @@ class FakeAuthProtocol(object):
             'X-Role': 'cloud-admin',
         }
         rval = json.dumps(token_dict)
-        # print '**** generated admin token %s ****' % rval
+        # print '%%%% generated admin token %s %%%%' % rval
         return rval
 
     def _header_to_env_var(self, key):
@@ -1085,7 +1102,7 @@ class FakeAuthProtocol(object):
         # print 'FakeAuthProtocol: Authenticating user token'
         user_token = self._get_header(env, 'X-Auth-Token')
         if user_token:
-            # print '****** user token %s ***** ' % user_token
+            # print '%%%%%% user token %s %%%%% ' % user_token
             pass
         elif self.delay_auth_decision:
             self._add_headers(env, {'X-Identity-Status': 'Invalid'})
@@ -1095,7 +1112,7 @@ class FakeAuthProtocol(object):
             return self._reject_request(env, start_response)
 
         token_info = self._validate_user_token(user_token, env)
-        # env['keystone.token_info'] = token_info
+        env['keystone.token_info'] = token_info
         user_headers = self._build_user_headers(token_info)
         self._add_headers(env, user_headers)
         return self.app(env, start_response)
@@ -1134,6 +1151,9 @@ class FakeKeystoneClient(object):
             self.id = id
             self.name = name
             self._tenants[id] = self
+
+        def delete_tenant(self, id):
+            del self._tenants[id]
 
         def create(self, name, id=None):
             self.name = name
@@ -1397,7 +1417,7 @@ class ZookeeperClientMock(object):
 
 # end Class ZookeeperClientMock
 
-  
+
 class FakeNetconfManager(object):
     def __init__(self, *args, **kwargs):
         self.configs = []

@@ -37,8 +37,14 @@ public:
     IFMapAgentTable *cfg_floatingip_table() const {
         return cfg_floatingip_table_;
     }
+    IFMapAgentTable *cfg_aliasip_table() const {
+        return cfg_aliasip_table_;
+    }
     IFMapAgentTable *cfg_floatingip_pool_table() const {
         return cfg_floatingip_pool_table_;
+    }
+    IFMapAgentTable *cfg_aliasip_pool_table() const {
+        return cfg_aliasip_pool_table_;
     }
     IFMapAgentTable *cfg_network_ipam_table() const {
         return cfg_network_ipam_table_;
@@ -65,14 +71,6 @@ public:
         return cfg_logical_port_table_;
     }
 
-    IFMapAgentTable *cfg_loadbalancer_table() const {
-        return cfg_loadbalancer_table_;
-    }
-
-    IFMapAgentTable *cfg_loadbalancer_pool_table() const {
-        return cfg_loadbalancer_pool_table_;
-    }
-
     IFMapAgentTable *cfg_service_instance_table() const {
         return cfg_service_instance_table_;
     }
@@ -83,6 +81,22 @@ public:
 
     IFMapAgentTable *cfg_physical_device_table() const {
         return cfg_physical_device_table_;
+    }
+
+    IFMapAgentTable *cfg_qos_table() const {
+        return cfg_qos_table_;
+    }
+
+    IFMapAgentTable *cfg_global_qos_table() const {
+        return cfg_global_qos_table_;
+    }
+
+    IFMapAgentTable *cfg_qos_queue_table() const {
+        return cfg_qos_queue_table_;
+    }
+
+    IFMapAgentTable *cfg_forwarding_class_table() const {
+        return cfg_forwarding_class_table_;
     }
 
     Agent *agent() const { return agent_; }
@@ -128,7 +142,9 @@ private:
     IFMapAgentTable *cfg_vrf_table_;
     IFMapAgentTable *cfg_instanceip_table_;
     IFMapAgentTable *cfg_floatingip_table_;
+    IFMapAgentTable *cfg_aliasip_table_;
     IFMapAgentTable *cfg_floatingip_pool_table_;
+    IFMapAgentTable *cfg_aliasip_pool_table_;
     IFMapAgentTable *cfg_network_ipam_table_;
     IFMapAgentTable *cfg_vn_network_ipam_table_;
     IFMapAgentTable *cfg_vm_port_vrf_table_;
@@ -141,6 +157,10 @@ private:
     IFMapAgentTable *cfg_service_instance_table_;
     IFMapAgentTable *cfg_security_group_table_;
     IFMapAgentTable *cfg_physical_device_table_;
+    IFMapAgentTable *cfg_qos_table_;
+    IFMapAgentTable *cfg_global_qos_table_;
+    IFMapAgentTable *cfg_qos_queue_table_;
+    IFMapAgentTable *cfg_forwarding_class_table_;
 
     DISALLOW_COPY_AND_ASSIGN(AgentConfig);
 };

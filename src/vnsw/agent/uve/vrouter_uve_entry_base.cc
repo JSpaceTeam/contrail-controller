@@ -35,7 +35,7 @@ VrouterUveEntryBase::VrouterUveEntryBase(Agent *agent)
       physical_device_listener_id_(DBTableBase::kInvalidId),
       timer_(TimerManager::CreateTimer(
                  *(agent_->event_manager())->io_service(), "UveDBWalkTimer",
-                 TaskScheduler::GetInstance()->GetTaskId("db::DBTable"), 0)) {
+                 TaskScheduler::GetInstance()->GetTaskId(kTaskDBExclude), 0)) {
     StartTimer();
 }
 
@@ -592,20 +592,6 @@ bool VrouterUveEntryBase::SendVrouterMsg() {
     if (first) {
         //Physical interface list
         vnsConstants vnsVrouterType;
-        vector<AgentInterface> phy_if_list;
-        PhysicalInterfaceSet::iterator it = phy_intf_set_.begin();
-        while (it != phy_intf_set_.end()) {
-            AgentInterface pitf;
-            const Interface *intf = *it;
-            const PhysicalInterface *port = static_cast
-                                            <const PhysicalInterface *>(intf);
-            pitf.set_name(intf->name());
-            pitf.set_mac_address(GetMacAddress(port->mac()));
-            phy_if_list.push_back(pitf);
-            ++it;
-        }
-        vrouter_agent.set_phy_if(phy_if_list);
-
         //vhost attributes
         InetInterfaceKey key(agent_->vhost_interface_name());
         const Interface *vhost = static_cast<const Interface *>(
@@ -650,6 +636,8 @@ bool VrouterUveEntryBase::SendVrouterMsg() {
                                         VROUTER_AGENT_ON_HOST));
         }
 
+        VrouterObjectLimits vr_limits = agent_->GetVrouterObjectLimits();
+        vrouter_agent.set_vr_limits(vr_limits);
         first = false;
         changed = true;
     }
@@ -663,6 +651,24 @@ bool VrouterUveEntryBase::SendVrouterMsg() {
             changed = true;
         }
 
+    }
+
+    vector<AgentInterface> phy_if_list;
+    PhysicalInterfaceSet::iterator it = phy_intf_set_.begin();
+    while (it != phy_intf_set_.end()) {
+        AgentInterface pitf;
+        const Interface *intf = *it;
+        const PhysicalInterface *port = static_cast
+            <const PhysicalInterface *>(intf);
+        pitf.set_name(intf->name());
+        pitf.set_mac_address(GetMacAddress(port->mac()));
+        phy_if_list.push_back(pitf);
+        ++it;
+    }
+    if (prev_vrouter_.get_phy_if() != phy_if_list) {
+        vrouter_agent.set_phy_if(phy_if_list);
+        prev_vrouter_.set_phy_if(phy_if_list);
+        changed = true;
     }
 
     std::vector<AgentXmppPeer> xmpp_list;
@@ -790,7 +796,9 @@ void VrouterUveEntryBase::BuildAndSendComputeCpuStateMsg(const CpuLoadInfo &info
     ainfo.set_cpu_share(info.get_cpu_share());
     ainfo.set_mem_virt(info.get_meminfo().get_virt());
     ainfo.set_mem_res(info.get_meminfo().get_res());
-    ainfo.set_used_sys_mem(info.get_sys_mem_info().get_used());
+    const SysMemInfo &sys_mem_info(info.get_sys_mem_info());
+    ainfo.set_used_sys_mem(sys_mem_info.get_used() -
+        sys_mem_info.get_buffers() - sys_mem_info.get_cached());
     ainfo.set_one_min_cpuload(info.get_cpuload().get_one_min_avg());
     aciv.push_back(ainfo);
     astate.set_cpu_info(aciv);

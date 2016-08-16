@@ -19,15 +19,20 @@ struct PortInfo input[] = {
         {"vif0", 1, vm1_ip, "00:00:00:01:01:01", 1, 1},
         {"vif1", 2, vm2_ip, "00:00:00:01:01:02", 1, 2},
 };
+IpamInfo ipam_info[] = {
+    {"1.1.1.0", 24, "1.1.1.10"},
+};
 
 class FlowMgmtRouteTest : public ::testing::Test {
 public:
     FlowMgmtRouteTest() : peer_(NULL), agent_(Agent::GetInstance()) {
         flow_proto_ = agent_->pkt()->get_flow_proto();
-        flow_mgmt_ = agent_->pkt()->flow_mgmt_manager();
+        flow_mgmt_list_ = agent_->pkt()->flow_mgmt_manager_list();
         eth = EthInterfaceGet("vnet0");
         EXPECT_TRUE(eth != NULL);
     }
+
+    typedef std::vector<FlowMgmtManager *> FlowMgmtList;
 
     void FlushFlowTable() {
         client->EnqueueFlowFlush();
@@ -42,6 +47,8 @@ protected:
 
         CreateVmportEnv(input, 2, 1);
         client->WaitForIdle(5);
+        AddIPAM("vn1", ipam_info, 1);
+        client->WaitForIdle();
 
         EXPECT_TRUE(VmPortActive(input, 0));
         EXPECT_TRUE(VmPortActive(input, 1));
@@ -63,6 +70,8 @@ protected:
 
         DeleteVmportEnv(input, 2, true, 1);
         client->WaitForIdle(3);
+        DelIPAM("vn1");
+        client->WaitForIdle();
 
         EXPECT_FALSE(VmPortFind(input, 0));
         EXPECT_FALSE(VmPortFind(input, 1));
@@ -105,13 +114,14 @@ protected:
         Agent::GetInstance()->nexthop_table()->Enqueue(&req);
     }
 
+    FlowMgmtList flow_mgmt_list() {return flow_mgmt_list_;}
     Agent *agent() {return agent_;}
 
 protected:
     BgpPeer *peer_;
     Agent *agent_;
     FlowProto *flow_proto_;
-    FlowMgmtManager *flow_mgmt_;
+    FlowMgmtList flow_mgmt_list_;
     VmInterface *vif0;
     VmInterface *vif1;
     PhysicalInterface *eth;
@@ -149,7 +159,11 @@ TEST_F(FlowMgmtRouteTest, RouteDelete_1) {
         vif0->vrf()->GetInet4UnicastRouteTable();
     AgentRoute *rt = table->FindRoute(remote_ip);
 
-    flow_mgmt_->DeleteEvent(rt, 0xFFFFFFFF);
+    FlowMgmtList::iterator it = flow_mgmt_list_.begin();
+    while (it != flow_mgmt_list_.end()) {
+        (*it)->DeleteDBEntryEvent(rt, 0xFFFFFFFF);
+        it++;
+    }
     client->WaitForIdle();
 
     DeleteRoute(vrf_name.c_str(), remote_subnet.to_string().c_str(), 24, peer_);
@@ -187,10 +201,16 @@ TEST_F(FlowMgmtRouteTest, RouteDelete_2) {
         vif0->vrf()->GetInet4UnicastRouteTable();
     AgentRoute *rt = table->FindRoute(remote_ip);
 
-    flow_mgmt_->DeleteEvent(flow);
+    RevFlowDepParams params;
+    flow_mgmt_list_[flow->flow_table()->table_index()]->DeleteEvent(flow, params);
     client->WaitForIdle();
 
-    flow_mgmt_->DeleteEvent(rt, 0xFFFFFFFF);
+    FlowMgmtList::iterator it = flow_mgmt_list_.begin();
+    while (it != flow_mgmt_list_.end()) {
+        (*it)->DeleteDBEntryEvent(rt, 0xFFFFFFFF);
+        it++;
+    }
+
     client->WaitForIdle();
 
     DeleteRoute(vrf_name.c_str(), remote_subnet.to_string().c_str(), 24, peer_);
@@ -223,7 +243,8 @@ TEST_F(FlowMgmtRouteTest, RouteDelete_3) {
                               vm1_ip, 1, 0, 0, vif0->flow_key_nh()->id());
     EXPECT_TRUE(flow != NULL);
 
-    flow_mgmt_->DeleteEvent(flow);
+    RevFlowDepParams params;
+    flow_mgmt_list_[flow->flow_table()->table_index()]->DeleteEvent(flow, params);
     client->WaitForIdle();
 
     DeleteRoute(vrf_name.c_str(), remote_subnet.to_string().c_str(), 24, peer_);
@@ -255,24 +276,29 @@ TEST_F(FlowMgmtRouteTest, RouteDelete_4) {
                               vm1_ip, 1, 0, 0, vif0->flow_key_nh()->id());
     EXPECT_TRUE(flow != NULL);
 
-    FlowMgmtManager *mgr = agent_->pkt()->flow_mgmt_manager();
     flow_proto_->DisableFlowEventQueue(0, true);
 
     VrfDelReq("vrf1");
     client->WaitForIdle(10);
 
-    flow_proto_->DisableFlowMgmtQueue(true);
-    flow_mgmt_->DeleteEvent(flow);
-    flow_mgmt_->DeleteEvent(flow->reverse_flow_entry());
-    flow_mgmt_->AddEvent(flow);
-    flow_mgmt_->AddEvent(flow->reverse_flow_entry());
+    RevFlowDepParams params;
+    uint16_t index = flow->flow_table()->table_index();
+    flow_proto_->DisableFlowUpdateQueue(true);
+    flow_mgmt_list_[index]->DeleteEvent(flow, params);
+    flow_mgmt_list_[index]->DeleteEvent(flow->reverse_flow_entry(), params);
+    flow_mgmt_list_[index]->AddEvent(flow);
+    flow_mgmt_list_[index]->AddEvent(flow->reverse_flow_entry());
     client->WaitForIdle();
 
     DeleteVmportEnv(input, 3, true, 1);
     client->WaitForIdle(3);
 
-    flow_proto_->DisableFlowMgmtQueue(false);
-    mgr->DisableWorkQueue(false);
+    flow_proto_->DisableFlowUpdateQueue(false);
+    FlowMgmtList::iterator it = flow_mgmt_list_.begin();
+    while (it != flow_mgmt_list_.end()) {
+        (*it)->DisableWorkQueue(false);
+        it++;
+    }
     client->WaitForIdle(10);
 
     flow_proto_->DisableFlowEventQueue(0, false);
@@ -307,6 +333,49 @@ TEST_F(FlowMgmtRouteTest, RouteDelete_5) {
     client->WaitForIdle();
 }
 
+TEST_F(FlowMgmtRouteTest, RouteAddDelete_6) {
+    VrfAddReq("vrf10");
+    client->WaitForIdle();
+
+    boost::system::error_code ec;
+    Ip4Address remote_compute = Ip4Address::from_string("1.1.1.1", ec);
+    char router_id[80];
+    strcpy(router_id, Agent::GetInstance()->router_id().to_string().c_str());
+
+    //uint32_t id = VrfGet("vrf10")->vrf_id();
+    string vn_name = "vn10";
+    for (uint32_t i = 1; i < 100; i++) {
+        Ip4Address ip(i);
+        Inet4TunnelRouteAdd(agent_->local_peer(), "vrf10",
+                ip, 32,
+                remote_compute, TunnelType::AllType(), 10,
+                vn_name, SecurityGroupList(),
+                PathPreference());
+        client->WaitForIdle();
+    }
+
+    FlowMgmtList::iterator it = flow_mgmt_list_.begin();
+    while (it != flow_mgmt_list_.end()) {
+        (*it)->FlowUpdateQueueDisable(true);
+        it++;
+    }
+    for (uint32_t i = 0; i < 100; i++) {
+        Ip4Address ip(i);
+        DeleteRoute("vrf10", ip.to_string().c_str(),  32, agent_->local_peer());
+        client->WaitForIdle();
+    }
+
+    // Enable flow-mgmt queue
+    it = flow_mgmt_list_.begin();
+    while (it != flow_mgmt_list_.end()) {
+        (*it)->FlowUpdateQueueDisable(false);
+        it++;
+    }
+    Agent::GetInstance()->vrf_table()->DeleteVrfReq("vrf10");
+    WAIT_FOR(1000, 1000, (flow_mgmt_list_[0]->FlowUpdateQueueLength() == 0));
+    WAIT_FOR(1000, 10000, (VrfFind("vrf10", true) == false));
+}
+
 ////////////////////////////////////////////////////////////////////////////
 // UT for bug 1551577
 // Simulate the following scenario,
@@ -336,10 +405,14 @@ TEST_F(FlowMgmtRouteTest, DB_Entry_Reuse) {
         label_list[i] = CreateMpls(i);
     }
     client->WaitForIdle();
-    WAIT_FOR(100, 1000, (flow_mgmt_->FlowUpdateQueueLength() == 0));
+    WAIT_FOR(100, 1000, (flow_mgmt_list_[0]->FlowUpdateQueueLength() == 0));
 
     // Disable flow-management queue
-    flow_mgmt_->FlowUpdateQueueDisable(true);
+    FlowMgmtList::iterator it = flow_mgmt_list_.begin();
+    while (it != flow_mgmt_list_.end()) {
+        (*it)->FlowUpdateQueueDisable(true);
+        it++;
+    }
 
     // Delete the NH. This should trigger clear of DBState
     DeleteTunnelNH(addr);
@@ -348,7 +421,11 @@ TEST_F(FlowMgmtRouteTest, DB_Entry_Reuse) {
     // Make dummy enqueues so that subsequent operation on tunnel-nh are
     // delayed
     for (int i = 0; i < 100000; i++) {
-        flow_mgmt_->DummyEvent();
+        it = flow_mgmt_list_.begin();
+        while (it != flow_mgmt_list_.end()) {
+            (*it)->DummyEvent();
+            it++;
+        }
     }
 
     // Revoke the tunnel-nh and delete it again
@@ -364,8 +441,42 @@ TEST_F(FlowMgmtRouteTest, DB_Entry_Reuse) {
     }
 
     // Enable flow-mgmt queue
-    flow_mgmt_->FlowUpdateQueueDisable(false);
-    WAIT_FOR(1000, 1000, (flow_mgmt_->FlowUpdateQueueLength() == 0));
+    it = flow_mgmt_list_.begin();
+    while (it != flow_mgmt_list_.end()) {
+        (*it)->FlowUpdateQueueDisable(false);
+        it++;
+    }
+    WAIT_FOR(1000, 1000, (flow_mgmt_list_[0]->FlowUpdateQueueLength() == 0));
+}
+
+TEST_F(FlowMgmtRouteTest, FlowEntry_dbstate_1) {
+    EXPECT_EQ(0U, flow_proto_->FlowCount());
+
+    boost::system::error_code ec;
+    Ip4Address remote_subnet = Ip4Address::from_string("10.10.10.0", ec);
+    Ip4Address remote_compute = Ip4Address::from_string("1.1.1.100", ec);
+
+    string vrf_name = vif0->vrf()->GetName();
+    string vn_name = vif0->vn()->GetName();
+    Inet4TunnelRouteAdd(agent_->local_peer(), "vrf1", remote_subnet, 24, remote_compute,
+                        TunnelType::AllType(), 10, vn_name, SecurityGroupList(),
+                        PathPreference());
+    client->WaitForIdle();
+    VrfEntry *vrf = VrfGet("vrf1");
+    agent_->vrf_table()->DeleteVrfReq("vrf1", 0xFF);
+    client->WaitForIdle();
+    FlowMgmtList::iterator it = flow_mgmt_list_.begin();
+    while (it != flow_mgmt_list_.end()) {
+        (*it)->flow_mgmt_dbclient()->FreeVrfState(vrf, 0xFFFFFFFF);
+        it++;
+    }
+    client->WaitForIdle();
+    //Time for final cleanup
+    DelVrf("vrf1");
+    client->WaitForIdle();
+    DeleteRoute(vrf_name.c_str(), remote_subnet.to_string().c_str(), 24,
+                agent_->local_peer());
+    client->WaitForIdle();
 }
 
 int main(int argc, char *argv[]) {

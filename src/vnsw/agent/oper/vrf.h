@@ -41,6 +41,7 @@ struct VrfData : public AgentOperDBData {
     enum VrfEntryFlags {
         ConfigVrf = 1 << 0,     // vrf is received from config
         GwVrf     = 1 << 1,     // GW configured for this VRF
+        MirrorVrf = 1 << 2,     // internally Created VRF
     };
 
     VrfData(Agent *agent, IFMapNode *node, uint32_t flags,
@@ -92,6 +93,8 @@ public:
     bool UpdateVxlanId(Agent *agent, uint32_t new_vxlan_id);
 
     LifetimeActor *deleter();
+    virtual void RetryDelete();
+    bool AllRouteTablesEmpty() const;
     void SendObjectLog(AgentLogEvent::type event) const;
     void StartDeleteTimer();
     bool DeleteTimeout();
@@ -119,6 +122,15 @@ public:
     void SetRouteTableDeleted(uint8_t table_type);
     void DeleteRouteTables();
     void ResyncRoutes();
+    bool allow_route_add_on_deleted_vrf() const {
+        return allow_route_add_on_deleted_vrf_;
+    }
+
+    //To be set in test cases only
+    void set_allow_route_add_on_deleted_vrf(bool val) {
+        allow_route_add_on_deleted_vrf_ = val;
+    }
+    InetUnicastAgentRouteTable *GetInetUnicastRouteTable(const IpAddress &addr) const;
 
 private:
     friend class VrfTable;
@@ -138,6 +150,7 @@ private:
     uint32_t rt_table_delete_bmap_;
     IFMapDependencyManager::IFMapNodePtr vrf_node_ptr_;
     boost::scoped_ptr<AgentRouteResync> route_resync_walker_;
+    bool allow_route_add_on_deleted_vrf_;
     DISALLOW_COPY_AND_ASSIGN(VrfEntry);
 };
 
@@ -220,6 +233,7 @@ public:
     void DeleteRoutes();
     void Shutdown();
     void DeleteFromDbTree(int table_type, const std::string &vrf_name);
+
 private:
     friend class VrfEntry;
 

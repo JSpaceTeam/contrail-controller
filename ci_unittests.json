@@ -14,7 +14,6 @@
             "controller/src/bfd:test",
             "controller/src/query_engine:test",
             "controller/src/database/gendb:test",
-            "controller/src/database/cassandra/thrift:test",
             "controller/src/database/cassandra/cql:test",
             "controller/src/zookeeper:test"
         ],
@@ -23,13 +22,16 @@
     "contrail-config" : {
         "source_directories" : [
             "controller/src/api-lib",
-            "controller/src/config"
+            "controller/src/config",
+            "controller/src/schema"
         ],
         "scons_test_targets" : [
             "controller/src/config/svc_monitor:test",
             "controller/src/config/schema-transformer:test",
             "controller/src/api-lib:test",
-            "controller/src/config/api-server:test"
+            "controller/src/discovery:test",
+            "controller/src/config/api-server:test",
+            "controller/src/config/vnc_openstack:test"
         ],
         "misc_test_targets" : [ ]
     },
@@ -52,8 +54,16 @@
         "environment" : [
             {
                 "tuples" : [
-                    "NO_HEAPCHECK=TRUE",
-                    "TASK_UTIL_DEFAULT_RETRY_COUNT=6000",
+                    "NO_HEAPCHECK=TRUE"
+                ],
+                "tests" : [
+                    ".*/bgp/test/bgp_xmpp_inetvpn_test$",
+                    ".*/bgp/test/graceful_restart_test$"
+                ]
+            },
+            {
+                "tuples" : [
+                    "TASK_UTIL_RETRY_COUNT=6000",
                     "TASK_UTIL_WAIT_TIME=10000",
                     "WAIT_FOR_IDLE=60",
                     "LOG_DISABLE=TRUE"
@@ -63,6 +73,7 @@
                     ".*/bgp/test/bgp_authentication_test$",
                     ".*/bgp/test/bgp_evpn_manager_test$",
                     ".*/bgp/test/bgp_server_test$",
+                    ".*/bgp/test/bgp_stress_test$",
                     ".*/bgp/test/bgp_show_neighbor_test$",
                     ".*/bgp/test/bgp_show_evpn_table_test$",
                     ".*/bgp/test/bgp_show_route_summary_test$",
@@ -94,6 +105,15 @@
         ],
         "misc_test_targets" : [ ]
     },
+    "contrail-nodemgr" : {
+        "source_directories" : [
+            "controller/src/nodemgr"
+        ],
+        "scons_test_targets" : [
+            "contrail-nodemgr:test"
+        ],
+        "misc_test_targets" : [ ]
+    },
     "contrail-libs" : {
         "source_directories" : [
             "controller/src/base",
@@ -118,7 +138,6 @@
             "controller/src/db:test",
             "controller/src/discovery:test",
             "controller/src/database/gendb:test",
-            "controller/src/database/cassandra/thrift:test",
             "controller/src/database/cassandra/cql:test",
             "controller/src/zookeeper:test",
             "controller/src/io:test",

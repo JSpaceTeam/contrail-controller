@@ -76,18 +76,22 @@ void ContrailAgentInit::CreateModules() {
     agent()->set_uve(uve_.get());
 
     if (agent()->tsn_enabled() == false) {
-        stats_collector_.reset(new AgentStatsCollector(
-                                   *(agent()->event_manager()->io_service()),
-                                     agent()));
+        stats_collector_.reset(new AgentStatsCollector
+                                   (*(agent()->event_manager()->io_service()),
+                                    agent()));
         agent()->set_stats_collector(stats_collector_.get());
-        flow_stats_manager_.reset(new FlowStatsManager(agent()));
-        flow_stats_manager_->Init(agent()->params()->flow_stats_interval(),
-                                 agent()->params()->flow_cache_timeout());
-        agent()->set_flow_stats_manager(flow_stats_manager_.get());
     }
+    flow_stats_manager_.reset(new FlowStatsManager(agent()));
+    flow_stats_manager_->Init(agent()->params()->flow_stats_interval(),
+                              agent()->params()->flow_cache_timeout());
+    agent()->set_flow_stats_manager(flow_stats_manager_.get());
 
     ksync_.reset(AgentObjectFactory::Create<KSync>(agent()));
     agent()->set_ksync(ksync_.get());
+
+    port_ipc_handler_.reset(new PortIpcHandler(agent(),
+                                               PortIpcHandler::kPortsDir));
+    agent()->set_port_ipc_handler(port_ipc_handler_.get());
 
     rest_server_.reset(new RESTServer(agent()));
     agent()->set_rest_server(rest_server_.get());
@@ -132,9 +136,10 @@ void ContrailAgentInit::InitDone() {
     ContrailInitCommon::InitDone();
 
     /* Reads and processes port information written by nova-compute */
-    PortIpcHandler pih(agent(), PortIpcHandler::kPortsDir,
-                       !agent_param()->vrouter_on_host_dpdk());
-    pih.ReloadAllPorts();
+    PortIpcHandler *pih = agent()->port_ipc_handler();
+    if (pih) {
+        pih->ReloadAllPorts(!agent_param()->vrouter_on_host_dpdk());
+    }
 }
 
 void ContrailAgentInit::ModulesShutdown() {
@@ -142,5 +147,9 @@ void ContrailAgentInit::ModulesShutdown() {
 
     if (agent()->rest_server()) {
         agent()->rest_server()->Shutdown();
+    }
+
+    if (agent()->port_ipc_handler()) {
+        agent()->port_ipc_handler()->Shutdown();
     }
 }

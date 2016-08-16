@@ -69,6 +69,7 @@ public:
     virtual BgpServer *server() {
         return NULL;
     }
+    virtual BgpServer *server() const { return NULL; }
     virtual IPeerClose *peer_close() {
         return NULL;
     }
@@ -82,8 +83,7 @@ public:
         return true;
     }
     virtual bool IsXmppPeer() const { return false; }
-    virtual void Close() {
-    }
+    virtual void Close(bool non_graceful) { }
     BgpProto::BgpPeerType PeerType() const {
         return BgpProto::IBGP;
     }
@@ -93,14 +93,15 @@ public:
     virtual const std::string GetStateName() const {
         return "";
     }
-    virtual void UpdateRefCount(int count) const { }
-    virtual tbb::atomic<int> GetRefCount() const {
-        tbb::atomic<int> count;
-        count = 0;
-        return count;
-    }
+    virtual void UpdateTotalPathCount(int count) const { }
+    virtual int GetTotalPathCount() const { return 0; }
     virtual void UpdatePrimaryPathCount(int count) const { }
     virtual int GetPrimaryPathCount() const { return 0; }
+    virtual bool IsRegistrationRequired() const { return true; }
+    virtual void MembershipRequestCallback(BgpTable *table) { }
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+        BgpRoute *route, BgpPath *path) { return false; }
+    virtual bool CanUseMembershipManager() const { return true; }
 
 private:
     Ip4Address address_;
@@ -121,7 +122,9 @@ static const char *bgp_server_config = "\
 
 class RoutingPolicyTest : public ::testing::Test {
 protected:
-    RoutingPolicyTest() : bgp_server_(new BgpServer(&evm_)),
+    RoutingPolicyTest()
+      : config_db_(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable")),
+        bgp_server_(new BgpServer(&evm_)),
         parser_(&config_db_) {
         IFMapLinkTable_Init(&config_db_, &config_graph_);
         vnc_cfg_Server_ModuleInit(&config_db_, &config_graph_);
@@ -2493,6 +2496,131 @@ TEST_F(RoutingPolicyTest, ProtocolMatchStaticRoute) {
 
     DeleteRoute<InetDefinition>(peers_[0], "nat.inet.0", "192.168.1.1/32");
     DeleteRoute<InetDefinition>(peers_[0], "nat.inet.0", "192.168.1.254/32");
+}
+
+//
+// 1. two routing instance test_0 and test_1
+// 2. Routing instnaces are connected with each other,
+// 3. two routing policies to edit local pref of matching route.
+// With above configuration, validate that route notify doesn't trigger
+// re-addition of replicated route paths.
+//
+TEST_F(RoutingPolicyTest, Policy_RouteReplicate) {
+    string content =
+        FileRead("controller/src/bgp/testdata/routing_policy_7i.xml");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    ifmap_test_util::IFMapMsgLink(&config_db_, "routing-instance", "test_0",
+                                  "routing-instance", "test_1", "connection");
+    boost::system::error_code ec;
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.1", ec)));
+    peers_.push_back(
+        new BgpPeerMock(Ip4Address::from_string("192.168.0.2", ec)));
+
+    AddRoute<Inet6Definition>(peers_[0], "test_0.inet6.0",
+                  "2001:db8:85a3::8a2e:370:7335/128", 100, list_of("23:13"));
+    AddRoute<Inet6Definition>(peers_[1], "test_1.inet6.0",
+                  "2001:db8:85a3::8a2e:370:7335/128", 100, list_of("23:13"));
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(1, RouteCount("test_1.inet6.0"));
+    VERIFY_EQ(1, RouteCount("test_0.inet6.0"));
+    BgpRoute *rt = RouteLookup<Inet6Definition>("test_0.inet6.0",
+                                            "2001:db8:85a3::8a2e:370:7335/128");
+    ASSERT_TRUE(rt != NULL);
+    ASSERT_TRUE(rt->count() == 2);
+    VERIFY_EQ(peers_[0], rt->BestPath()->GetPeer());
+    ASSERT_TRUE(rt->BestPath()->IsFeasible() == true);
+    const BgpAttr *attr = rt->BestPath()->GetAttr();
+    const BgpAttr *orig_attr = rt->BestPath()->GetOriginalAttr();
+    uint32_t original_local_pref = orig_attr->local_pref();
+    uint32_t policy_local_pref = attr->local_pref();
+    ASSERT_TRUE(policy_local_pref == 200);
+    ASSERT_TRUE(original_local_pref == 100);
+
+    // Take the time stamp of the replicated path on the route.
+    // This will be compared with replicated path after triggering dummy
+    // notification of the primary route.
+    uint64_t rt1_replicated_path_time_stamp;
+    for (Route::PathList::iterator it = rt->GetPathList().begin();
+         it != rt->GetPathList().end(); it++) {
+        BgpPath *path = static_cast<BgpPath *>(it.operator->());
+        if (path->IsReplicated())
+            rt1_replicated_path_time_stamp = path->time_stamp_usecs();
+    }
+
+    rt = RouteLookup<Inet6Definition>("test_1.inet6.0",
+                                      "2001:db8:85a3::8a2e:370:7335/128");
+    ASSERT_TRUE(rt != NULL);
+    ASSERT_TRUE(rt->count() == 2);
+    VERIFY_EQ(peers_[0], rt->BestPath()->GetPeer());
+    ASSERT_TRUE(rt->BestPath()->IsFeasible() == true);
+    attr = rt->BestPath()->GetAttr();
+    orig_attr = rt->BestPath()->GetOriginalAttr();
+    original_local_pref = orig_attr->local_pref();
+    policy_local_pref = attr->local_pref();
+    ASSERT_TRUE(policy_local_pref == 50);
+    ASSERT_TRUE(original_local_pref == 200);
+
+    uint64_t rt2_replicated_path_time_stamp;
+    for (Route::PathList::iterator it = rt->GetPathList().begin();
+         it != rt->GetPathList().end(); it++) {
+        BgpPath *path = static_cast<BgpPath *>(it.operator->());
+        if (path->IsReplicated())
+            rt2_replicated_path_time_stamp = path->time_stamp_usecs();
+    }
+
+    // Trigger dummy change notification on the primary routes
+    AddRoute<Inet6Definition>(peers_[0], "test_0.inet6.0",
+                  "2001:db8:85a3::8a2e:370:7335/128", 100, list_of("23:13"));
+    AddRoute<Inet6Definition>(peers_[1], "test_1.inet6.0",
+                  "2001:db8:85a3::8a2e:370:7335/128", 100, list_of("23:13"));
+    task_util::WaitForIdle();
+
+    VERIFY_EQ(1, RouteCount("test_1.inet6.0"));
+    VERIFY_EQ(1, RouteCount("test_0.inet6.0"));
+
+    rt = RouteLookup<Inet6Definition>("test_0.inet6.0",
+                                            "2001:db8:85a3::8a2e:370:7335/128");
+    ASSERT_TRUE(rt != NULL);
+    ASSERT_TRUE(rt->count() == 2);
+
+    uint64_t rt1_replicated_path_time_stamp_after_change;
+    for (Route::PathList::iterator it = rt->GetPathList().begin();
+         it != rt->GetPathList().end(); it++) {
+        BgpPath *path = static_cast<BgpPath *>(it.operator->());
+        if (path->IsReplicated())
+            rt1_replicated_path_time_stamp_after_change
+                = path->time_stamp_usecs();
+    }
+    ASSERT_TRUE(rt1_replicated_path_time_stamp_after_change
+                == rt1_replicated_path_time_stamp);
+
+    rt = RouteLookup<Inet6Definition>("test_1.inet6.0",
+                                      "2001:db8:85a3::8a2e:370:7335/128");
+    ASSERT_TRUE(rt != NULL);
+    ASSERT_TRUE(rt->count() == 2);
+
+    uint64_t rt2_replicated_path_time_stamp_after_change;
+    for (Route::PathList::iterator it = rt->GetPathList().begin();
+         it != rt->GetPathList().end(); it++) {
+        BgpPath *path = static_cast<BgpPath *>(it.operator->());
+        if (path->IsReplicated())
+            rt2_replicated_path_time_stamp_after_change
+                = path->time_stamp_usecs();
+    }
+    ASSERT_TRUE(rt2_replicated_path_time_stamp_after_change
+                == rt2_replicated_path_time_stamp);
+
+    DeleteRoute<Inet6Definition>(peers_[0], "test_0.inet6.0",
+                             "2001:db8:85a3::8a2e:370:7335/128");
+    DeleteRoute<Inet6Definition>(peers_[1], "test_1.inet6.0",
+                             "2001:db8:85a3::8a2e:370:7335/128");
+    task_util::WaitForIdle();
+    ifmap_test_util::IFMapMsgUnlink(&config_db_, "routing-instance", "test_0",
+                                  "routing-instance", "test_1", "connection");
 }
 
 static void ValidateShowRoutingPolicyResponse(

@@ -36,8 +36,40 @@
 class FlowTableKSyncEntry;
 class FlowEntry;
 struct FlowExportInfo;
-class KSyncFlowIndexEntry;
 class FlowStatsCollector;
+class FlowToken;
+class FlowMgmtRequest;
+class FlowEntryInfo;
+typedef std::auto_ptr<FlowEntryInfo> FlowMgmtEntryInfoPtr;
+
+////////////////////////////////////////////////////////////////////////////
+// This is helper struct to carry parameters of reverse-flow. When flow is
+// being deleted, the relationship between forward and reverse flows are
+// broken. However, some info of reverse flow is needed during export of flows
+// for FlowStatsCollector. This information of reverse flow is carried in the
+// following struct.
+////////////////////////////////////////////////////////////////////////////
+struct RevFlowDepParams {
+    uuid rev_uuid_;
+    uuid rev_egress_uuid_;
+    IpAddress sip_;
+    std::string vmi_uuid_;
+    std::string sg_uuid_;
+    std::string vm_cfg_name_;
+
+    RevFlowDepParams() : rev_uuid_(), rev_egress_uuid_(), sip_(), vmi_uuid_(),
+                         sg_uuid_(), vm_cfg_name_() {
+    }
+
+    RevFlowDepParams(const uuid &rev_uuid, const uuid &rev_egress_uuid,
+                     IpAddress sip,
+                     const std::string &vmi_uuid,
+                     const std::string &sg_uuid,
+                     const std::string &vm_cfg_name) : rev_uuid_(rev_uuid),
+        rev_egress_uuid_(rev_egress_uuid), sip_(sip), vmi_uuid_(vmi_uuid),
+        sg_uuid_(sg_uuid), vm_cfg_name_(vm_cfg_name) {
+    }
+};
 
 ////////////////////////////////////////////////////////////////////////////
 // Helper class to manage following,
@@ -254,7 +286,6 @@ struct FlowData {
     uint8_t dest_plen;
     uint16_t drop_reason;
     bool vrf_assign_evaluated;
-    bool pending_recompute;
     uint32_t            if_index_info;
     TunnelInfo          tunnel_info;
     // map for references to the routes which were ignored due to more specific
@@ -267,8 +298,103 @@ struct FlowData {
     std::string vm_cfg_name;
     uint32_t ecmp_rpf_nh_;
     uint32_t acl_assigned_vrf_index_;
+    uint32_t qos_config_idx;
     // IMPORTANT: Keep this structure assignable. Assignment operator is used in
     // FlowEntry::Copy() on this structure
+};
+
+struct FlowEventLog {
+    enum Event {
+        FLOW_ADD,
+        FLOW_UPDATE,
+        FLOW_DELETE,
+        FLOW_EVICT,
+        FLOW_HANDLE_ASSIGN,
+        FLOW_MSG_SKIP_EVICTED,
+        EVENT_MAX
+    };
+
+    FlowEventLog();
+    ~FlowEventLog();
+
+    uint64_t time_;
+    Event event_;
+    uint32_t flow_handle_;
+    uint8_t flow_gen_id_;
+    FlowTableKSyncEntry *ksync_entry_;
+    uint32_t hash_id_;
+    uint8_t gen_id_;
+    uint32_t vrouter_flow_handle_;
+    uint8_t vrouter_gen_id_;
+};
+
+// There are 4 actions supported,
+// Flow recomputation goes thru 2 stages of processing,
+//
+// - recompute_dbentry_ : In this stage, flow is enqueued to flow-update-queue
+//                        as a result of db-entry add/delete/change.
+// - recompute_         : In this stage, flow is enqueued to flow-event-queue
+//                        for recomputation of flow
+// - delete_            : Specifies that delete action is pending on flow.
+// - recompute_         : Specifies that flow is enqueued into flow-event-queue
+//                        for recomputation.
+//
+// The actions have a priority, the higher priorty action overrides lower
+// priority actions. The priority in decreasing order is,
+// - delete_
+// - recompute_
+// - recompute_dbentry_
+// - revaluate_
+//
+// The flags are also used for state-compression of objects. The state
+// compression is acheived with,
+//
+// - Before Event Enqueue :
+//   Before enqueuing an event, the FlowEvent module checks if the
+//   corresponding action or higher priority action is pending. If so, the
+//   event is ignored.
+//   Note, if the lower priority event is pending, the higher priority event
+//   is still enqueued. The lower priority event is ignored later as given below
+//
+// - On Event dequeue :
+//   After dequeuing an event, FlowEvent module checks if a higher priority
+//   event is pending. If so, the current event is ignored.
+//
+// - Post Event processing:
+//   Once the event is processed, the corresponding action is cleared for both
+//   forward and reverse flows. Clearing an action also clears lower priority
+//   actions
+class FlowPendingAction {
+public:
+    FlowPendingAction();
+    ~FlowPendingAction();
+
+    void Reset();
+
+    bool CanDelete();
+    bool SetDelete();
+    void ResetDelete();
+
+    bool CanRecompute();
+    bool SetRecompute();
+    void ResetRecompute();
+
+    bool CanRecomputeDBEntry();
+    bool SetRecomputeDBEntry();
+    void ResetRecomputeDBEntry();
+
+    bool CanRevaluate();
+    bool SetRevaluate();
+    void ResetRevaluate();
+private:
+    // delete pending
+    bool delete_;
+    // Flow pending complete recompute
+    bool recompute_;
+    // Flow pending recompute-dbentry
+    bool recompute_dbentry_;
+    // Flow pending revaluation due to change in interface, vn, acl and nh
+    bool revaluate_;
 };
 
 class FlowEntry {
@@ -291,6 +417,9 @@ class FlowEntry {
         SHORT_LINKLOCAL_SRC_NAT,
         SHORT_FAILED_VROUTER_INSTALL,
         SHORT_INVALID_L2_FLOW,
+        SHORT_FLOW_ON_TSN,
+        SHORT_NO_MIRROR_ENTRY,
+        SHORT_SAME_FLOW_RFLOW_KEY,
         SHORT_MAX
     };
 
@@ -321,7 +450,7 @@ class FlowEntry {
     static const uint8_t kMaxMirrorsPerFlow=0x2;
     static const std::map<FlowPolicyState, const char*> FlowPolicyStateStr;
     static const std::map<uint16_t, const char*> FlowDropReasonStr;
-
+    static const uint32_t kFlowRetryAttempts = 5;
     // Don't go beyond PCAP_END, pcap type is one byte
     enum PcapType {
         PCAP_CAPTURE_HOST = 1,
@@ -346,6 +475,7 @@ class FlowEntry {
         TcpAckFlow      = 1 << 10,
         UnknownUnicastFlood = 1 << 11,
         BgpRouterService   = 1 << 12,
+        AliasIpFlow     = 1 << 13
     };
 
     FlowEntry(FlowTable *flow_table);
@@ -365,7 +495,7 @@ class FlowEntry {
                      const PktControlInfo *ctrl,
                      const PktControlInfo *rev_ctrl, FlowEntry *rflow,
                      Agent *agent);
-    void InitAuditFlow(uint32_t flow_idx);
+    void InitAuditFlow(uint32_t flow_idx, uint8_t gen_id);
     static void Init();
 
     static AgentRoute *GetL2Route(const VrfEntry *entry, const MacAddress &mac);
@@ -382,8 +512,9 @@ class FlowEntry {
     const FlowData &data() const { return data_;}
     FlowTable *flow_table() const { return flow_table_; }
     bool l3_flow() const { return l3_flow_; }
+    uint8_t gen_id() const { return gen_id_; }
     uint32_t flow_handle() const { return flow_handle_; }
-    void set_flow_handle(uint32_t flow_handle);
+    void set_flow_handle(uint32_t flow_handle, uint8_t gen_id);
     FlowEntry *reverse_flow_entry() { return reverse_flow_entry_.get(); }
     uint32_t flags() const { return flags_; }
     const FlowEntry *reverse_flow_entry() const {
@@ -414,13 +545,13 @@ class FlowEntry {
     VmInterfaceKey reverse_flow_vmi() const;
     void UpdateFipStatsInfo(uint32_t fip, uint32_t id, Agent *agent);
     const boost::uuids::uuid &uuid() const { return uuid_; }
+    const boost::uuids::uuid &egress_uuid() const { return egress_uuid_;}
     const std::string &sg_rule_uuid() const { return sg_rule_uuid_; }
     const std::string &nw_ace_uuid() const { return nw_ace_uuid_; }
     const std::string &peer_vrouter() const { return peer_vrouter_; }
     TunnelType tunnel_type() const { return tunnel_type_; }
 
     uint16_t short_flow_reason() const { return short_flow_reason_; }
-    bool set_pending_recompute(bool value);
     const MacAddress &smac() const { return data_.smac; }
     const MacAddress &dmac() const { return data_.dmac; }
     bool on_tree() const { return on_tree_; }
@@ -440,6 +571,10 @@ class FlowEntry {
     }
     const MatchPolicy &match_p() const { return data_.match_p; }
 
+    bool ActionSet(TrafficAction::Action action) const {
+        return ((data_.match_p.action_info.action & 
+                 (1 << action)) ? true : false);
+    }
     bool ImplicitDenyFlow() const { 
         return ((data_.match_p.action_info.action & 
                  (1 << TrafficAction::IMPLICIT_DENY)) ? true : false);
@@ -465,6 +600,7 @@ class FlowEntry {
     void GetPolicyInfo(const FlowEntry *rflow);
     void GetPolicyInfo(const VnEntry *vn);
     void GetPolicyInfo();
+    void UpdateL2RouteInfo();
     void GetVrfAssignAcl();
     void SetMirrorVrf(const uint32_t id) {data_.mirror_vrf = id;}
 
@@ -482,7 +618,7 @@ class FlowEntry {
                                FlowSandeshData &fe_sandesh_data,
                                Agent *agent) const;
     uint32_t InterfaceKeyToId(Agent *agent, const VmInterfaceKey &key);
-    KSyncFlowIndexEntry *ksync_index_entry() { return ksync_index_entry_.get();}
+    FlowTableKSyncEntry *ksync_entry() { return ksync_entry_; }
     FlowStatsCollector* fsc() const {
         return fsc_;
     }
@@ -492,10 +628,36 @@ class FlowEntry {
     }
     static std::string DropReasonStr(uint16_t reason);
     std::string KeyString() const;
+    void SetEventSandeshData(SandeshFlowIndexInfo *info);
+    void LogFlow(FlowEventLog::Event event, FlowTableKSyncEntry* ksync,
+                 uint32_t flow_handle, uint8_t gen_id);
+    void RevFlowDepInfo(RevFlowDepParams *params);
+    uint32_t last_event() const { return last_event_; }
+    void set_last_event(uint32_t event) { last_event_ = event; }
+    uint8_t GetMaxRetryAttempts() { return flow_retry_attempts_; }
+    void  IncrementRetrycount() { flow_retry_attempts_++;}
+    void ResetRetryCount(){ flow_retry_attempts_ = 0; }
+    bool IsOnUnresolvedList(){ return is_flow_on_unresolved_list;}
+    void SetUnResolvedList(bool added){ is_flow_on_unresolved_list = added;}
+    FlowPendingAction *GetPendingAction() { return &pending_actions_; }
+    bool trace() const { return trace_; }
+    void set_trace(bool val) { trace_ = val; }
+
+    FlowMgmtRequest *flow_mgmt_request() const { return flow_mgmt_request_; }
+    void set_flow_mgmt_request(FlowMgmtRequest *req) {
+        flow_mgmt_request_ = req;
+    }
+
+    FlowEntryInfo *flow_mgmt_info() const { return flow_mgmt_info_.get(); }
+    void set_flow_mgmt_info(FlowEntryInfo *info) {
+        flow_mgmt_info_.reset(info);
+    }
 private:
     friend class FlowTable;
     friend class FlowEntryFreeList;
     friend class FlowStatsCollector;
+    friend class KSyncFlowIndexManager;
+
     friend void intrusive_ptr_add_ref(FlowEntry *fe);
     friend void intrusive_ptr_release(FlowEntry *fe);
     bool SetRpfNH(FlowTable *ft, const AgentRoute *rt);
@@ -516,11 +678,14 @@ private:
     void SetRemoteFlowEcmpIndex();
     void SetLocalFlowEcmpIndex();
     void set_ecmp_rpf_nh() const;
-
+    bool SetQosConfigIndex();
+    void SetSgAclInfo(const FlowPolicyInfo &fwd_flow_info,
+                      const FlowPolicyInfo &rev_flow_info, bool tcp_rev_sg);
     FlowKey key_;
     FlowTable *flow_table_;
     FlowData data_;
     bool l3_flow_;
+    uint8_t gen_id_;
     uint32_t flow_handle_;
     FlowEntryPtr reverse_flow_entry_;
     static tbb::atomic<int> alloc_count_;
@@ -528,6 +693,7 @@ private:
     uint32_t flags_;
     uint16_t short_flow_reason_;
     boost::uuids::uuid uuid_;
+    boost::uuids::uuid egress_uuid_;
     std::string sg_rule_uuid_;
     std::string nw_ace_uuid_;
     //IP address of the src vrouter for egress flows and dst vrouter for
@@ -540,16 +706,32 @@ private:
     // Following fields are required for FIP stats accounting
     uint32_t fip_;
     VmInterfaceKey fip_vmi_;
-    // KSync state for the flow
-    std::auto_ptr<KSyncFlowIndexEntry> ksync_index_entry_;
+    // Ksync entry for the flow
+    FlowTableKSyncEntry *ksync_entry_;
     // atomic refcount
     tbb::atomic<int> refcount_;
     tbb::mutex mutex_;
     boost::intrusive::list_member_hook<> free_list_node_;
     FlowStatsCollector *fsc_;
+    uint32_t last_event_;
+    bool trace_;
+    boost::scoped_array<FlowEventLog> event_logs_;
+    uint16_t event_log_index_;
+    FlowPendingAction pending_actions_;
+    static SecurityGroupList default_sg_list_;
+    uint8_t flow_retry_attempts_;
+    bool is_flow_on_unresolved_list;
+    // flow_mgmt_request used for compressing events to flow-mgmt queue.
+    // flow_mgmt_request_ is set when flow is enqueued to flow-mgmt queue. No
+    // subsequent enqueues are done till this field is set. The request can be
+    // updated with new values to reflect latest state
+    FlowMgmtRequest *flow_mgmt_request_;
+
+    // Field used by flow-mgmt module. Its stored here to optimize flow-mgmt
+    // and avoid lookups
+    FlowMgmtEntryInfoPtr flow_mgmt_info_;
     // IMPORTANT: Remember to update Reset() routine if new fields are added
     // IMPORTANT: Remember to update Copy() routine if new fields are added
-    static SecurityGroupList default_sg_list_;
 };
  
 void intrusive_ptr_add_ref(FlowEntry *fe);

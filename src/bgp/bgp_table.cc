@@ -6,13 +6,18 @@
 
 #include <boost/foreach.hpp>
 
+#include "sandesh/sandesh_types.h"
+#include "sandesh/sandesh.h"
+#include "sandesh/sandesh_trace.h"
 #include "base/task_annotations.h"
 #include "bgp/bgp_log.h"
-#include "bgp/bgp_peer_membership.h"
+#include "bgp/bgp_membership.h"
+#include "bgp/bgp_peer_types.h"
 #include "bgp/bgp_ribout.h"
 #include "bgp/bgp_ribout_updates.h"
 #include "bgp/bgp_route.h"
 #include "bgp/bgp_server.h"
+#include "bgp/bgp_table_types.h"
 #include "bgp/bgp_update_queue.h"
 #include "bgp/routing-instance/iroute_aggregator.h"
 #include "bgp/routing-instance/path_resolver.h"
@@ -56,6 +61,7 @@ BgpTable::BgpTable(DB *db, const string &name)
     : RouteTable(db, name),
       rtinstance_(NULL),
       path_resolver_(NULL),
+      stats_(new BgpTableStats()),
       instance_delete_ref_(this, NULL) {
     primary_path_count_ = 0;
     secondary_path_count_ = 0;
@@ -77,9 +83,6 @@ void BgpTable::set_routing_instance(RoutingInstance *rtinstance) {
     assert(rtinstance);
     deleter_.reset(new DeleteActor(this));
     instance_delete_ref_.Reset(rtinstance->deleter());
-    path_resolver_ = CreatePathResolver();
-    if (IsRouteAggregationSupported())
-        rtinstance->route_aggregator(family())->Initialize();
 }
 
 BgpServer *BgpTable::server() {
@@ -125,6 +128,83 @@ void BgpTable::RibOutDelete(const RibExportPolicy &policy) {
     ribout_map_.erase(loc);
 }
 
+//
+// Process Remove Private information.
+//
+void BgpTable::ProcessRemovePrivate(const RibOut *ribout, BgpAttr *attr) const {
+    if (!ribout->remove_private_enabled())
+        return;
+
+    bool all = ribout->remove_private_all();
+    bool replace = ribout->remove_private_replace();
+    bool peer_loop_check = ribout->remove_private_peer_loop_check();
+
+    as_t replace_asn = replace ? server()->local_autonomous_system() : 0;
+    as_t peer_asn = peer_loop_check ? ribout->peer_as() : 0;
+
+    const AsPathSpec &spec = attr->as_path()->path();
+    AsPathSpec *new_spec = spec.RemovePrivate(all, replace_asn, peer_asn);
+    attr->set_as_path(new_spec);
+    delete new_spec;
+}
+
+//
+// Process Long Lived Graceful Restart state information.
+//
+// For LLGR_STALE paths, if the peer supports LLGR then attach LLGR_STALE
+// community. Otherwise, strip LLGR_STALE community, reduce LOCAL_PREF and
+// attach NO_EXPORT community instead.
+//
+void BgpTable::ProcessLlgrState(const RibOut *ribout, const BgpPath *path,
+                                BgpAttr *attr) {
+    if (!server() || !server()->comm_db())
+        return;
+
+    // Skip LLGR specific attributes manipulation for rtarget routes.
+    if (family() == Address::RTARGET)
+        return;
+
+    bool llgr_stale_comm = attr->community() &&
+        attr->community()->ContainsValue(CommunityType::LlgrStale);
+
+    // If the path is not marked as llgr_stale or if it does not have the
+    // LLGR_STALE community, then no action is necessary.
+    if (!path->IsLlgrStale() && !llgr_stale_comm)
+        return;
+
+    // If peers support LLGR, then attach LLGR_STALE community and return.
+    if (ribout->llgr()) {
+        if (!llgr_stale_comm) {
+            CommunityPtr comm = server()->comm_db()->AppendAndLocate(
+                    attr->community(), CommunityType::LlgrStale);
+            attr->set_community(comm);
+        }
+        return;
+    }
+
+    // Peers do not understand LLGR. Bring down local preference instead to
+    // make the advertised path less preferred.
+    attr->set_local_pref(0);
+
+    // Remove LLGR_STALE community as the peers do not support LLGR.
+    if (llgr_stale_comm) {
+        CommunityPtr comm = server()->comm_db()->RemoveAndLocate(
+                                attr->community(), CommunityType::LlgrStale);
+        attr->set_community(comm);
+    }
+
+    // Attach NO_EXPORT community as well to make sure that this path does not
+    // exits local AS, unless it is already present.
+    if (!attr->community() ||
+        !attr->community()->ContainsValue(CommunityType::NoExport)) {
+        CommunityPtr comm = server()->comm_db()->AppendAndLocate(
+                                attr->community(), CommunityType::NoExport);
+        attr->set_community(comm);
+    }
+
+    return;
+}
+
 UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
         const RibPeerSet &peerset) {
     const BgpPath *path = route->BestPath();
@@ -167,6 +247,7 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
         }
 
         const IPeer *peer = path->GetPeer();
+        BgpAttr *clone = NULL;
         if (ribout->peer_type() == BgpProto::IBGP) {
             // Split horizon check.
             if (peer && peer->PeerType() == BgpProto::IBGP)
@@ -180,11 +261,15 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
                     return NULL;
             }
 
-            BgpAttr *clone = new BgpAttr(*attr);
+            clone = new BgpAttr(*attr);
 
             // Retain LocalPref value if set, else set default to 100.
             if (clone->local_pref() == 0)
                 clone->set_local_pref(100);
+
+            // Should not normally be needed for iBGP, but there could be
+            // complex configurations where this is useful.
+            ProcessRemovePrivate(ribout, clone);
 
             // If the route is locally originated i.e. there's no AsPath,
             // then generate a Nil AsPath i.e. one with 0 length. No need
@@ -194,9 +279,6 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
                 AsPathSpec as_path;
                 clone->set_as_path(&as_path);
             }
-
-            attr_ptr = clone->attr_db()->Locate(clone);
-            attr = attr_ptr.get();
         } else if (ribout->peer_type() == BgpProto::EBGP) {
             // Don't advertise routes from non-master instances if there's
             // no nexthop. The ribout has to be for bgpaas-clients because
@@ -228,7 +310,7 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
                 }
             }
 
-            BgpAttr *clone = new BgpAttr(*attr);
+            clone = new BgpAttr(*attr);
 
             // Remove non-transitive attributes.
             // Note that med is handled further down.
@@ -262,6 +344,9 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
                 delete as_path_ptr;
             }
 
+            // Remove private processing must happen before local AS prepend.
+            ProcessRemovePrivate(ribout, clone);
+
             // Prepend the local AS to AsPath.
             if (clone->as_path() != NULL) {
                 const AsPathSpec &as_path = clone->as_path()->path();
@@ -274,10 +359,14 @@ UpdateInfo *BgpTable::GetUpdateInfo(RibOut *ribout, BgpRoute *route,
                 clone->set_as_path(as_path_ptr);
                 delete as_path_ptr;
             }
-
-            attr_ptr = clone->attr_db()->Locate(clone);
-            attr = attr_ptr.get();
         }
+
+        assert(clone);
+        ProcessLlgrState(ribout, path, clone);
+
+        // Locate the new BgpAttrPtr.
+        attr_ptr = clone->attr_db()->Locate(clone);
+        attr = attr_ptr.get();
     }
 
     UpdateInfo *uinfo = new UpdateInfo;
@@ -296,6 +385,11 @@ bool BgpTable::PathSelection(const Path &path1, const Path &path2) {
     bool res = l_path.PathCompare(r_path, false) < 0;
 
     return res;
+}
+
+bool BgpTable::DeletePath(DBTablePartBase *root, BgpRoute *rt, BgpPath *path) {
+    return InputCommon(root, rt, path, path->GetPeer(), NULL,
+        DBRequest::DB_ENTRY_DELETE, NULL, path->GetPathId(), 0, 0);
 }
 
 bool BgpTable::InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
@@ -379,8 +473,7 @@ void BgpTable::Input(DBTablePartition *root, DBClient *client,
         // and route add is from the same incarnation of VRF subscription
         //
         if (peer->IsXmppPeer() && peer->IsRegistrationRequired()) {
-            PeerRibMembershipManager *mgr =
-                rtinstance_->server()->membership_mgr();
+            BgpMembershipManager *mgr = rtinstance_->server()->membership_mgr();
             int instance_id = -1;
             uint64_t subscription_gen_id = 0;
             bool is_registered =
@@ -532,7 +625,10 @@ bool BgpTable::MayDelete() const {
 
     // Check the base class at the end so that we add custom checks
     // before this if needed and to get more informative log message.
-    return DBTableBase::MayDelete();
+    if (!DBTableBase::MayDelete())
+        return false;
+
+    return true;
 }
 
 void BgpTable::Shutdown() {
@@ -558,6 +654,13 @@ PathResolver *BgpTable::CreatePathResolver() {
     return NULL;
 }
 
+void BgpTable::LocatePathResolver() {
+    if (path_resolver_)
+        return;
+    assert(!deleter()->IsDeleted());
+    path_resolver_ = CreatePathResolver();
+}
+
 void BgpTable::DestroyPathResolver() {
     if (!path_resolver_)
         return;
@@ -566,7 +669,7 @@ void BgpTable::DestroyPathResolver() {
 }
 
 size_t BgpTable::GetPendingRiboutsCount(size_t *markers) const {
-    CHECK_CONCURRENCY("bgp::ShowCommand", "bgp::Config");
+    CHECK_CONCURRENCY("bgp::ShowCommand", "bgp::Config", "bgp::Uve");
     size_t count = 0;
     *markers = 0;
 
@@ -612,4 +715,12 @@ bool BgpTable::IsAggregateRoute(const BgpRoute *route) const {
 // Check whether the route is contributing route to aggregate route
 bool BgpTable::IsContributingRoute(const BgpRoute *route) const {
     return routing_instance()->IsContributingRoute(this, route);
+}
+
+void BgpTable::FillRibOutStatisticsInfo(
+    vector<ShowRibOutStatistics> *sros_list) const {
+    BOOST_FOREACH(const RibOutMap::value_type &value, ribout_map_) {
+        const RibOut *ribout = value.second;
+        ribout->FillStatisticsInfo(sros_list);
+    }
 }

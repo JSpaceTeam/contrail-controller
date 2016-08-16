@@ -9,7 +9,7 @@
 #include "base/task_annotations.h"
 #include "control-node/control_node.h"
 #include "bgp/bgp_factory.h"
-#include "bgp/bgp_peer_membership.h"
+#include "bgp/bgp_membership.h"
 #include "bgp/bgp_xmpp_channel.h"
 #include "bgp/test/bgp_server_test_util.h"
 #include "bgp/xmpp_message_builder.h"
@@ -34,6 +34,7 @@ public:
     bool Send(const uint8_t *, size_t, xmps::PeerId, SendReadyCb) {
         return true;
     }
+    int GetTaskInstance() const { return 0; }
     MOCK_METHOD2(RegisterReceive, void(xmps::PeerId, ReceiveCb));
     MOCK_METHOD1(UnRegisterReceive, void(xmps::PeerId));
     MOCK_METHOD1(UnRegisterWriteReady, void(xmps::PeerId));
@@ -92,6 +93,9 @@ public:
     virtual void RegisterRxMessageTraceCallback(RxMessageTraceCb cb) {
         return;
     }
+    virtual void RegisterTxMessageTraceCallback(TxMessageTraceCb cb) {
+        return;
+    }
 };
 
 class BgpXmppChannelMock : public BgpXmppChannel {
@@ -148,42 +152,28 @@ private:
     BgpServer *server_;
 };
 
-class RoutingInstanceManagerTest : public RoutingInstanceMgr {
+class BgpMembershipManagerTest : public BgpMembershipManager {
 public:
-    explicit RoutingInstanceManagerTest(BgpServer *server) :
-        RoutingInstanceMgr(server) {
+    explicit BgpMembershipManagerTest(BgpServer *server) :
+        BgpMembershipManager(server), registered(false) {
     }
-    virtual ~RoutingInstanceManagerTest() { }
-private:
-};
+    virtual ~BgpMembershipManagerTest() {
+    }
+    MOCK_METHOD2(Unregister, void(IPeer *, BgpTable *));
+    MOCK_METHOD4(
+        Register, void(IPeer *, BgpTable *, const RibExportPolicy &, int));
 
-class PeerRibMembershipManagerTest : public PeerRibMembershipManager {
-public:
-    explicit PeerRibMembershipManagerTest(BgpServer *server) :
-        PeerRibMembershipManager(server), registered(false), callback(NULL) {
+    void MockRegister(IPeer *peer, BgpTable *table,
+                      const RibExportPolicy &policy, int inst_id) {
+        BgpMembershipManager::Register(peer, table, policy, inst_id);
     }
-    virtual ~PeerRibMembershipManagerTest() {
-    }
-    MOCK_METHOD3(Unregister, void(IPeer *, BgpTable *,
-                                  MembershipRequest::NotifyCompletionFn));
-    MOCK_METHOD5(Register, void(IPeer *, BgpTable *, const RibExportPolicy &,
-                                int, MembershipRequest::NotifyCompletionFn));
-
-    void MockRegister(IPeer *peer, BgpTable *table, const RibExportPolicy &policy,
-                      int inst_id, MembershipRequest::NotifyCompletionFn fn) {
-        PeerRibMembershipManager::Register(peer, table, policy, inst_id, fn);
-        return;
-    }
-    void MockUnregister(IPeer *peer, BgpTable *table,
-                        MembershipRequest::NotifyCompletionFn fn) {
-        PeerRibMembershipManager::Unregister(peer, table, fn);
-        return;
+    void MockUnregister(IPeer *peer, BgpTable *table) {
+        BgpMembershipManager::Unregister(peer, table);
     }
 
 private:
     void TimerExpired(const boost::system::error_code &error);
     bool registered;
-    MembershipRequest::NotifyCompletionFn callback;
 };
 
 class BgpXmppChannelTest : public ::testing::Test {
@@ -196,7 +186,7 @@ public:
         EXPECT_FALSE(rt_instance == NULL);
         BgpTable *table = rt_instance->GetTable(Address::INET);
         bool ret =
-            server_->membership_mgr()->PeerRegistered(channel->Peer(), table);
+            server_->membership_mgr()->IsRegistered(channel->Peer(), table);
         if (check_registered == false) ret = !ret;
         return ret;
     }
@@ -205,10 +195,8 @@ public:
 protected:
     virtual void SetUp() {
         ConcurrencyScope scope("bgp::Config");
-        BgpObjectFactory::Register<RoutingInstanceMgr>(
-                boost::factory<RoutingInstanceManagerTest *>());
-        BgpObjectFactory::Register<PeerRibMembershipManager>(
-                boost::factory<PeerRibMembershipManagerTest *>());
+        BgpObjectFactory::Register<BgpMembershipManager>(
+                boost::factory<BgpMembershipManagerTest *>());
         server_.reset(new BgpServer(&evm_));
         enc_.reset(new XmppDocumentMock("agent.contrailsystems.com"));
 
@@ -386,18 +374,18 @@ TEST_F(BgpXmppChannelTest, Connection) {
     mgr_->RemoveChannel(c.get());
     EXPECT_EQ(2, Count(mgr_.get()));
 
-    PeerRibMembershipManagerTest *mock_manager =
-        static_cast<PeerRibMembershipManagerTest *>(server_->membership_mgr());
+    BgpMembershipManagerTest *mock_manager =
+        static_cast<BgpMembershipManagerTest *>(server_->membership_mgr());
     EXPECT_FALSE(mock_manager == NULL);
-    EXPECT_CALL(*mock_manager, Register(_, _, _, _,_))
+    EXPECT_CALL(*mock_manager, Register(_, _, _, _))
         .Times(4)
         .WillRepeatedly(Invoke(mock_manager,
-                         &PeerRibMembershipManagerTest::MockRegister))
+                         &BgpMembershipManagerTest::MockRegister))
         ;
-    EXPECT_CALL(*mock_manager, Unregister(_, _, _))
+    EXPECT_CALL(*mock_manager, Unregister(_, _))
         .Times(4)
         .WillRepeatedly(Invoke(mock_manager,
-                         &PeerRibMembershipManagerTest::MockUnregister))
+                         &BgpMembershipManagerTest::MockUnregister))
         ;
 
     // subscribe to routing instance purple

@@ -417,11 +417,16 @@ class UveStreamPart(gevent.Greenlet):
 
             except gevent.GreenletExit:
                 break
+            except redis.exceptions.ConnectionError:
+                pass
             except Exception as ex:
                 template = "Exception {0} in uve stream proc. Arguments:\n{1!r}"
                 messag = template.format(type(ex).__name__, ex.args)
-                self._logger.error("%s : traceback %s" % \
-                                  (messag, traceback.format_exc()))
+                self._logger.error("[%s:%d] AlarmGen %s,%d %s : traceback %s" % \
+                                  (self._pi.ip_address, self._pi.port, \
+                                   self._pi.instance_id, self._partno, \
+                                   messag, traceback.format_exc()))
+            finally:
                 lredis = None
                 if pb is not None:
                     pb.close()
@@ -554,6 +559,10 @@ class PartitionHandler(gevent.Greenlet):
         self._uvedb = {}
         self._partoffset = 0
         self._kfk = None
+	self._failed = False
+
+    def failed(self):
+	return self._failed
 
     def msg_handler(self, mlist):
         self._logger.info("%s Reading %s" % (self._topic, str(mlist)))
@@ -568,7 +577,8 @@ class PartitionHandler(gevent.Greenlet):
                     gevent.sleep(2)
                     pause = False
                 self._logger.error("New KafkaClient %s" % self._topic)
-                self._kfk = KafkaClient(self._brokers , "kc-" + self._topic)
+                self._kfk = KafkaClient(self._brokers , "kc-" + self._topic, timeout=2)
+                self._failed = False
                 try:
                     consumer = SimpleConsumer(self._kfk, self._group, self._topic, buffer_size = 4096*4, max_buffer_size=4096*32)
                     #except:
@@ -577,6 +587,7 @@ class PartitionHandler(gevent.Greenlet):
                     messag = template.format(type(ex).__name__, ex.args)
                     self._logger.error("Error: %s trace %s" % \
                         (messag, traceback.format_exc()))
+		    self._failed = True
                     raise RuntimeError(messag)
 
                 self._logger.error("Starting %s" % self._topic)
@@ -626,6 +637,7 @@ class PartitionHandler(gevent.Greenlet):
                 self._logger.error("%s : traceback %s" % \
                                   (messag, traceback.format_exc()))
                 self.stop_partition()
+		self._failed = True
                 pause = True
 
         self._logger.error("Stopping %s pcount %d" % (self._topic, pcount))
@@ -747,8 +759,8 @@ class UveStreamProc(PartitionHandler):
                         # TODO: for loading only specific types:
                         #       uves[kk][typ] = contents
                     
-        self._logger.error("Starting part %d UVEs %s" % \
-                          (self._partno, str(uves.keys())))
+        self._logger.error("Starting part %d UVEs %d" % \
+                           (self._partno, len(uves)))
         self._callback(self._partno, uves)
 
     def contents(self):

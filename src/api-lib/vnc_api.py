@@ -16,9 +16,11 @@ import functools
 import __main__ as main
 import ssl
 from threading import RLock
+import re
+import os
 import gen.resource_common
 import gen.vnc_api_client_gen
-from gen.vnc_api_client_gen import all_resource_types
+from gen.vnc_api_client_gen import all_resource_type_tuples
 from gen.resource_xsd import *
 from gen.resource_client import *
 from gen.generatedssuper import GeneratedsSuper
@@ -54,8 +56,8 @@ def compare_refs(old_refs, new_refs):
     return old_ref_dict == new_ref_dict
 # end compare_refs
 
-def get_object_class(obj_type):
-    cls_name = '%s' %(utils.CamelCase(obj_type.replace('-', '_')))
+def get_object_class(res_type):
+    cls_name = '%s' %(utils.CamelCase(res_type))
     return utils.str_to_class(cls_name, __name__)
 # end get_object_class
 
@@ -69,6 +71,20 @@ def _read_cfg(cfg_parser, section, option, default):
 
         return val
 #end _read_cfg
+
+def _cfg_curl_logging(api_curl_log_file=None):
+    formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s',datefmt='%Y/%m/%d %H:%M:%S')
+    curl_logger = logging.getLogger('log_curl')
+    curl_logger.setLevel(logging.DEBUG)
+    api_curl_log_file="/var/log/contrail/%s" %(api_curl_log_file)
+    if os.path.exists(api_curl_log_file):
+        curl_log_handler = logging.FileHandler(api_curl_log_file,mode='a')
+    else:
+        curl_log_handler = logging.FileHandler(api_curl_log_file,mode='w')
+    curl_log_handler.setFormatter(formatter)
+    curl_logger.addHandler(curl_log_handler)
+    return curl_logger
+# End _cfg_curl_logging
 
 class ActionUriDict(dict):
     """Action uri dictionary with operator([]) overloading to parse home page
@@ -144,19 +160,19 @@ class VncApi(object):
         # TODO allow for username/password to be present in creds file
 
         self._obj_serializer = self._obj_serializer_diff
-        for resource_type in gen.vnc_api_client_gen.all_resource_types:
-            obj_type = resource_type.replace('-', '_')
+
+        for object_type, resource_type in all_resource_type_tuples:
             for oper_str in ('_create', '_read', '_update', '_delete',
                          's_list', '_get_default_id', '_search'):
                 method = getattr(self, '_object%s' %(oper_str))
                 bound_method = functools.partial(method, resource_type)
                 functools.update_wrapper(bound_method, method)
                 if oper_str == '_get_default_id':
-                    setattr(self, 'get_default_%s_id' %(obj_type),
-                        bound_method)
+                    setattr(self, 'get_default_%s_id' % (object_type),
+                            bound_method)
                 else:
-                    setattr(self, '%s%s' %(obj_type, oper_str),
-                        bound_method)
+                    setattr(self, '%s%s' %(object_type, oper_str),
+                            bound_method)
 
         for rpc_type in gen.vnc_api_client_gen.all_rpc_input_types:
             obj_type = rpc_type.replace('-','_')
@@ -296,6 +312,11 @@ class VncApi(object):
             cfg_parser, 'global', 'MAX_CONNS_PER_POOL',
             self._DEFAULT_MAX_CONNS_PER_POOL))
 
+        self._curl_logging = False
+        if _read_cfg(cfg_parser, 'global', 'curl_log', False):
+            self._curl_logging=True
+            self._curl_logger=_cfg_curl_logging(_read_cfg(cfg_parser,'global','curl_log',False))
+
         # Where client's view of world begins
         if not api_server_url:
             self._base_url = _read_cfg(cfg_parser, 'global', 'BASE_URL',
@@ -359,7 +380,6 @@ class VncApi(object):
 
     @check_homepage
     def _object_create(self, res_type, obj):
-        obj_type = res_type.replace('-', '_')
         obj_cls = get_object_class(res_type)
 
         obj._pending_field_updates |= obj._pending_ref_updates
@@ -416,7 +436,6 @@ class VncApi(object):
     @check_homepage
     def _object_read(self, res_type, fq_name=None, fq_name_str=None,
                      id=None, ifmap_id=None, fields=None):
-        obj_type = res_type.replace('-', '_')
         obj_cls = get_object_class(res_type)
 
         (args_ok, result) = self._read_args_to_id(
@@ -445,7 +464,6 @@ class VncApi(object):
 
     @check_homepage
     def _object_update(self, res_type, obj):
-        obj_type = res_type.replace('-', '_')
         obj_cls = get_object_class(res_type)
 
         # Read in uuid from api-server if not specified in obj
@@ -522,11 +540,10 @@ class VncApi(object):
 
     @check_homepage
     def _object_delete(self, res_type, fq_name=None, id=None, ifmap_id=None):
-        obj_type = res_type.replace('-', '_')
         obj_cls = get_object_class(res_type)
 
         (args_ok, result) = self._read_args_to_id(
-            obj_type=res_type, fq_name=fq_name, id=id, ifmap_id=ifmap_id)
+            res_type=res_type, fq_name=fq_name, id=id, ifmap_id=ifmap_id)
         if not args_ok:
             return result
 
@@ -575,7 +592,6 @@ class VncApi(object):
     # end _rpc_excecute
 
     def _object_get_default_id(self, res_type):
-        obj_type = res_type.replace('-', '_')
         obj_cls = get_object_class(res_type)
 
         return self.fq_name_to_id(res_type, obj_cls().get_fq_name())
@@ -631,7 +647,9 @@ class VncApi(object):
                 response = requests.post(url, data=self._authn_body,
                                          headers=self._DEFAULT_AUTHN_HEADERS)
         except Exception as e:
-            raise RuntimeError('Unable to connect to keystone for authentication. Verify keystone server details')
+            errmsg = 'Unable to connect to keystone for authentication. '
+            errmsg += 'Exception %s' %(e)
+            raise RuntimeError(errmsg)
 
         if (response.status_code == 200) or (response.status_code == 201):
             # plan is to re-issue original request with new token
@@ -754,7 +772,7 @@ class VncApi(object):
         return None
     #end _find_url
 
-    def _read_args_to_id(self, obj_type, fq_name=None, fq_name_str=None,
+    def _read_args_to_id(self, res_type, fq_name=None, fq_name_str=None,
                          id=None, ifmap_id=None):
         arg_count = ((fq_name is not None) + (fq_name_str is not None) +
                      (id is not None) + (ifmap_id is not None))
@@ -767,9 +785,9 @@ class VncApi(object):
         if id:
             return (True, id)
         if fq_name:
-            return (True, self.fq_name_to_id(obj_type, fq_name))
+            return (True, self.fq_name_to_id(res_type, fq_name))
         if fq_name_str:
-            return (True, self.fq_name_to_id(obj_type, fq_name_str.split(':')))
+            return (True, self.fq_name_to_id(res_type, fq_name_str.split(':')))
         if ifmap_id:
             return (True, self.ifmap_to_id(ifmap_id))
     #end _read_args_to_id
@@ -782,6 +800,33 @@ class VncApi(object):
         return self._request(op, url, data=data, retry_on_error=retry_on_error,
                       retry_after_authn=retry_after_authn,
                       retry_count=retry_count)
+    #end _request_server
+
+    def _log_curl(self, op, url, data=None):
+        op_str = {rest.OP_GET: 'GET', rest.OP_POST: 'POST', rest.OP_DELETE: 'DELETE', rest.OP_PUT: 'PUT'}
+        base_url="http://%s:%s" %(self._authn_server, self._web_port)
+        cmd_url="%s%s" %(base_url, url)
+        cmd_hdr=None
+        cmd_op=str(op_str[op])
+        cmd_data=None
+        header_list = [ j + ":" + k for (j,k) in self._headers.items()]
+        header_string = ''.join(['-H "' + str(i) + '" ' for i in header_list])
+        pattern=re.compile(r'(.*-H "X-AUTH-TOKEN:)[0-9a-z]+(")')
+        cmd_hdr=re.sub(pattern,r'\1$TOKEN\2',header_string)
+        if op == rest.OP_GET:
+            if data:
+                query_string="?" + "&".join([ str(i)+ "=" + str(j) for (i,j) in data.items()])
+                cmd_url=base_url+url+query_string
+        elif op == rest.OP_DELETE:
+            pass
+        else:
+            cmd_data=str(data)
+        if cmd_data:
+            cmd="curl -X %s %s -d '%s' %s" %(cmd_op, cmd_hdr, cmd_data, cmd_url)
+        else:
+            cmd="curl -X %s %s %s" %(cmd_op, cmd_hdr, cmd_url)
+        self._curl_logger.debug(cmd)
+    #End _log_curl
 
 
     def _update_request_id(self, headers):
@@ -795,6 +840,8 @@ class VncApi(object):
                  retry_after_authn=False, retry_count=30):
         retried = 0
         self._update_request_id(self._headers)
+        if self._curl_logging:
+            self._log_curl(op=op,url=url,data=data)
         while True:
             try:
                 if (op == rest.OP_GET):
@@ -902,10 +949,10 @@ class VncApi(object):
         return json.loads(content)[obj_field]
     # end _prop_collection_get
 
-    def _prop_map_get_elem_key(self, obj_uuid, obj_field, value):
-        _, obj_type = self.id_to_fq_name_type(obj_uuid)
-        obj_class = utils.obj_type_to_vnc_class(obj_type, __name__)
 
+    def _prop_map_get_elem_key(self, id, obj_field, elem):
+        _, res_type = self.id_to_fq_name_type(id)
+        obj_class = utils.obj_type_to_vnc_class(res_type, __name__)
         key_name = obj_class.prop_map_field_key_names[obj_field]
         if isinstance(value, GeneratedsSuper):
             return getattr(value, key_name)
@@ -955,8 +1002,9 @@ class VncApi(object):
     # end prop_list_get
 
     @check_homepage
-    def ref_update(self, obj_type, obj_uuid, ref_type, ref_uuid, ref_fq_name, operation, attr=None):
-        if ref_type.endswith('_refs'):
+    def ref_update(self, obj_type, obj_uuid, ref_type, ref_uuid,
+                   ref_fq_name, operation, attr=None):
+        if ref_type.endswith(('_refs', '-refs')):
             ref_type = ref_type[:-5].replace('_', '-')
         json_body = json.dumps({'type': obj_type, 'uuid': obj_uuid,
                                 'ref-type': ref_type, 'ref-uuid': ref_uuid,
@@ -1268,6 +1316,59 @@ class VncApi(object):
                       **kwargs)
 
 
+    def obj_perms(self, token, obj_uuid=None):
+        """
+        validate user token. Optionally, check token authorization for an object.
+        rv {'token_info': <token-info>, 'permissions': 'RWX'}
+        """
+        query = 'token=%s' % token
+        if obj_uuid:
+            query += '&uuid=%s' % obj_uuid
+        try:
+            rv = self._request_server(rest.OP_GET, "/obj-perms", data=query)
+            return json.loads(rv)
+        except PermissionDenied:
+            return None
+
+    # change object ownsership
+    def chown(self, obj_uuid, owner):
+        payload = {'uuid': obj_uuid, 'owner': owner}
+        content = self._request_server(rest.OP_POST,
+            self._action_uri['chown'], data=json.dumps(payload))
+        return content
+    #end chown
+
+    def chmod(self, obj_uuid, owner=None, owner_access=None, share=None, global_access=None):
+        """
+        owner: tenant UUID
+        owner_access: octal permission for owner (int, 0-7)
+        share: list of tuple of <uuid:octal-perms>, for example [(0ed5ea...700:7)]
+        global_access: octal permission for global access (int, 0-7)
+        """
+        payload = {'uuid': obj_uuid}
+        if owner:
+            payload['owner'] = owner
+        if owner_access is not None:
+            payload['owner_access'] = owner_access
+        if share is not None:
+            payload['share'] = [{'tenant':item[0], 'tenant_access':item[1]} for item in share]
+        if global_access is not None:
+            payload['global_access'] = global_access
+        content = self._request_server(rest.OP_POST,
+            self._action_uri['chmod'], data=json.dumps(payload))
+        return content
+
+    def set_multi_tenancy(self, enabled):
+        url = self._action_uri['multi-tenancy']
+        data = {'enabled': enabled}
+        content = self._request_server(rest.OP_PUT, url, json.dumps(data))
+        return json.loads(content)
+
+    def set_multi_tenancy_with_rbac(self, enabled):
+        url = self._action_uri['rbac']
+        data = {'enabled': enabled}
+        content =  self._request_server(rest.OP_PUT, url, json.dumps(data))
+        return json.loads(content)
 
 #end class VncApi
 

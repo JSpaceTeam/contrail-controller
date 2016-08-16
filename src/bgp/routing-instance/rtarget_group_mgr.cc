@@ -21,8 +21,6 @@
 
 using std::pair;
 
-int RTargetGroupMgr::rtfilter_task_id_ = -1;
-
 void VpnRouteState::AddRouteTarget(RTargetGroupMgr *mgr, int part_id,
     BgpRoute *rt, RTargetList::const_iterator it) {
     pair<RTargetList::iterator, bool> result;
@@ -46,13 +44,13 @@ void RTargetState::AddInterestedPeer(RTargetGroupMgr *mgr, RtGroup *rtgroup,
     result = list_.insert(*it);
     assert(result.second);
     rtgroup->AddInterestedPeer(it->first, rt);
-    mgr->NotifyRtGroup(rtgroup->rt());
+    mgr->NotifyRtGroupUnlocked(rtgroup->rt());
 }
 
 void RTargetState::DeleteInterestedPeer(RTargetGroupMgr *mgr, RtGroup *rtgroup,
     RTargetRoute *rt, RtGroup::InterestedPeerList::iterator it) {
     rtgroup->RemoveInterestedPeer(it->first, rt);
-    mgr->NotifyRtGroup(rtgroup->rt());
+    mgr->NotifyRtGroupUnlocked(rtgroup->rt());
     list_.erase(it);
 }
 
@@ -65,11 +63,6 @@ RTargetGroupMgr::RTargetGroupMgr(BgpServer *server) : server_(server),
            TaskScheduler::GetInstance()->GetTaskId("bgp::RTFilter"), 0)),
     rtarget_trigger_lists_(DB::PartitionCount()),
     master_instance_delete_ref_(this, NULL) {
-    if (rtfilter_task_id_ == -1) {
-        TaskScheduler *scheduler = TaskScheduler::GetInstance();
-        rtfilter_task_id_ = scheduler->GetTaskId("bgp::RTFilter");
-    }
-
     for (int i = 0; i < DB::PartitionCount(); i++) {
         rtarget_dep_triggers_.push_back(boost::shared_ptr<TaskTrigger>(new
                TaskTrigger(boost::bind(&RTargetGroupMgr::ProcessRouteTargetList,
@@ -115,6 +108,7 @@ void RTargetGroupMgr::BuildRTargetDistributionGraph(BgpTable *table,
         return;
     }
 
+    const BgpPath *best_ebgp_path = NULL;
     for (Route::PathList::iterator it = rt->GetPathList().begin();
          it != rt->GetPathList().end(); it++) {
         BgpPath *path = static_cast<BgpPath *>(it.operator->());
@@ -124,6 +118,14 @@ void RTargetGroupMgr::BuildRTargetDistributionGraph(BgpTable *table,
             continue;
 
         const BgpPeer *peer = static_cast<const BgpPeer *>(path->GetPeer());
+        if (peer->PeerType() == BgpProto::EBGP) {
+            if (!best_ebgp_path) {
+                best_ebgp_path = path;
+            } else if (!best_ebgp_path->PathSameNeighborAs(*path)) {
+                continue;
+            }
+        }
+
         std::pair<RtGroup::InterestedPeerList::iterator, bool> ret =
             peer_list.insert(std::pair<const BgpPeer *,
                  RtGroup::RTargetRouteList>(peer, RtGroup::RTargetRouteList()));
@@ -181,8 +183,7 @@ bool RTargetGroupMgr::ProcessRTargetRouteList() {
     CHECK_CONCURRENCY("bgp::RTFilter");
 
     RoutingInstanceMgr *mgr = server()->routing_instance_mgr();
-    RoutingInstance *master =
-        mgr->GetRoutingInstance(BgpConfigManager::kMasterInstance);
+    RoutingInstance *master = mgr->GetDefaultRoutingInstance();
     BgpTable *table = master->GetTable(Address::RTARGET);
 
     // Get the Listener id
@@ -212,8 +213,7 @@ bool RTargetGroupMgr::IsRTargetRouteOnList(RTargetRoute *rt) const {
 void RTargetGroupMgr::Initialize() {
     assert(table_state_.empty());
     RoutingInstanceMgr *mgr = server()->routing_instance_mgr();
-    RoutingInstance *master =
-        mgr->GetRoutingInstance(BgpConfigManager::kMasterInstance);
+    RoutingInstance *master = mgr->GetDefaultRoutingInstance();
     assert(master);
 
     master_instance_delete_ref_.Reset(master->deleter());
@@ -377,7 +377,9 @@ RtGroup *RTargetGroupMgr::LocateRtGroup(const RouteTarget &rt) {
     return group;
 }
 
-void RTargetGroupMgr::NotifyRtGroup(const RouteTarget &rt) {
+void RTargetGroupMgr::NotifyRtGroupUnlocked(const RouteTarget &rt) {
+    CHECK_CONCURRENCY("bgp::RTFilter", "bgp::Config", "bgp::ConfigHelper");
+
     AddRouteTargetToLists(rt);
     if (!rt.IsNull())
         return;
@@ -389,6 +391,12 @@ void RTargetGroupMgr::NotifyRtGroup(const RouteTarget &rt) {
             continue;
         table->NotifyAllEntries();
     }
+}
+
+void RTargetGroupMgr::NotifyRtGroup(const RouteTarget &rt) {
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
+    tbb::mutex::scoped_lock lock(mutex_);
+    NotifyRtGroupUnlocked(rt);
 }
 
 void RTargetGroupMgr::RemoveRtGroup(const RouteTarget &rt) {
@@ -434,8 +442,7 @@ void RTargetGroupMgr::UnregisterTables() {
 
     if (rtgroup_map_.empty()) {
         RoutingInstanceMgr *mgr = server()->routing_instance_mgr();
-        RoutingInstance *master =
-            mgr->GetRoutingInstance(BgpConfigManager::kMasterInstance);
+        RoutingInstance *master = mgr->GetDefaultRoutingInstance();
         if (master && master->deleted()) {
             for (RtGroupMgrTableStateList::iterator it =
                  table_state_.begin(), itnext; it != table_state_.end();

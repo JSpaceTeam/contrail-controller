@@ -31,7 +31,11 @@ class RabbitConnection(object):
             rabbit_user, rabbit_password,
             rabbit_vhost, rabbit_ha_mode,
             q_name, self._vnc_subscribe_callback,
-            self.logger.log)
+            self.logger.log, rabbit_use_ssl = self._args.rabbit_use_ssl,
+            kombu_ssl_version = self._args.kombu_ssl_version,
+            kombu_ssl_keyfile = self._args.kombu_ssl_keyfile,
+            kombu_ssl_certfile = self._args.kombu_ssl_certfile,
+            kombu_ssl_ca_certs = self._args.kombu_ssl_ca_certs)
 
     def _vnc_subscribe_callback(self, oper_info):
         self._db_resync_done.wait()
@@ -51,10 +55,13 @@ class RabbitConnection(object):
         if oper_info['oper'] == 'CREATE':
             obj_dict = oper_info['obj_dict']
             obj_id = oper_info['uuid']
+            DBBaseSM._cassandra.cache_uuid_to_fq_name_add(
+                    obj_id, obj_dict['fq_name'], obj_type)
             obj = obj_class.locate(obj_id)
-            dependency_tracker = DependencyTracker(
-                DBBaseSM.get_obj_type_map(), self._REACTION_MAP)
-            dependency_tracker.evaluate(obj_type, obj)
+            if obj is not None:
+                dependency_tracker = DependencyTracker(
+                    DBBaseSM.get_obj_type_map(), self._REACTION_MAP)
+                dependency_tracker.evaluate(obj_type, obj)
         elif oper_info['oper'] == 'UPDATE':
             obj_id = oper_info['uuid']
             obj = obj_class.get(obj_id)
@@ -65,20 +72,27 @@ class RabbitConnection(object):
                 old_dt.evaluate(obj_type, obj)
             else:
                 obj = obj_class.locate(obj_id)
-            obj.update()
-            dependency_tracker = DependencyTracker(
-                DBBaseSM.get_obj_type_map(), self._REACTION_MAP)
-            dependency_tracker.evaluate(obj_type, obj)
-            if old_dt:
-                for resource, ids in old_dt.resources.items():
-                    if resource not in dependency_tracker.resources:
-                        dependency_tracker.resources[resource] = ids
-                    else:
-                        dependency_tracker.resources[resource] = list(
-                            set(dependency_tracker.resources[resource]) |
-                            set(ids))
+            if obj is not None:
+                try:
+                    obj.update()
+                except NoIdError:
+                    self.logger.warning('%s uuid %s has vanished' %
+                                        (obj_type, obj_id))
+                    return
+                dependency_tracker = DependencyTracker(
+                    DBBaseSM.get_obj_type_map(), self._REACTION_MAP)
+                dependency_tracker.evaluate(obj_type, obj)
+                if old_dt:
+                    for resource, ids in old_dt.resources.items():
+                        if resource not in dependency_tracker.resources:
+                            dependency_tracker.resources[resource] = ids
+                        else:
+                            dependency_tracker.resources[resource] = list(
+                                set(dependency_tracker.resources[resource]) |
+                                set(ids))
         elif oper_info['oper'] == 'DELETE':
             obj_id = oper_info['uuid']
+            DBBaseSM._cassandra.cache_uuid_to_fq_name_del(obj_id)
             obj = obj_class.get(obj_id)
             if obj is None:
                 return
@@ -92,7 +106,7 @@ class RabbitConnection(object):
             return
 
         if obj is None:
-            self.logger.error('Error while accessing %s uuid %s' % (
+            self.logger.warning('%s uuid %s has vanished' % (
                 obj_type, obj_id))
             return
 

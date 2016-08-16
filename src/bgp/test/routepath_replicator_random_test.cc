@@ -75,6 +75,7 @@ public:
     virtual BgpServer *server() {
         return NULL;
     }
+    virtual BgpServer *server() const { return NULL; }
     virtual IPeerClose *peer_close() {
         return NULL;
     }
@@ -88,8 +89,7 @@ public:
         return true;
     }
     virtual bool IsXmppPeer() const { return false; }
-    virtual void Close() {
-    }
+    virtual void Close(bool non_graceful) { }
     BgpProto::BgpPeerType PeerType() const {
         return BgpProto::IBGP;
     }
@@ -99,14 +99,15 @@ public:
     virtual const std::string GetStateName() const {
         return "";
     }
-    virtual void UpdateRefCount(int count) const { }
-    virtual tbb::atomic<int> GetRefCount() const {
-        tbb::atomic<int> count;
-        count = 0;
-        return count;
-    }
+    virtual void UpdateTotalPathCount(int count) const { }
+    virtual int GetTotalPathCount() const { return 0; }
     virtual void UpdatePrimaryPathCount(int count) const { }
     virtual int GetPrimaryPathCount() const { return 0; }
+    virtual bool IsRegistrationRequired() const { return true; }
+    virtual void MembershipRequestCallback(BgpTable *table) { }
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+        BgpRoute *route, BgpPath *path) { return false; }
+    virtual bool CanUseMembershipManager() const { return true; }
 
 private:
     Ip4Address address_;
@@ -123,7 +124,8 @@ public:
     typedef std::multimap<string, string> ConnectionMap;
 protected:
     ReplicationTest()
-        : bgp_server_(new BgpServer(&evm_)) {
+      : config_db_(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable")),
+        bgp_server_(new BgpServer(&evm_)) {
         min_vrf_ = 32;
         IFMapLinkTable_Init(&config_db_, &config_graph_);
         vnc_cfg_Server_ModuleInit(&config_db_, &config_graph_);

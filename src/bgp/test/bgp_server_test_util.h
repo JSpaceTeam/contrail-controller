@@ -8,9 +8,12 @@
 #include <boost/any.hpp>
 #include <boost/foreach.hpp>
 #include <boost/shared_ptr.hpp>
+#include <tbb/compat/condition_variable>
+#include <tbb/mutex.h>
 
-#include "base/util.h"
+#include "base/task_annotations.h"
 #include "base/test/task_test_util.h"
+#include "base/util.h"
 #include "bgp/bgp_config.h"
 #include "bgp/bgp_lifetime.h"
 #include "bgp/bgp_log.h"
@@ -69,29 +72,15 @@ class XmppServerTest : public XmppServer {
 public:
 
     XmppServerTest(EventManager *evm) : XmppServer(evm) {
-        GetIsPeerCloseGraceful_fnc_ =
-            boost::bind(&XmppServerTest::XmppServerIsPeerCloseGraceful, this);
     }
     XmppServerTest(EventManager *evm, const std::string &server_addr) :
             XmppServer(evm, server_addr) {
-        GetIsPeerCloseGraceful_fnc_ =
-            boost::bind(&XmppServerTest::XmppServerIsPeerCloseGraceful, this);
     }
     XmppServerTest(EventManager *evm, const std::string &server_addr,
                    const XmppChannelConfig *config) :
         XmppServer(evm, server_addr, config) {
-        GetIsPeerCloseGraceful_fnc_ =
-            boost::bind(&XmppServerTest::XmppServerIsPeerCloseGraceful, this);
     }
     virtual ~XmppServerTest() { }
-
-    virtual bool IsPeerCloseGraceful() {
-        return GetIsPeerCloseGraceful_fnc_();
-    }
-
-    bool XmppServerIsPeerCloseGraceful() {
-        return XmppServer::IsPeerCloseGraceful();
-    }
 
     const ConnectionMap &connection_map() const { return connection_map_; }
 
@@ -122,8 +111,6 @@ public:
         XmppServer::RemoveDeletedConnection(connection);
     }
 
-    boost::function<bool()> GetIsPeerCloseGraceful_fnc_;
-
 private:
     tbb::mutex mutex_;
 };
@@ -131,12 +118,12 @@ private:
 class StateMachineTest : public StateMachine {
 public:
     explicit StateMachineTest(BgpPeer *peer)
-        : StateMachine(peer) {
+        : StateMachine(peer), skip_bgp_notification_msg_(false) {
     }
     virtual ~StateMachineTest() { }
 
     void StartConnectTimer(int seconds) {
-        connect_timer_->Start(10,
+        connect_timer_->Start(100,
             boost::bind(&StateMachine::ConnectTimerExpired, this),
             boost::bind(&StateMachine::TimerErrorHanlder, this, _1, _2));
     }
@@ -179,7 +166,7 @@ public:
         keepalive_time_msecs_ = keepalive_time_msecs;
     }
 
-    static TcpSession::Event get_skip_tcp_event() { return skip_tcp_event_; }
+    static TcpSession::Event skip_tcp_event() { return skip_tcp_event_; }
     static void set_skip_tcp_event(TcpSession::Event event) {
         skip_tcp_event_ = event;
     }
@@ -191,10 +178,29 @@ public:
             skip_tcp_event_ = TcpSession::EVENT_NONE;
     }
 
+    virtual void OnNotificationMessage(BgpSession *session,
+                                       BgpProto::BgpMessage *msg) {
+        if (!skip_bgp_notification_msg_) {
+            StateMachine::OnNotificationMessage(session, msg);
+        } else {
+            skip_bgp_notification_msg_ = false;
+            delete msg;
+        }
+    }
+
+    bool skip_bgp_notification_msg() const {
+        return skip_bgp_notification_msg_;
+    }
+
+    void set_skip_bgp_notification_msg(bool flag) {
+        skip_bgp_notification_msg_ = flag;
+    }
+
 private:
     static int hold_time_msecs_;
     static int keepalive_time_msecs_;
     static TcpSession::Event skip_tcp_event_;
+    bool skip_bgp_notification_msg_;
 };
 
 class BgpServerTest : public BgpServer {
@@ -229,15 +235,6 @@ public:
     }
 
     virtual std::string ToString() const;
-    virtual bool IsPeerCloseGraceful() {
-        return GetIsPeerCloseGraceful_fnc_();
-    }
-
-    bool BgpServerIsPeerCloseGraceful() {
-        return BgpServer::IsPeerCloseGraceful();
-    }
-
-    boost::function<bool()> GetIsPeerCloseGraceful_fnc_;
 
 private:
     void PostShutdown();
@@ -270,35 +267,70 @@ public:
     virtual bool MpNlriAllowed(uint16_t afi, uint8_t safi) {
         return MpNlriAllowed_fnc_(afi, safi);
     }
-  
+
     bool BgpPeerIsReady();
     void SetDataCollectionKey(BgpPeerInfo *peer_info) const;
-    void SendEorMarker() {
+    virtual void SendEndOfRIB(Address::Family family) {
+        SendEndOfRIBActual(family);
+    }
+
+    void SendEndOfRIB() {
         BOOST_FOREACH(std::string family, negotiated_families()) {
-            SendEndOfRIB(Address::FamilyFromString(family));
+            SendEndOfRIBActual(Address::FamilyFromString(family));
         }
     }
 
-    virtual bool IsReady() const {
-        return IsReady_fnc_();
-    }
-
-    void set_vpn_tables_registered(bool registered) {
-        vpn_tables_registered_ = registered;
-    }
-
+    virtual bool IsReady() const { return IsReady_fnc_(); }
+    void set_vpn_tables_registered(bool flag) { vpn_tables_registered_ = flag; }
     const int id() const { return id_; }
     void set_id(int id) { id_ = id; }
+
+    virtual void SetAdminState(bool down) {
+        if (!ConcurrencyChecker::IsInMainThr()) {
+            BgpPeer::SetAdminState(down);
+            return;
+        }
+        tbb::interface5::unique_lock<tbb::mutex> lock(work_mutex_);
+
+        Request request;
+        request.type = down ? ADMIN_DOWN : ADMIN_UP;
+        work_queue_.Enqueue(&request);
+
+        // Wait for the request to get processed.
+        cond_var_.wait(lock);
+    }
+
+    bool SkipNotificationReceiveDefault(int code, int subcode) const {
+        return BgpPeer::SkipNotificationReceive(code, subcode);
+    }
+
+    virtual bool SkipNotificationReceive(int code, int subcode) const {
+        if (skip_notification_recv_fnc_.empty())
+            return SkipNotificationReceiveDefault(code, subcode);
+        return skip_notification_recv_fnc_(code, subcode);
+    }
 
     boost::function<bool(const uint8_t *, size_t)> SendUpdate_fnc_;
     boost::function<bool(uint16_t, uint8_t)> MpNlriAllowed_fnc_;
     boost::function<bool()> IsReady_fnc_;
+    boost::function<bool(int, int)> skip_notification_recv_fnc_;
 
     BgpTestUtil util_;
 
 private:
+    enum RequestType { ADMIN_UP, ADMIN_DOWN };
+    struct Request {
+        Request() : result(false) { }
+        RequestType type;
+        bool        result;
+    };
+    bool ProcessRequest(Request *request);
+
     static bool verbose_name_;
     int id_;
+    WorkQueue<Request *> work_queue_;
+    tbb::mutex work_mutex_;
+    tbb::interface5::condition_variable cond_var_;
 };
 
 class PeerManagerTest : public PeerManager {
@@ -344,7 +376,7 @@ public:
     ~XmppStateMachineTest() { }
 
     void StartConnectTimer(int seconds) {
-        connect_timer_->Start(10,
+        connect_timer_->Start(100,
             boost::bind(&XmppStateMachine::ConnectTimerExpired, this),
             boost::bind(&XmppStateMachine::TimerErrorHandler, this, _1, _2));
     }

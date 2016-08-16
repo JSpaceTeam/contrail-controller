@@ -196,7 +196,8 @@ void KSyncFlowMemory::KFlow2FlowKey(const vr_flow_entry *kflow,
 }
 
 const vr_flow_entry *KSyncFlowMemory::GetValidKFlowEntry(const FlowKey &key,
-                                                         uint32_t idx) const {
+                                                         uint32_t idx,
+                                                         uint8_t gen_id) const {
     const vr_flow_entry *kflow = GetKernelFlowEntry(idx, false);
     if (!kflow) {
         return NULL;
@@ -207,9 +208,9 @@ const vr_flow_entry *KSyncFlowMemory::GetValidKFlowEntry(const FlowKey &key,
         if (!key.IsEqual(rhs)) {
             return NULL;
         }
-        /* TODO: If a flow is evicted from vrouter and later flow with same
-         * key is assigned with same index, then we may end up reading
-         * wrong stats */
+        if (kflow->fe_gen_id != gen_id) {
+            return NULL;
+        }
     }
     return kflow;
 }
@@ -252,26 +253,39 @@ bool KSyncFlowMemory::GetFlowKey(uint32_t index, FlowKey *key) {
     return true;
 }
 
+bool KSyncFlowMemory::IsEvictionMarked(const vr_flow_entry *entry) const {
+    if (!entry) {
+        return false;
+    }
+    if (entry->fe_flags & VR_FLOW_FLAG_EVICTED) {
+        return true;
+    }
+    return false;
+}
+
 bool KSyncFlowMemory::AuditProcess() {
     uint32_t flow_idx;
+    uint8_t gen_id;
     const vr_flow_entry *vflow_entry;
     // Get current time
     uint64_t t = UTCTimestampUsec();
 
     while (!audit_flow_list_.empty()) {
-        std::pair<uint32_t, uint64_t> list_entry = audit_flow_list_.front();
+        AuditEntry list_entry = audit_flow_list_.front();
         // audit_flow_list_ is sorted on last time of insertion in the list
         // So, break on finding first flow entry that cannot be aged
-        if ((t - list_entry.second) < audit_timeout_) {
+        if ((t - list_entry.timeout) < audit_timeout_) {
             /* Wait for audit_timeout_ to create short flow for the entry */
             break;
         }
-        flow_idx = list_entry.first;
+        flow_idx = list_entry.audit_flow_idx;
+        gen_id = list_entry.audit_flow_gen_id;
         audit_flow_list_.pop_front();
 
         vflow_entry = GetKernelFlowEntry(flow_idx, false);
         // Audit and remove flow entry if its still in HOLD state
-        if (vflow_entry && vflow_entry->fe_action == VR_FLOW_ACTION_HOLD) {
+        if (vflow_entry && vflow_entry->fe_gen_id == gen_id &&
+            vflow_entry->fe_action == VR_FLOW_ACTION_HOLD) {
             int family = (vflow_entry->fe_key.flow_family == AF_INET)?
                 Address::INET : Address::INET6;
             IpAddress sip, dip;
@@ -284,9 +298,9 @@ bool KSyncFlowMemory::AuditProcess() {
                         ntohs(vflow_entry->fe_key.flow_dport));
 
             FlowProto *proto = ksync_->agent()->pkt()->get_flow_proto();
-            proto->CreateAuditEntry(key, flow_idx);
-            AGENT_ERROR(FlowLog, flow_idx, "FlowAudit : Converting HOLD "
-                        "entry to short flow");
+            proto->CreateAuditEntry(key, flow_idx, gen_id);
+            AGENT_LOG(FlowLog, flow_idx, "FlowAudit : Converting HOLD entry"
+                      "to short flow");
         }
     }
 
@@ -295,7 +309,8 @@ bool KSyncFlowMemory::AuditProcess() {
     while (count < audit_yield_) {
         vflow_entry = GetKernelFlowEntry(audit_flow_idx_, false);
         if (vflow_entry && vflow_entry->fe_action == VR_FLOW_ACTION_HOLD) {
-            audit_flow_list_.push_back(std::make_pair(audit_flow_idx_, t));
+            audit_flow_list_.push_back(AuditEntry(audit_flow_idx_,
+                                                  vflow_entry->fe_gen_id, t));
         }
 
         count++;

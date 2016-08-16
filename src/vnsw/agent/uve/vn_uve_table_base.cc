@@ -6,14 +6,14 @@
 #include <uve/agent_uve_base.h>
 
 VnUveTableBase::VnUveTableBase(Agent *agent, uint32_t default_intvl)
-    : uve_vn_map_(), agent_(agent),
+    : uve_vn_map_(), agent_(agent), uve_vn_map_mutex_(),
       vn_listener_id_(DBTableBase::kInvalidId),
       intf_listener_id_(DBTableBase::kInvalidId),
       timer_last_visited_(""),
       timer_(TimerManager::CreateTimer
              (*(agent->event_manager())->io_service(),
               "VnUveTimer",
-              TaskScheduler::GetInstance()->GetTaskId("db::DBTable"), 0)) {
+              TaskScheduler::GetInstance()->GetTaskId(kTaskDBExclude), 0)) {
       expiry_time_ = default_intvl;
       timer_->Start(expiry_time_,
                     boost::bind(&VnUveTableBase::TimerExpiry, this));
@@ -148,6 +148,7 @@ void VnUveTableBase::SendDeleteVnMsg(const string &vn) {
 void VnUveTableBase::Delete(const std::string &name) {
     UveVnMap::iterator it = uve_vn_map_.find(name);
     if (it != uve_vn_map_.end()) {
+        tbb::mutex::scoped_lock lock(uve_vn_map_mutex_);
         uve_vn_map_.erase(it);
     }
 }
@@ -284,8 +285,14 @@ void VnUveTableBase::InterfaceNotify(DBTablePartBase *partition, DBEntryBase *e)
             e->SetState(partition->parent(), intf_listener_id_, state);
             InterfaceAddHandler(vn, vm_port, vm_name, state);
         } else {
-            /* Change in VN name is not supported now */
-            assert(state->vn_name_.compare(vn->GetName()) == 0);
+            if (state->vn_name_.compare(vn->GetName()) != 0) {
+                InterfaceDeleteHandler(state->vm_name_, state->vn_name_,
+                                       vm_port);
+                state->vm_name_ = vm_name;
+                state->vn_name_ = vn->GetName();
+                InterfaceAddHandler(vn, vm_port, vm_name, state);
+                return;
+            }
             if (state->vm_name_.compare(vm_name) != 0) {
                 InterfaceAddHandler(vn, vm_port, vm_name, state);
                 state->vm_name_ = vm_name;

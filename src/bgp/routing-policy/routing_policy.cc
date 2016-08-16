@@ -42,9 +42,6 @@ RoutingPolicyMgr::RoutingPolicyMgr(BgpServer *server) :
         server_(server),
         deleter_(new DeleteActor(this)),
         server_delete_ref_(this, server->deleter()),
-        walk_trigger_(new TaskTrigger(
-          boost::bind(&RoutingPolicyMgr::StartWalk, this),
-          TaskScheduler::GetInstance()->GetTaskId("bgp::Config"), 0)),
         trace_buf_(SandeshTraceBufferCreate("RoutingPolicyMgr", 500)) {
 }
 
@@ -142,13 +139,15 @@ void RoutingPolicyMgr::DestroyRoutingPolicy(RoutingPolicy *policy) {
 // This function puts the table into the walk request queue and triggers the
 // task to start the actual walk
 void RoutingPolicyMgr::ApplyRoutingPolicy(RoutingInstance *instance) {
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
+
+    tbb::mutex::scoped_lock lock(mutex_);
     BOOST_FOREACH(RoutingInstance::RouteTableList::value_type &entry,
                   instance->GetTables()) {
         BgpTable *table = entry.second;
         if (table->IsRoutingPolicySupported())
             RequestWalk(table);
     }
-    walk_trigger_->Set();
 }
 
 // On a given path of the route, apply the policy
@@ -199,7 +198,9 @@ bool RoutingPolicyMgr::EvaluateRoutingPolicy(DBTablePartBase *root,
 bool RoutingPolicyMgr::UpdateRoutingPolicyList(
                                         const RoutingPolicyConfigList &cfg_list,
                                         RoutingPolicyAttachList *oper_list) {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
+
+    tbb::mutex::scoped_lock lock(mutex_);
     bool update_policy = false;
     // Number of routing policies is different
     if (oper_list->size() != cfg_list.size())
@@ -256,65 +257,28 @@ bool RoutingPolicyMgr::UpdateRoutingPolicyList(
 
 void
 RoutingPolicyMgr::RequestWalk(BgpTable *table) {
-    CHECK_CONCURRENCY("bgp::Config");
-    RoutingPolicySyncState *state = NULL;
-    RoutingPolicyWalkRequests::iterator loc = routing_policy_sync_.find(table);
-    if (loc != routing_policy_sync_.end()) {
-        // Accumulate the walk request till walk is started.
-        // After the walk is started don't cancel/interrupt the walk
-        // instead remember the request to walk again
-        // Walk will restarted after completion of current walk
-        // This situation is possible in cases where DBWalker yeilds or
-        // config task requests for walk before the previous walk is finished
-        if (loc->second->GetWalkerId() != DBTableWalker::kInvalidWalkerId) {
-            // This will be reset when the walk actually starts
-            loc->second->SetWalkAgain(true);
-        }
-        return;
-    } else {
-        state = new RoutingPolicySyncState();
-        state->SetWalkerId(DBTableWalker::kInvalidWalkerId);
-        routing_policy_sync_.insert(std::make_pair(table, state));
-    }
-}
-
-bool
-RoutingPolicyMgr::StartWalk() {
-    CHECK_CONCURRENCY("bgp::Config");
-
-    // For each member table, start a walker to replicate
-    for (RoutingPolicyWalkRequests::iterator it = routing_policy_sync_.begin();
-         it != routing_policy_sync_.end(); ++it) {
-        if (it->second->GetWalkerId() != DBTableWalker::kInvalidWalkerId) {
-            // Walk is in progress.
-            continue;
-        }
-        BgpTable *table = it->first;
-        DB *db = server()->database();
-        DBTableWalker::WalkId id = db->GetWalker()->WalkTable(table, NULL,
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
+    RoutingPolicyWalkRequests::iterator it = routing_policy_sync_.find(table);
+    if (it == routing_policy_sync_.end()) {
+        DBTable::DBTableWalkRef walk_ref = table->AllocWalker(
             boost::bind(&RoutingPolicyMgr::EvaluateRoutingPolicy, this, _1, _2),
-            boost::bind(&RoutingPolicyMgr::WalkDone, this, _1));
-        it->second->SetWalkerId(id);
-        it->second->SetWalkAgain(false);
+            boost::bind(&RoutingPolicyMgr::WalkDone, this, _2));
+        table->WalkTable(walk_ref);
+        routing_policy_sync_.insert(std::make_pair(table, walk_ref));
+    } else {
+        table->WalkAgain(it->second);
     }
-    return true;
 }
 
 void
 RoutingPolicyMgr::WalkDone(DBTableBase *dbtable) {
-    CHECK_CONCURRENCY("db::DBTable");
-    tbb::mutex::scoped_lock lock(mutex_);
+    CHECK_CONCURRENCY("db::Walker");
     BgpTable *table = static_cast<BgpTable *>(dbtable);
-    RoutingPolicyWalkRequests::iterator loc = routing_policy_sync_.find(table);
-    assert(loc != routing_policy_sync_.end());
-    RoutingPolicySyncState *policy_sync_state = loc->second;
-    if (policy_sync_state->WalkAgain()) {
-        policy_sync_state->SetWalkerId(DBTableWalker::kInvalidWalkerId);
-        walk_trigger_->Set();
-        return;
-    }
-    delete policy_sync_state;
-    routing_policy_sync_.erase(loc);
+    RoutingPolicyWalkRequests::iterator it = routing_policy_sync_.find(table);
+    assert(it != routing_policy_sync_.end());
+    DBTable::DBTableWalkRef walk_ref = it->second;
+    routing_policy_sync_.erase(it);
+    table->ReleaseWalker(walk_ref);
 }
 
 class RoutingPolicy::DeleteActor : public LifetimeActor {

@@ -136,16 +136,17 @@ class OpServerProxy::OpServerImpl {
                 LOG(INFO, "Kafka ignoring KafkaPub");
                 return;
             }
-            char* gn = new char[gen.length()+1];
-            strcpy(gn,gen.c_str());
 
             if (producer_) {
+                char* gn = new char[gen.length()+1];
+                strcpy(gn,gen.c_str());
+
                 // Key in Kafka Topic includes UVE Key, Type
                 producer_->produce(topic_[pt].get(), 0, 
                     RdKafka::Producer::MSG_COPY,
                     const_cast<char *>(value.c_str()), value.length(),
                     &skey, (void *)gn);
-                }
+            }
         }
 
         struct RedisInfo {
@@ -494,14 +495,24 @@ class OpServerProxy::OpServerImpl {
                 k_dr_cb.count = 0;
 
 		if (k_event_cb.disableKafka) {
-		    LOG(ERROR, "Kafka Restart");
-		    StopKafka();
-		    assert(StartKafka());
-		    k_event_cb.disableKafka = false;
-		    if (collector_ && redis_up_) {
-			LOG(ERROR, "Kafka Restarting Redis");
-			collector_->RedisUpdate(true);
-		    }
+		    LOG(ERROR, "Kafka Needs Restart");
+                    class RdKafka::Metadata *metadata;
+                    /* Fetch metadata */
+                    RdKafka::ErrorCode err = producer_->metadata(true, NULL,
+                                          &metadata, 5000);
+                    if (err != RdKafka::ERR_NO_ERROR) {
+                        LOG(ERROR, "Failed to acquire metadata: " << RdKafka::err2str(err));
+                    } else {
+                        LOG(ERROR, "Kafka Metadata Detected");
+                        LOG(ERROR, "Metadata for " << metadata->orig_broker_id() <<
+                            ":" << metadata->orig_broker_name());
+
+                        if (collector_ && redis_up_) {
+                            LOG(ERROR, "Kafka Restarting Redis");
+                            collector_->RedisUpdate(true);
+                            k_event_cb.disableKafka = false;
+                        }
+                    }
 		}
             } 
 
@@ -577,7 +588,8 @@ class OpServerProxy::OpServerImpl {
                 topic_.clear();
                 producer_.reset();
 
-                RdKafka::wait_destroyed(5000);
+                assert(RdKafka::wait_destroyed(8000) == 0);
+                LOG(ERROR, "Kafka Stopped");
             }
         }
 

@@ -23,7 +23,6 @@
 #include "controller/controller_ifmap.h"
 #include "controller/controller_dns.h"
 #include "controller/controller_export.h"
-#include "bind/bind_resolver.h"
 
 using namespace boost::asio;
 
@@ -47,9 +46,14 @@ SandeshTraceBufferPtr ControllerRxRouteMessageTraceBuf2(SandeshTraceBufferCreate
     "ControllerRxRouteXmppMessage2", 5000));
 SandeshTraceBufferPtr ControllerRxConfigMessageTraceBuf2(SandeshTraceBufferCreate(
     "ControllerRxConfigXmppMessage2", 5000));
+SandeshTraceBufferPtr ControllerTxMessageTraceBuf1(SandeshTraceBufferCreate(
+    "ControllerTxXmppMessage_1", 5000));
+SandeshTraceBufferPtr ControllerTxMessageTraceBuf2(SandeshTraceBufferCreate(
+    "ControllerTxXmppMessage_2", 5000));
 
-ControllerDiscoveryData::ControllerDiscoveryData(std::vector<DSResponse> resp) :
-    ControllerWorkQueueData(), discovery_response_(resp) {
+ControllerDiscoveryData::ControllerDiscoveryData(xmps::PeerId peer_id,
+                                                 std::vector<DSResponse> resp) :
+    ControllerWorkQueueData(), peer_id_(peer_id), discovery_response_(resp) {
 }
 
 VNController::VNController(Agent *agent) 
@@ -176,7 +180,11 @@ void VNController::XmppServerConnect() {
                 FindChannel(XmppInit::kControlNodeJID);
             assert(channel);
             channel->RegisterRxMessageTraceCallback(
-                             boost::bind(&VNController::XmppMessageTrace,
+                             boost::bind(&VNController::RxXmppMessageTrace,
+                                         this, bgp_peer->GetXmppServerIdx(),
+                                         _1, _2, _3, _4, _5));
+            channel->RegisterTxMessageTraceCallback(
+                             boost::bind(&VNController::TxXmppMessageTrace,
                                          this, bgp_peer->GetXmppServerIdx(),
                                          _1, _2, _3, _4, _5));
             bgp_peer->RegisterXmppChannel(channel);
@@ -225,7 +233,11 @@ void VNController::DnsXmppServerConnect() {
             xmpp_cfg_dns->endpoint.address(
                      ip::address::from_string(agent_->dns_server(count), ec));
             assert(ec.value() == 0);
-            xmpp_cfg_dns->endpoint.port(ContrailPorts::DnsXmpp());
+            if (agent_->xmpp_dns_test_mode()) {
+                xmpp_cfg_dns->endpoint.port(agent_->dns_server_port(count));
+            } else {
+                xmpp_cfg_dns->endpoint.port(ContrailPorts::DnsXmpp());
+            }
             xmpp_cfg_dns->auth_enabled = agent_->dns_auth_enabled();
             if (xmpp_cfg_dns->auth_enabled) {
                 xmpp_cfg_dns->path_to_server_cert = agent_->xmpp_server_cert();
@@ -243,7 +255,7 @@ void VNController::DnsXmppServerConnect() {
                                                 agent_->dns_server(count),
                                                 count);
             client_dns->RegisterConnectionEvent(xmps::DNS,
-                boost::bind(&AgentDnsXmppChannel::HandleXmppClientChannelEvent,
+                boost::bind(&AgentDnsXmppChannel::XmppClientChannelEvent,
                             dns_peer, _2));
 
             xmpp_dns->AddXmppChannelConfig(xmpp_cfg_dns);
@@ -259,10 +271,6 @@ void VNController::DnsXmppServerConnect() {
             agent_->set_dns_xmpp_client(client_dns, count);
             agent_->set_dns_xmpp_channel(dns_peer, count);
             agent_->set_dns_xmpp_init(xmpp_dns, count);
-            BindResolver::Resolver()->SetupResolver(
-                BindResolver::DnsServer(agent_->dns_server(count),
-                                        agent_->dns_server_port(count)),
-                count);
         }
         count++;
     }
@@ -360,6 +368,11 @@ void VNController::Cleanup() {
 
     agent_->controller()->increment_multicast_sequence_number();
     agent_->set_cn_mcast_builder(NULL);
+    for (BgpPeerIterator it  = decommissioned_peer_list_.begin();
+         it != decommissioned_peer_list_.end(); ++it) {
+        BgpPeer *peer = static_cast<BgpPeer *>((*it).get());
+        DynamicPeer::ProcessDelete(peer);
+    }
     decommissioned_peer_list_.clear();
     agent_ifmap_vm_export_.reset();
 }
@@ -439,7 +452,7 @@ bool VNController::AgentXmppServerExists(const std::string &server_ip,
 }
 
 void VNController::ApplyDiscoveryXmppServices(std::vector<DSResponse> resp) {
-    ControllerDiscoveryDataType data(new ControllerDiscoveryData(resp));
+    ControllerDiscoveryDataType data(new ControllerDiscoveryData(xmps::BGP, resp));
     ControllerWorkQueueDataType base_data =
         boost::static_pointer_cast<ControllerWorkQueueData>(data);
     work_queue_.Enqueue(base_data);
@@ -554,8 +567,15 @@ void VNController::DisConnectDnsServer(uint8_t idx) {
     agent_->reset_dns_server(idx);
 }
 
-
 void VNController::ApplyDiscoveryDnsXmppServices(std::vector<DSResponse> resp) {
+    ControllerDiscoveryDataType data(new ControllerDiscoveryData(xmps::DNS, resp));
+    ControllerWorkQueueDataType base_data =
+        boost::static_pointer_cast<ControllerWorkQueueData>(data);
+    work_queue_.Enqueue(base_data);
+}
+
+bool VNController::ApplyDiscoveryDnsXmppServicesInternal(
+    std::vector<DSResponse> resp) {
 
     std::vector<DSResponse>::iterator iter;
     int8_t count = -1;
@@ -623,6 +643,7 @@ void VNController::ApplyDiscoveryDnsXmppServices(std::vector<DSResponse> resp) {
     } 
 
     DnsXmppServerConnect();
+    return true;
 }
 
 /*
@@ -657,7 +678,8 @@ AgentXmppChannel *VNController::GetActiveXmppChannel() {
     return NULL;
 }
 
-void VNController::AddToDecommissionedPeerList(BgpPeerPtr peer) {
+void VNController::AddToDecommissionedPeerList(PeerPtr peer) {
+    (static_cast<BgpPeer *>(peer.get()))->StopRouteExports();
     decommissioned_peer_list_.push_back(peer);
 }
 
@@ -685,6 +707,7 @@ bool VNController::ControllerPeerHeadlessAgentDelDone(BgpPeer *bgp_peer) {
             //Release BGP peer, ideally this should be the last reference being
             //released for peer.
             decommissioned_peer_list_.remove(*it);
+            DynamicPeer::ProcessDelete(bgp_peer);
             break;
         }
     }
@@ -784,8 +807,15 @@ bool VNController::ControllerWorkQueueProcess(ControllerWorkQueueDataType data) 
     ControllerDiscoveryDataType discovery_data =
         boost::dynamic_pointer_cast<ControllerDiscoveryData>(data);
     if (discovery_data) {
-        return ApplyDiscoveryXmppServicesInternal(discovery_data->
-                                                  discovery_response_);
+        if (discovery_data->peer_id_ == xmps::BGP) {
+            return ApplyDiscoveryXmppServicesInternal(discovery_data->
+                                                      discovery_response_);
+        } else if (discovery_data->peer_id_ == xmps::DNS) {
+            return ApplyDiscoveryDnsXmppServicesInternal(discovery_data->
+                                                         discovery_response_);
+        } else {
+            LOG(ERROR, "Unknown Peer Id processing Discovery Response");
+        }
     }
     return true;
 }
@@ -815,9 +845,15 @@ bool VNController::XmppMessageProcess(ControllerXmppDataType data) {
     } else if (data->peer_id() == xmps::DNS) {
         AgentDnsXmppChannel *peer =
             agent_->dns_xmpp_channel(data->channel_id());
-        if (peer) {
-            AgentDnsXmppChannel::HandleXmppClientChannelEvent(peer,
-                                                              data->peer_state());
+        if (data->config()) {
+            if (peer) {
+                peer->ReceiveDnsMessage(data->dom());
+            }
+        } else {
+            if (peer) {
+                AgentDnsXmppChannel::HandleXmppClientChannelEvent(peer,
+                                                                  data->peer_state());
+            }
         }
     }
 
@@ -828,11 +864,11 @@ void VNController::Enqueue(ControllerWorkQueueDataType data) {
     work_queue_.Enqueue(data);
 }
 
-bool VNController::XmppMessageTrace(uint8_t peer_index,
-                                    const std::string &to_address,
-                                    int port, int size,
-                                    const std::string &msg,
-                                    const XmppStanza::XmppMessage *xmppmsg) {
+bool VNController::RxXmppMessageTrace(uint8_t peer_index,
+                                      const std::string &to_address,
+                                      int port, int size,
+                                      const std::string &msg,
+                                      const XmppStanza::XmppMessage *xmppmsg) {
     const std::string &to = xmppmsg->to;
     if (to.find(XmppInit::kBgpPeer) != string::npos) {
         CONTROLLER_RX_ROUTE_MESSAGE_TRACE(Message, peer_index, to_address,
@@ -844,4 +880,14 @@ bool VNController::XmppMessageTrace(uint8_t peer_index,
         return true;
     }
     return false;
+}
+
+bool VNController::TxXmppMessageTrace(uint8_t peer_index,
+                                      const std::string &to_address,
+                                      int port, int size,
+                                      const std::string &msg,
+                                      const XmppStanza::XmppMessage *xmppmsg) {
+    CONTROLLER_TX_MESSAGE_TRACE(Message, peer_index, to_address,
+                                port, size, msg);
+    return true;
 }

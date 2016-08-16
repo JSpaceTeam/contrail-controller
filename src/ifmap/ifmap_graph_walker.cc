@@ -67,8 +67,8 @@ IFMapGraphWalker::IFMapGraphWalker(DBGraph *graph, IFMapExporter *exporter)
     : graph_(graph),
       exporter_(exporter),
       link_delete_walk_trigger_(new TaskTrigger(
-                        boost::bind(&IFMapGraphWalker::LinkDeleteWalk, this),
-                        TaskScheduler::GetInstance()->GetTaskId("db::DBTable"), 0)),
+          boost::bind(&IFMapGraphWalker::LinkDeleteWalk, this),
+          TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable"), 0)),
       walk_client_index_(BitSet::npos) {
     traversal_white_list_.reset(new IFMapTypenameWhiteList());
     AddNodesToWhitelist();
@@ -240,10 +240,10 @@ void IFMapGraphWalker::CleanupInterest(int client_index, IFMapNode *node,
 void IFMapGraphWalker::OldReachableNodesCleanupInterest(int client_index) {
     IFMapState *state = NULL;
     IFMapNode *node = NULL;
-    IFMapExporter::Cs_citer iter =
-        exporter_->ClientConfigTrackerBegin(client_index);
-    IFMapExporter::Cs_citer end_iter =
-        exporter_->ClientConfigTrackerEnd(client_index);
+    IFMapExporter::Cs_citer iter = exporter_->ClientConfigTrackerBegin(
+        IFMapExporter::INTEREST, client_index);
+    IFMapExporter::Cs_citer end_iter = exporter_->ClientConfigTrackerEnd(
+        IFMapExporter::INTEREST, client_index);
 
     while (iter != end_iter) {
         state = *iter;
@@ -347,12 +347,14 @@ void IFMapGraphWalker::AddNodesToWhitelist() {
     traversal_white_list_->include_vertex.insert("instance-ip");
     traversal_white_list_->include_vertex.insert("virtual-network");
     traversal_white_list_->include_vertex.insert("floating-ip");
+    traversal_white_list_->include_vertex.insert("alias-ip");
     traversal_white_list_->include_vertex.insert("customer-attachment");
     traversal_white_list_->include_vertex.insert(
         "virtual-machine-interface-routing-instance");
     traversal_white_list_->include_vertex.insert("physical-interface");
     traversal_white_list_->include_vertex.insert("domain");
     traversal_white_list_->include_vertex.insert("floating-ip-pool");
+    traversal_white_list_->include_vertex.insert("alias-ip-pool");
     traversal_white_list_->include_vertex.insert("logical-interface");
     traversal_white_list_->include_vertex.insert(
         "virtual-network-network-ipam");
@@ -363,15 +365,13 @@ void IFMapGraphWalker::AddNodesToWhitelist() {
     traversal_white_list_->include_vertex.insert("network-ipam");
     traversal_white_list_->include_vertex.insert("virtual-DNS-record");
     traversal_white_list_->include_vertex.insert("interface-route-table");
-    traversal_white_list_->include_vertex.insert("virtual-ip");
-    traversal_white_list_->include_vertex.insert("loadbalancer");
-    traversal_white_list_->include_vertex.insert("loadbalancer-listener");
-    traversal_white_list_->include_vertex.insert("loadbalancer-pool");
-    traversal_white_list_->include_vertex.insert("loadbalancer-member");
-    traversal_white_list_->include_vertex.insert("loadbalancer-healthmonitor");
     traversal_white_list_->include_vertex.insert("subnet");
     traversal_white_list_->include_vertex.insert("service-health-check");
     traversal_white_list_->include_vertex.insert("bgp-as-a-service");
+    traversal_white_list_->include_vertex.insert("qos-config");
+    traversal_white_list_->include_vertex.insert("qos-queue");
+    traversal_white_list_->include_vertex.insert("forwarding-class");
+    traversal_white_list_->include_vertex.insert("global-qos-config");
 }
 
 void IFMapGraphWalker::AddLinksToWhitelist() {
@@ -408,6 +408,8 @@ void IFMapGraphWalker::AddLinksToWhitelist() {
     traversal_white_list_->include_edge.insert(
         "source=virtual-machine-interface,target=floating-ip");
     traversal_white_list_->include_edge.insert(
+        "source=virtual-machine-interface,target=alias-ip");
+    traversal_white_list_->include_edge.insert(
         "source=virtual-machine-interface,target=customer-attachment");
     traversal_white_list_->include_edge.insert(
         "source=virtual-machine-interface,target=virtual-machine-interface-routing-instance");
@@ -428,6 +430,8 @@ void IFMapGraphWalker::AddLinksToWhitelist() {
     traversal_white_list_->include_edge.insert(
         "source=virtual-network,target=floating-ip-pool");
     traversal_white_list_->include_edge.insert(
+        "source=virtual-network,target=alias-ip-pool");
+    traversal_white_list_->include_edge.insert(
         "source=virtual-network,target=virtual-network-network-ipam");
     traversal_white_list_->include_edge.insert(
         "source=virtual-network,target=access-control-list");
@@ -444,28 +448,14 @@ void IFMapGraphWalker::AddLinksToWhitelist() {
     traversal_white_list_->include_edge.insert(
         "source=security-group,target=access-control-list");
     traversal_white_list_->include_edge.insert(
-        "source=service-instance,target=loadbalancer-pool");
-    traversal_white_list_->include_edge.insert(
-        "source=loadbalancer-pool,target=loadbalancer-healthmonitor");
-    traversal_white_list_->include_edge.insert(
-        "source=loadbalancer-pool,target=virtual-ip");
-    traversal_white_list_->include_edge.insert(
-        "source=loadbalancer-pool,target=loadbalancer-member");
-    traversal_white_list_->include_edge.insert(
         "source=virtual-machine-interface,target=subnet");
-    traversal_white_list_->include_edge.insert(
-        "source=service-instance,target=loadbalancer");
-    traversal_white_list_->include_edge.insert(
-        "source=loadbalancer,target=loadbalancer-listener");
-    traversal_white_list_->include_edge.insert(
-        "source=loadbalancer-listener,target=loadbalancer-pool");
-    traversal_white_list_->include_edge.insert(
-        "source=virtual-machine-interface,target=loadbalancer");
 
     // Manually add required links not picked by the
     // IFMapGraphTraversalFilterCalculator
     traversal_white_list_->include_edge.insert(
         "source=floating-ip,target=floating-ip-pool");
+    traversal_white_list_->include_edge.insert(
+        "source=alias-ip,target=alias-ip-pool");
     traversal_white_list_->include_edge.insert(
         "source=virtual-machine-interface-routing-instance,target=routing-instance");
     // VDNS needs dns/dhcp info from IPAM and FQN from Domain.
@@ -475,6 +465,10 @@ void IFMapGraphWalker::AddLinksToWhitelist() {
     // getting the pool from. EG: public-network (might not have any VMs)
     traversal_white_list_->include_edge.insert(
         "source=floating-ip-pool,target=virtual-network");
+    // Need this to get from alias-ip-pool to the virtual-network we are
+    // getting the pool from. since alias ip network might not have any VMs
+    traversal_white_list_->include_edge.insert(
+        "source=alias-ip-pool,target=virtual-network");
     traversal_white_list_->include_edge.insert(
         "source=virtual-machine-interface,target=service-health-check");
     traversal_white_list_->include_edge.insert(
@@ -483,5 +477,23 @@ void IFMapGraphWalker::AddLinksToWhitelist() {
         "source=bgp-as-a-service,target=bgp-router");
     traversal_white_list_->include_edge.insert(
         "source=bgp-router,target=routing-instance");
+
+
+    traversal_white_list_->include_edge.insert(
+                    "source=global-system-config,target=global-qos-config");
+    traversal_white_list_->include_edge.insert(
+                    "source=global-qos-config,target=forwarding-class");
+    traversal_white_list_->include_edge.insert(
+                    "source=global-qos-config,target=qos-queue");
+    traversal_white_list_->include_edge.insert(
+                    "source=forwarding-class,target=qos-queue");
+    traversal_white_list_->include_edge.insert(
+                    "source=global-qos-config,target=qos-config");
+    traversal_white_list_->include_edge.insert(
+                    "source=virtual-machine-interface,target=qos-config");
+    traversal_white_list_->include_edge.insert(
+                    "source=virtual-network,target=qos-config");
+    traversal_white_list_->include_edge.insert(
+                    "source=global-system-config,target=qos-config");
 }
 

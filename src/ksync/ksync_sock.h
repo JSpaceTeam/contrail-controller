@@ -53,6 +53,8 @@ public:
     virtual void DropStatsMsgHandler(vr_drop_stats_req *req) = 0;
     virtual void VxLanMsgHandler(vr_vxlan_req *req) = 0;
     virtual void VrouterOpsMsgHandler(vrouter_ops *req) = 0;
+    virtual void QosConfigMsgHandler(vr_qos_map_req *req) = 0;
+    virtual void ForwardingClassMsgHandler(vr_fc_map_req *req) = 0;
     virtual void SetErrno(int err) {errno_ = err;}
 
     int GetErrno() const {return errno_;}
@@ -185,6 +187,8 @@ public:
     void DropStatsMsgHandler(vr_drop_stats_req *req);
     void VxLanMsgHandler(vr_vxlan_req *req);
     void VrouterOpsMsgHandler(vrouter_ops *req);
+    void QosConfigMsgHandler(vr_qos_map_req *req);
+    void ForwardingClassMsgHandler(vr_fc_map_req *req);
     void SetErrno(int err);
 
     bool Decoder(char *buff, uint32_t buff_len, uint32_t alignment, bool more);
@@ -219,11 +223,14 @@ public:
     const static unsigned kMaxBulkMsgCount = 16;
     // Max size of buffer that can be bunched together
     const static unsigned kMaxBulkMsgSize = (4*1024);
+    // Sequence number to denote invalid builk-context
+    const static unsigned kInvalidBulkSeqNo = 0xFFFFFFFF;
 
-    typedef std::map<int, KSyncBulkSandeshContext> WaitTree;
-    typedef std::pair<int, KSyncBulkSandeshContext> WaitTreePair;
+    typedef std::map<uint32_t, KSyncBulkSandeshContext> WaitTree;
+    typedef std::pair<uint32_t, KSyncBulkSandeshContext> WaitTreePair;
     typedef boost::function<void(const boost::system::error_code &, size_t)>
         HandlerCb;
+    typedef WorkQueue<char *> KSyncReceiveQueue;
 
     KSyncSock();
     virtual ~KSyncSock();
@@ -238,7 +245,7 @@ public:
     std::size_t BlockingSend(char *msg, int msg_len);
     void GenericSend(IoContext *ctx);
     bool BlockingRecv();
-    int AllocSeqNo(bool is_uve);
+    uint32_t AllocSeqNo(bool is_uve);
 
     // Bulk Messaging methods
     KSyncBulkSandeshContext *LocateBulkContext(uint32_t seqno,
@@ -246,6 +253,7 @@ public:
     int SendBulkMessage(KSyncBulkSandeshContext *bulk_context, uint32_t seqno);
     bool TryAddToBulk(KSyncBulkSandeshContext *bulk_context, IoContext *ioc);
     void OnEmptyQueue(bool done);
+    int tx_count() const { return tx_count_; }
 
     // Start Ksync Asio operations
     static void Start(bool read_inline);
@@ -265,6 +273,15 @@ public:
     static void SetAgentSandeshContext(AgentSandeshContext *ctx) {
         agent_sandesh_ctx_ = ctx;
     }
+
+    const KSyncTxQueue *send_queue() const { return &send_queue_; }
+    const KSyncReceiveQueue *get_receive_work_queue(uint16_t index) const {
+        return receive_work_queue[index];
+    }
+
+    uint32_t WaitTreeSize() const;
+    void SetSeqno(uint32_t seq);
+    void SetMeasureQueueDelay(bool val);
 protected:
     static void Init(bool use_work_queue);
     static void SetSockTableEntry(KSyncSock *sock);
@@ -275,7 +292,7 @@ protected:
     WaitTree wait_tree_;
     KSyncTxQueue send_queue_;
     tbb::mutex mutex_;
-    WorkQueue<char *> *receive_work_queue[IoContext::MAX_WORK_QUEUES];
+    KSyncReceiveQueue *receive_work_queue[IoContext::MAX_WORK_QUEUES];
 
     // Information maintained for bulk processing
 
@@ -286,7 +303,7 @@ protected:
 
     // Sequence number of first message in bulk context. Entry in WaitTree is
     // added based on this sequence number
-    int      bulk_seq_no_;
+    uint32_t bulk_seq_no_;
     // Current buffer size in bulk context
     uint32_t bulk_buf_size_;
     // Current message count in bulk context
@@ -320,8 +337,8 @@ private:
 
 private:
     char *rx_buff_;
-    tbb::atomic<int> seqno_;
-    tbb::atomic<int> uve_seqno_;
+    tbb::atomic<uint32_t> seqno_;
+    tbb::atomic<uint32_t> uve_seqno_;
 
     // Debug stats
     int tx_count_;

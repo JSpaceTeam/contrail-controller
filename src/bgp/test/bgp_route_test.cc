@@ -7,7 +7,9 @@
 #include "bgp/bgp_log.h"
 #include "bgp/bgp_server.h"
 #include "bgp/inet/inet_route.h"
+#include "bgp/origin-vn/origin_vn.h"
 #include "control-node/control_node.h"
+#include "net/community_type.h"
 
 
 using std::string;
@@ -31,23 +33,25 @@ public:
     }
     virtual bool SendUpdate(const uint8_t *msg, size_t msgsize) { return true; }
     virtual BgpServer *server() { return NULL; }
+    virtual BgpServer *server() const { return NULL; }
     virtual IPeerClose *peer_close() { return NULL; }
     virtual IPeerDebugStats *peer_stats() { return NULL; }
     virtual const IPeerDebugStats *peer_stats() const { return NULL; }
     virtual bool IsReady() const { return true; }
     virtual bool IsXmppPeer() const { return peer_type_ == BgpProto::XMPP; }
-    virtual void Close() { }
+    virtual void Close(bool non_graceful) { }
     virtual const string GetStateName() const { return "Established"; }
     BgpProto::BgpPeerType PeerType() const { return peer_type_; }
     virtual uint32_t bgp_identifier() const { return address_.to_ulong(); }
-    virtual void UpdateRefCount(int count) const { }
-    virtual tbb::atomic<int> GetRefCount() const {
-        tbb::atomic<int> count;
-        count = 0;
-        return count;
-    }
+    virtual void UpdateTotalPathCount(int count) const { }
+    virtual int GetTotalPathCount() const { return 0; }
     virtual void UpdatePrimaryPathCount(int count) const { }
     virtual int GetPrimaryPathCount() const { return 0; }
+    virtual bool IsRegistrationRequired() const { return true; }
+    virtual void MembershipRequestCallback(BgpTable *table) { }
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+        BgpRoute *route, BgpPath *path) { return false; }
+    virtual bool CanUseMembershipManager() const { return true; }
 
 private:
     BgpProto::BgpPeerType peer_type_;
@@ -121,6 +125,146 @@ TEST_F(BgpRouteTest, Paths) {
     route.RemovePath(&peer);
     route.RemovePath(&peer);
     route.RemovePath(&peer);
+}
+
+//
+// Path with shorter AS Path is better - even when building ECMP nexthops.
+//
+TEST_F(BgpRouteTest, PathCompareAsPathLength1) {
+    boost::system::error_code ec;
+    BgpAttrDB *db = server_.attr_db();
+
+    BgpAttrSpec spec1;
+    BgpAttrMultiExitDisc med_spec1(100);
+    spec1.push_back(&med_spec1);
+    AsPathSpec aspath_spec1;
+    AsPathSpec::PathSegment *ps1 = new AsPathSpec::PathSegment;
+    ps1->path_segment_type = AsPathSpec::PathSegment::AS_SEQUENCE;
+    ps1->path_segment.push_back(64512);
+    ps1->path_segment.push_back(64512);
+    aspath_spec1.path_segments.push_back(ps1);
+    spec1.push_back(&aspath_spec1);
+    BgpAttrPtr attr1 = db->Locate(spec1);
+    PeerMock peer1(BgpProto::EBGP, Ip4Address::from_string("10.1.1.2", ec));
+    BgpPath path1(&peer1, BgpPath::BGP_XMPP, attr1, 0, 0);
+
+    BgpAttrSpec spec2;
+    BgpAttrMultiExitDisc med_spec2(100);
+    spec2.push_back(&med_spec2);
+    AsPathSpec aspath_spec2;
+    AsPathSpec::PathSegment *ps2 = new AsPathSpec::PathSegment;
+    ps2->path_segment_type = AsPathSpec::PathSegment::AS_SEQUENCE;
+    ps2->path_segment.push_back(64512);
+    ps2->path_segment.push_back(64512);
+    ps2->path_segment.push_back(64512);
+    aspath_spec2.path_segments.push_back(ps2);
+    spec2.push_back(&aspath_spec2);
+    BgpAttrPtr attr2 = db->Locate(spec2);
+    PeerMock peer2(BgpProto::EBGP, Ip4Address::from_string("10.1.1.1", ec));
+    BgpPath path2(&peer2, BgpPath::BGP_XMPP, attr2, 0, 0);
+
+    EXPECT_EQ(-1, path1.PathCompare(path2, false));
+    EXPECT_EQ(1, path2.PathCompare(path1, false));
+    EXPECT_EQ(-1, path1.PathCompare(path2, true));
+    EXPECT_EQ(1, path2.PathCompare(path1, true));
+}
+
+//
+// AS Path length is ignored for service chain paths - only when building ECMP
+// nexthops.
+//
+TEST_F(BgpRouteTest, PathCompareAsPathLength2) {
+    boost::system::error_code ec;
+    BgpAttrDB *db = server_.attr_db();
+
+    BgpAttrSpec spec1;
+    BgpAttrMultiExitDisc med_spec1(100);
+    spec1.push_back(&med_spec1);
+    AsPathSpec aspath_spec1;
+    AsPathSpec::PathSegment *ps1 = new AsPathSpec::PathSegment;
+    ps1->path_segment_type = AsPathSpec::PathSegment::AS_SEQUENCE;
+    ps1->path_segment.push_back(64512);
+    ps1->path_segment.push_back(64512);
+    aspath_spec1.path_segments.push_back(ps1);
+    spec1.push_back(&aspath_spec1);
+    OriginVnPathSpec ovn_spec1;
+    OriginVn origin_vn1(64512, 999);
+    ovn_spec1.origin_vns.push_back(origin_vn1.GetExtCommunityValue());
+    spec1.push_back(&ovn_spec1);
+    BgpAttrPtr attr1 = db->Locate(spec1);
+    PeerMock peer1(BgpProto::EBGP, Ip4Address::from_string("10.1.1.2", ec));
+    BgpPath path1(&peer1, BgpPath::BGP_XMPP, attr1, 0, 0);
+
+    BgpAttrSpec spec2;
+    BgpAttrMultiExitDisc med_spec2(100);
+    spec2.push_back(&med_spec2);
+    AsPathSpec aspath_spec2;
+    AsPathSpec::PathSegment *ps2 = new AsPathSpec::PathSegment;
+    ps2->path_segment_type = AsPathSpec::PathSegment::AS_SEQUENCE;
+    ps2->path_segment.push_back(64512);
+    ps2->path_segment.push_back(64512);
+    ps2->path_segment.push_back(64512);
+    aspath_spec2.path_segments.push_back(ps2);
+    spec2.push_back(&aspath_spec2);
+    OriginVnPathSpec ovn_spec2;
+    OriginVn origin_vn2(64512, 999);
+    ovn_spec2.origin_vns.push_back(origin_vn2.GetExtCommunityValue());
+    spec2.push_back(&ovn_spec2);
+    BgpAttrPtr attr2 = db->Locate(spec2);
+    PeerMock peer2(BgpProto::EBGP, Ip4Address::from_string("10.1.1.1", ec));
+    BgpPath path2(&peer2, BgpPath::BGP_XMPP, attr2, 0, 0);
+
+    EXPECT_EQ(-1, path1.PathCompare(path2, false));
+    EXPECT_EQ(1, path2.PathCompare(path1, false));
+    EXPECT_EQ(0, path1.PathCompare(path2, true));
+    EXPECT_EQ(0, path2.PathCompare(path1, true));
+}
+
+//
+// AS Path length is not ignored when comparing a service chain path and a
+// regular path - even when building ECMP nexthops.
+//
+TEST_F(BgpRouteTest, PathCompareAsPathLength3) {
+    boost::system::error_code ec;
+    BgpAttrDB *db = server_.attr_db();
+
+    BgpAttrSpec spec1;
+    BgpAttrMultiExitDisc med_spec1(100);
+    spec1.push_back(&med_spec1);
+    AsPathSpec aspath_spec1;
+    AsPathSpec::PathSegment *ps1 = new AsPathSpec::PathSegment;
+    ps1->path_segment_type = AsPathSpec::PathSegment::AS_SEQUENCE;
+    ps1->path_segment.push_back(64512);
+    ps1->path_segment.push_back(64512);
+    aspath_spec1.path_segments.push_back(ps1);
+    spec1.push_back(&aspath_spec1);
+    OriginVnPathSpec ovn_spec1;
+    OriginVn origin_vn1(64512, 999);
+    ovn_spec1.origin_vns.push_back(origin_vn1.GetExtCommunityValue());
+    spec1.push_back(&ovn_spec1);
+    BgpAttrPtr attr1 = db->Locate(spec1);
+    PeerMock peer1(BgpProto::EBGP, Ip4Address::from_string("10.1.1.2", ec));
+    BgpPath path1(&peer1, BgpPath::BGP_XMPP, attr1, 0, 0);
+
+    BgpAttrSpec spec2;
+    BgpAttrMultiExitDisc med_spec2(100);
+    spec2.push_back(&med_spec2);
+    AsPathSpec aspath_spec2;
+    AsPathSpec::PathSegment *ps2 = new AsPathSpec::PathSegment;
+    ps2->path_segment_type = AsPathSpec::PathSegment::AS_SEQUENCE;
+    ps2->path_segment.push_back(64512);
+    ps2->path_segment.push_back(64512);
+    ps2->path_segment.push_back(64512);
+    aspath_spec2.path_segments.push_back(ps2);
+    spec2.push_back(&aspath_spec2);
+    BgpAttrPtr attr2 = db->Locate(spec2);
+    PeerMock peer2(BgpProto::EBGP, Ip4Address::from_string("10.1.1.1", ec));
+    BgpPath path2(&peer2, BgpPath::BGP_XMPP, attr2, 0, 0);
+
+    EXPECT_EQ(-1, path1.PathCompare(path2, false));
+    EXPECT_EQ(1, path2.PathCompare(path1, false));
+    EXPECT_EQ(-1, path1.PathCompare(path2, true));
+    EXPECT_EQ(1, path2.PathCompare(path1, true));
 }
 
 //
@@ -345,6 +489,7 @@ TEST_F(BgpRouteTest, PathCompareClusterList2) {
 
 //
 // Path with lower med is better.
+// Paths with different MEDs are not considered ECMP.
 //
 TEST_F(BgpRouteTest, PathCompareMed1) {
     boost::system::error_code ec;
@@ -380,12 +525,15 @@ TEST_F(BgpRouteTest, PathCompareMed1) {
 
     EXPECT_EQ(-1, path1.PathCompare(path2, false));
     EXPECT_EQ(1, path2.PathCompare(path1, false));
+    EXPECT_EQ(-1, path1.PathCompare(path2, true));
+    EXPECT_EQ(1, path2.PathCompare(path1, true));
 }
 
 //
 // Paths with different neighbor as are not compared w.r.t med.
 // Path with higher med happens to win since it has lower router id.
 // Both paths have as paths, but the leftmost as is different.
+// Paths with different MEDs are considered ECMP as leftmost AS is different.
 //
 TEST_F(BgpRouteTest, PathCompareMed2) {
     boost::system::error_code ec;
@@ -421,12 +569,15 @@ TEST_F(BgpRouteTest, PathCompareMed2) {
 
     EXPECT_EQ(1, path1.PathCompare(path2, false));
     EXPECT_EQ(-1, path2.PathCompare(path1, false));
+    EXPECT_EQ(0, path1.PathCompare(path2, true));
+    EXPECT_EQ(0, path2.PathCompare(path1, true));
 }
 
 //
 // Paths with different neighbor as are not compared w.r.t med.
 // Path with higher med happens to win since it has lower router id.
 // Both paths have nil as path.
+// Paths with different MEDs are considered ECMP as leftmost AS is 0.
 //
 TEST_F(BgpRouteTest, PathCompareMed3) {
     boost::system::error_code ec;
@@ -452,12 +603,15 @@ TEST_F(BgpRouteTest, PathCompareMed3) {
 
     EXPECT_EQ(1, path1.PathCompare(path2, false));
     EXPECT_EQ(-1, path2.PathCompare(path1, false));
+    EXPECT_EQ(0, path1.PathCompare(path2, true));
+    EXPECT_EQ(0, path2.PathCompare(path1, true));
 }
 
 //
 // Paths with 0 neighbor as are not compared w.r.t med.
 // Path with higher med happens to win since it has lower router id.
 // First segment in both paths is an AS_SET.
+// Paths with different MEDs are considered ECMP as leftmost AS is 0.
 //
 TEST_F(BgpRouteTest, PathCompareMed4) {
     boost::system::error_code ec;
@@ -493,6 +647,168 @@ TEST_F(BgpRouteTest, PathCompareMed4) {
 
     EXPECT_EQ(1, path1.PathCompare(path2, false));
     EXPECT_EQ(-1, path2.PathCompare(path1, false));
+    EXPECT_EQ(0, path1.PathCompare(path2, true));
+    EXPECT_EQ(0, path2.PathCompare(path1, true));
+}
+
+//
+// LlgrStale path is considered worse.
+// Path2 is marked as LlgrStale
+//
+TEST_F(BgpRouteTest, PathCompareLlgrStale1) {
+    boost::system::error_code ec;
+    BgpAttrDB *db = server_.attr_db();
+
+    BgpAttrSpec spec1;
+    BgpAttrPtr attr1 = db->Locate(spec1);
+    PeerMock peer1(BgpProto::IBGP, Ip4Address::from_string("10.1.1.1", ec));
+    BgpPath path1(&peer1, BgpPath::BGP_XMPP, attr1, 0, 0);
+
+    BgpAttrSpec spec2;
+    BgpAttrPtr attr2 = db->Locate(spec2);
+    PeerMock peer2(BgpProto::IBGP, Ip4Address::from_string("10.1.1.2", ec));
+    BgpPath path2(&peer2, BgpPath::BGP_XMPP, attr2, 0, 0);
+    path2.SetLlgrStale();
+
+    EXPECT_EQ(-1, path1.PathCompare(path2, false));
+    EXPECT_EQ(1, path2.PathCompare(path1, false));
+}
+
+//
+// LlgrStale path is considered worse.
+// Path2 is tagged with LLGR_STALE community
+//
+TEST_F(BgpRouteTest, PathCompareLlgrStale2) {
+    boost::system::error_code ec;
+    BgpAttrDB *db = server_.attr_db();
+
+    BgpAttrSpec spec1;
+    CommunitySpec comm_spec1;
+    comm_spec1.communities.push_back(CommunityType::LlgrStale);
+    spec1.push_back(&comm_spec1);
+    BgpAttrPtr attr1 = db->Locate(spec1);
+    PeerMock peer1(BgpProto::IBGP, Ip4Address::from_string("10.1.1.1", ec));
+    BgpPath path1(&peer1, BgpPath::BGP_XMPP, attr1, 0, 0);
+
+    BgpAttrSpec spec2;
+    CommunitySpec comm_spec2;
+    comm_spec2.communities.push_back(CommunityType::LlgrStale);
+    spec2.push_back(&comm_spec2);
+    BgpAttrPtr attr2 = db->Locate(spec2);
+    PeerMock peer2(BgpProto::IBGP, Ip4Address::from_string("10.1.1.2", ec));
+    BgpPath path2(&peer2, BgpPath::BGP_XMPP, attr2, 0, 0);
+
+    EXPECT_EQ(-1, path1.PathCompare(path2, false));
+    EXPECT_EQ(1, path2.PathCompare(path1, false));
+}
+
+//
+// LlgrStale path is considered worse.
+// Path2 is both marked LlgrStale and is tagged with LLGR_STALE community
+//
+TEST_F(BgpRouteTest, PathCompareLlgrStale3) {
+    boost::system::error_code ec;
+    BgpAttrDB *db = server_.attr_db();
+
+    BgpAttrSpec spec1;
+    BgpAttrPtr attr1 = db->Locate(spec1);
+    PeerMock peer1(BgpProto::IBGP, Ip4Address::from_string("10.1.1.1", ec));
+    BgpPath path1(&peer1, BgpPath::BGP_XMPP, attr1, 0, 0);
+
+    BgpAttrSpec spec2;
+    CommunitySpec comm_spec2;
+    comm_spec2.communities.push_back(CommunityType::LlgrStale);
+    spec2.push_back(&comm_spec2);
+    BgpAttrPtr attr2 = db->Locate(spec2);
+    PeerMock peer2(BgpProto::IBGP, Ip4Address::from_string("10.1.1.2", ec));
+    BgpPath path2(&peer2, BgpPath::BGP_XMPP, attr2, 0, 0);
+    path2.SetLlgrStale();
+
+    EXPECT_EQ(-1, path1.PathCompare(path2, false));
+    EXPECT_EQ(1, path2.PathCompare(path1, false));
+}
+
+//
+// Llgr Paths with same router id are considered are equal.
+// Both Path1 and Path2 are marked LlgrStale
+//
+TEST_F(BgpRouteTest, PathCompareLlgrStale4) {
+    boost::system::error_code ec;
+    BgpAttrDB *db = server_.attr_db();
+
+    BgpAttrSpec spec1;
+    BgpAttrPtr attr1 = db->Locate(spec1);
+    PeerMock peer1(BgpProto::IBGP, Ip4Address::from_string("10.1.1.250", ec));
+    BgpPath path1(&peer1, BgpPath::BGP_XMPP, attr1, 0, 0);
+    path1.SetLlgrStale();
+
+    BgpAttrSpec spec2;
+    BgpAttrPtr attr2 = db->Locate(spec2);
+    PeerMock peer2(BgpProto::IBGP, Ip4Address::from_string("10.1.1.250", ec));
+    BgpPath path2(&peer2, BgpPath::BGP_XMPP, attr2, 0, 0);
+    path2.SetLlgrStale();
+
+    EXPECT_EQ(0, path1.PathCompare(path2, false));
+    EXPECT_EQ(0, path2.PathCompare(path1, false));
+}
+
+//
+// Llgr Paths with same router id are considered are equal.
+// Both Path1 and Path2 are tagged with LLGR_STALE community
+//
+TEST_F(BgpRouteTest, PathCompareLlgrStale5) {
+    boost::system::error_code ec;
+    BgpAttrDB *db = server_.attr_db();
+
+    BgpAttrSpec spec1;
+    CommunitySpec comm_spec1;
+    comm_spec1.communities.push_back(CommunityType::LlgrStale);
+    spec1.push_back(&comm_spec1);
+    BgpAttrPtr attr1 = db->Locate(spec1);
+    PeerMock peer1(BgpProto::IBGP, Ip4Address::from_string("10.1.1.250", ec));
+    BgpPath path1(&peer1, BgpPath::BGP_XMPP, attr1, 0, 0);
+
+    BgpAttrSpec spec2;
+    CommunitySpec comm_spec2;
+    comm_spec2.communities.push_back(CommunityType::LlgrStale);
+    spec2.push_back(&comm_spec2);
+    BgpAttrPtr attr2 = db->Locate(spec2);
+    PeerMock peer2(BgpProto::IBGP, Ip4Address::from_string("10.1.1.250", ec));
+    BgpPath path2(&peer2, BgpPath::BGP_XMPP, attr2, 0, 0);
+
+    EXPECT_EQ(0, path1.PathCompare(path2, false));
+    EXPECT_EQ(0, path2.PathCompare(path1, false));
+}
+
+//
+// Llgr Paths with same router id are considered are equal.
+// Both Path1 and Path2 are marked LlgrStale and
+// Both Path1 and Path2 are tagged with LLGR_STALE community
+//
+TEST_F(BgpRouteTest, PathCompareLlgrStale6) {
+    boost::system::error_code ec;
+    BgpAttrDB *db = server_.attr_db();
+
+    BgpAttrSpec spec1;
+    CommunitySpec comm_spec1;
+    comm_spec1.communities.push_back(CommunityType::LlgrStale);
+    spec1.push_back(&comm_spec1);
+    BgpAttrPtr attr1 = db->Locate(spec1);
+    PeerMock peer1(BgpProto::IBGP, Ip4Address::from_string("10.1.1.250", ec));
+    BgpPath path1(&peer1, BgpPath::BGP_XMPP, attr1, 0, 0);
+    path1.SetLlgrStale();
+
+    BgpAttrSpec spec2;
+    CommunitySpec comm_spec2;
+    comm_spec2.communities.push_back(CommunityType::LlgrStale);
+    spec1.push_back(&comm_spec2);
+    BgpAttrPtr attr2 = db->Locate(spec2);
+    PeerMock peer2(BgpProto::IBGP, Ip4Address::from_string("10.1.1.250", ec));
+    BgpPath path2(&peer2, BgpPath::BGP_XMPP, attr2, 0, 0);
+    path2.SetLlgrStale();
+
+    EXPECT_EQ(0, path1.PathCompare(path2, false));
+    EXPECT_EQ(0, path2.PathCompare(path1, false));
 }
 
 static void SetUp() {

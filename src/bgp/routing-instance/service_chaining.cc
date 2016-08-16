@@ -12,7 +12,8 @@
 #include "base/task_trigger.h"
 #include "bgp/bgp_config.h"
 #include "bgp/bgp_log.h"
-#include "bgp/bgp_peer_membership.h"
+#include "bgp/bgp_membership.h"
+#include "bgp/bgp_server.h"
 #include "bgp/extended-community/load_balance.h"
 #include "bgp/extended-community/site_of_origin.h"
 #include "bgp/inet6vpn/inet6vpn_route.h"
@@ -68,7 +69,9 @@ ServiceChain<T>::ServiceChain(ServiceChainMgrT *manager, RoutingInstance *src,
       connected_table_unregistered_(false),
       dest_table_unregistered_(false),
       aggregate_(false),
-      src_table_delete_ref_(this, src_table()->deleter()) {
+      src_table_delete_ref_(this, src_table()->deleter()),
+      dest_table_delete_ref_(this, dest_table()->deleter()),
+      connected_table_delete_ref_(this, connected_table()->deleter()) {
     for (vector<string>::const_iterator it = subnets.begin();
          it != subnets.end(); ++it) {
         error_code ec;
@@ -392,6 +395,7 @@ void ServiceChain<T>::AddServiceChainRoute(PrefixT prefix,
     bool load_balance_present = false;
     const Community *orig_community = NULL;
     const OriginVnPath *orig_ovnpath = NULL;
+    RouteDistinguisher orig_rd;
     if (orig_route) {
         const BgpPath *orig_path = orig_route->BestPath();
         const BgpAttr *orig_attr = NULL;
@@ -402,6 +406,7 @@ void ServiceChain<T>::AddServiceChainRoute(PrefixT prefix,
             orig_community = orig_attr->community();
             ext_community = orig_attr->ext_community();
             orig_ovnpath = orig_attr->origin_vn_path();
+            orig_rd = orig_attr->source_rd();
         }
         if (ext_community) {
             BOOST_FOREACH(const ExtCommunity::ExtCommunityValue &comm,
@@ -423,7 +428,7 @@ void ServiceChain<T>::AddServiceChainRoute(PrefixT prefix,
     CommunityPtr new_community = comm_db->AppendAndLocate(
         orig_community, CommunityType::AcceptOwnNexthop);
     ExtCommunityDB *extcomm_db = server->extcomm_db();
-    PeerRibMembershipManager *membership_mgr = server->membership_mgr();
+    BgpMembershipManager *membership_mgr = server->membership_mgr();
     OriginVnPathDB *ovnpath_db = server->ovnpath_db();
     OriginVnPathPtr new_ovnpath =
         ovnpath_db->PrependAndLocate(orig_ovnpath, origin_vn.GetExtCommunity());
@@ -450,6 +455,7 @@ void ServiceChain<T>::AddServiceChainRoute(PrefixT prefix,
             continue;
 
         const BgpAttr *attr = connected_path->GetAttr();
+
         ExtCommunityPtr new_ext_community;
 
         // Strip any RouteTargets from the connected attributes.
@@ -507,6 +513,7 @@ void ServiceChain<T>::AddServiceChainRoute(PrefixT prefix,
             RouteDistinguisher connected_rd = attr->source_rd();
             if (connected_rd.Type() != RouteDistinguisher::TypeIpAddressBased)
                 continue;
+
             RouteDistinguisher rd(connected_rd.GetAddress(), instance_id);
             new_attr = attr_db->ReplaceSourceRdAndLocate(new_attr.get(), rd);
         }
@@ -525,6 +532,10 @@ void ServiceChain<T>::AddServiceChainRoute(PrefixT prefix,
             }
         }
 
+        // Skip paths with Source RD same as source RD of the connected path
+        if (!orig_rd.IsZero() && new_attr->source_rd() == orig_rd)
+            continue;
+
         // Check whether we already have a path with the associated path id.
         uint32_t path_id =
             connected_path->GetAttr()->nexthop().to_v4().to_ulong();
@@ -532,6 +543,7 @@ void ServiceChain<T>::AddServiceChainRoute(PrefixT prefix,
             service_chain_route->FindPath(BgpPath::ServiceChain, NULL,
                                           path_id);
         bool is_stale = false;
+        bool is_llgr_stale = false;
         bool path_updated = false;
         if (existing_path != NULL) {
             // Existing path can be reused.
@@ -544,6 +556,7 @@ void ServiceChain<T>::AddServiceChainRoute(PrefixT prefix,
             // Remove existing path, new path will be added below.
             path_updated = true;
             is_stale = existing_path->IsStale();
+            is_llgr_stale = existing_path->IsLlgrStale();
             service_chain_route->RemovePath(
                 BgpPath::ServiceChain, NULL, path_id);
         }
@@ -553,6 +566,8 @@ void ServiceChain<T>::AddServiceChainRoute(PrefixT prefix,
                         connected_path->GetFlags(), connected_path->GetLabel());
         if (is_stale)
             new_path->SetStale();
+        if (is_llgr_stale)
+            new_path->SetLlgrStale();
 
         new_path_ids.insert(path_id);
         service_chain_route->InsertPath(new_path);
@@ -899,23 +914,23 @@ ServiceChainMgr<T>::ServiceChainMgr(BgpServer *server)
         service_chain_task_id_ = scheduler->GetTaskId("bgp::ServiceChain");
     }
 
-    process_queue_ =
+    process_queue_.reset(
         new WorkQueue<ServiceChainRequestT *>(service_chain_task_id_, 0,
-                     bind(&ServiceChainMgr::RequestHandler, this, _1));
+                     bind(&ServiceChainMgr::RequestHandler, this, _1)));
 
     id_ = server->routing_instance_mgr()->RegisterInstanceOpCallback(
         bind(&ServiceChainMgr::RoutingInstanceCallback, this, _1, _2));
 
-    PeerRibMembershipManager *membership_mgr = server->membership_mgr();
+    BgpMembershipManager *membership_mgr = server->membership_mgr();
     registration_id_ = membership_mgr->RegisterPeerRegistrationCallback(
         bind(&ServiceChainMgr::PeerRegistrationCallback, this, _1, _2, _3));
 }
 
 template <typename T>
 ServiceChainMgr<T>::~ServiceChainMgr() {
-    delete process_queue_;
+    process_queue_->Shutdown();
     server_->routing_instance_mgr()->UnregisterInstanceOpCallback(id_);
-    PeerRibMembershipManager *membership_mgr = server_->membership_mgr();
+    BgpMembershipManager *membership_mgr = server_->membership_mgr();
     membership_mgr->UnregisterPeerRegistrationCallback(registration_id_);
 }
 
@@ -956,8 +971,10 @@ bool ServiceChainMgr<T>::FillServiceChainInfo(RoutingInstance *rtinstance,
 template <typename T>
 bool ServiceChainMgr<T>::LocateServiceChain(RoutingInstance *rtinstance,
     const ServiceChainConfig &config) {
-    CHECK_CONCURRENCY("bgp::Config");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
+
     // Verify whether the entry already exists
+    tbb::mutex::scoped_lock lock(mutex_);
     ServiceChainMap::iterator it = chain_set_.find(rtinstance);
     if (it != chain_set_.end()) {
         ServiceChainT *chain = static_cast<ServiceChainT *>(it->second.get());
@@ -990,6 +1007,7 @@ bool ServiceChainMgr<T>::LocateServiceChain(RoutingInstance *rtinstance,
 
     RoutingInstanceMgr *mgr = server_->routing_instance_mgr();
     RoutingInstance *dest = mgr->GetRoutingInstance(config.routing_instance);
+
     //
     // Destination routing instance is not yet created.
     // Or Destination routing instance is deleted Or
@@ -1056,7 +1074,6 @@ bool ServiceChainMgr<T>::LocateServiceChain(RoutingInstance *rtinstance,
     DeletePendingServiceChain(rtinstance);
     return true;
 }
-
 
 template <typename T>
 ServiceChain<T> *ServiceChainMgr<T>::FindServiceChain(
@@ -1125,7 +1142,10 @@ void ServiceChainMgr<T>::StopServiceChainDone(BgpTable *table,
 
 template <typename T>
 void ServiceChainMgr<T>::StopServiceChain(RoutingInstance *rtinstance) {
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
+
     // Remove the routing instance from pending chains list.
+    tbb::mutex::scoped_lock lock(mutex_);
     pending_chains_.erase(rtinstance);
 
     ServiceChainMap::iterator it = chain_set_.find(rtinstance);

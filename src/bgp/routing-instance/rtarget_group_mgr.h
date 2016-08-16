@@ -222,6 +222,7 @@ public:
     RtGroup *GetRtGroup(const RouteTarget &rt);
     RtGroup *GetRtGroup(const ExtCommunity::ExtCommunityValue &comm);
     RtGroup *LocateRtGroup(const RouteTarget &rt);
+    void NotifyRtGroupUnlocked(const RouteTarget &rt);
     void NotifyRtGroup(const RouteTarget &rt);
     void RemoveRtGroup(const RouteTarget &rt);
 
@@ -236,8 +237,6 @@ public:
     }
 
 private:
-    static int rtfilter_task_id_;
-
     friend class BgpXmppRTargetTest;
     friend class ReplicationTest;
 

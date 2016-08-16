@@ -15,6 +15,7 @@
 #include <oper/mirror_table.h>
 #include <controller/controller_export.h>
 #include <controller/controller_peer.h>
+#include <controller/controller_route_path.h>
 #include <oper/agent_sandesh.h>
 #include <pkt/pkt_init.h>
 #include <pkt/pkt_handler.h>
@@ -55,7 +56,7 @@ string EvpnRouteKey::ToString() const {
 }
 
 EvpnRouteKey *EvpnRouteKey::Clone() const {
-    return new EvpnRouteKey(peer_, vrf_name_, dmac_, ip_addr_,
+    return new EvpnRouteKey(peer(), vrf_name_, dmac_, ip_addr_,
                               ethernet_tag_);
 }
 
@@ -147,6 +148,25 @@ void EvpnAgentRouteTable::AddOvsPeerMulticastRouteReq(const Peer *peer,
     AddOvsPeerMulticastRouteInternal(peer, vxlan_id, vn_name, tsn, tor_ip, true);
 }
 
+void EvpnAgentRouteTable::AddControllerReceiveRouteReq(const Peer *peer,
+                                             const string &vrf_name,
+                                             uint32_t label,
+                                             const MacAddress &mac,
+                                             const IpAddress &ip_addr,
+                                             uint32_t ethernet_tag,
+                                             const string &vn_name,
+                                             const PathPreference &path_pref) {
+    const BgpPeer *bgp_peer = dynamic_cast<const BgpPeer *>(peer);
+    assert(bgp_peer != NULL);
+
+    DBRequest req(DBRequest::DB_ENTRY_ADD_CHANGE);
+    req.key.reset(new EvpnRouteKey(peer, vrf_name, mac, ip_addr,
+                                   ethernet_tag));
+    req.data.reset(new L2ReceiveRoute(vn_name, ethernet_tag,
+                                      label, path_pref));
+    agent()->fabric_evpn_table()->Enqueue(&req);
+}
+
 void EvpnAgentRouteTable::AddReceiveRouteReq(const Peer *peer,
                                              const string &vrf_name,
                                              uint32_t label,
@@ -216,7 +236,7 @@ void EvpnAgentRouteTable::AddLocalVmRoute(const Peer *peer,
                                           sg_id_list, CommunityList(),
                                           path_pref,
                                           IpAddress(),
-                                          EcmpLoadBalance());
+                                          EcmpLoadBalance(), false);
     data->set_tunnel_bmap(TunnelType::AllType());
 
     DBRequest req(DBRequest::DB_ENTRY_ADD_CHANGE);
@@ -340,23 +360,46 @@ void EvpnAgentRouteTable::Delete(const Peer *peer, const string &vrf_name,
 }
 
 //Notify L2 route corresponding to MAC in evpn route.
-void EvpnAgentRouteTable::UpdateDependants(AgentRoute *entry) {
+//On addition of evpn routes, update bridge route using mac of evpn and inet
+//route using ip of evpn.
+//NH of bridge route is same as of EVPN as bridge rt is programmed in kernel.
+//NH of Inet route will be of subnet route to which it belongs. This makes sure
+//that n absence of any directly installed Inet route for this IP packets are
+//forwarded as per the subnet route decision.
+void EvpnAgentRouteTable::UpdateDerivedRoutes(AgentRoute *entry,
+                                              const AgentPath *path,
+                                              bool active_path_changed) {
     EvpnRouteEntry *evpn_rt = dynamic_cast<EvpnRouteEntry *>(entry);
+    //As active path is picked from route, any modification in non-active
+    //path need not rebake agent route.
+    //Path is NULL when resync is issued on route, hence no need to check flag
+    if ((path != NULL) && !active_path_changed)
+        return;
+
+
     if (evpn_rt->publish_to_bridge_route_table()) {
         BridgeAgentRouteTable *table = static_cast<BridgeAgentRouteTable *>
             (vrf_entry()->GetBridgeRouteTable());
         table->AddBridgeRoute(entry);
+    }
+    if (evpn_rt->publish_to_inet_route_table()) {
+        InetUnicastAgentRouteTable *table = vrf_entry()->
+                        GetInetUnicastRouteTable(evpn_rt->ip_addr());
+        table->AddEvpnRoute(entry);
     }
 }
 
 //Delete path from L2 route corresponding to MAC+IP in evpn route.
 void EvpnAgentRouteTable::PreRouteDelete(AgentRoute *entry) {
     EvpnRouteEntry *evpn_rt = dynamic_cast<EvpnRouteEntry *>(entry);
-    if (evpn_rt->publish_to_bridge_route_table()) {
-        BridgeAgentRouteTable *table = static_cast<BridgeAgentRouteTable *>
-            (vrf_entry()->GetBridgeRouteTable());
-        table->DeleteBridgeRoute(entry);
-    }
+    //Delete from bridge table
+    BridgeAgentRouteTable *bridge_table = static_cast<BridgeAgentRouteTable *>
+        (vrf_entry()->GetBridgeRouteTable());
+    bridge_table->DeleteBridgeRoute(entry);
+    //Delete from Inet table
+    InetUnicastAgentRouteTable *inet_table = vrf_entry()->
+        GetInetUnicastRouteTable(evpn_rt->ip_addr());
+    inet_table->DeleteEvpnRoute(entry);
 }
 
 /////////////////////////////////////////////////////////////////////////////

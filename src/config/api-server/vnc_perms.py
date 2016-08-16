@@ -15,6 +15,9 @@ class VncPermissions(object):
 
     mode_str = {PERMS_R: 'R', PERMS_W: 'W', PERMS_X: 'X',
                 PERMS_WX: 'WX', PERMS_RX: 'RX', PERMS_RW: 'RW', PERMS_RWX: 'RWX'}
+    mode_str2 = {PERMS_R: 'read', PERMS_W: 'write', PERMS_X: 'link',
+                PERMS_WX: 'write,link', PERMS_RX: 'read,link', PERMS_RW: 'read,write',
+                PERMS_RWX: 'read,write,link'}
 
     def __init__(self, server_mgr, args):
         self._server_mgr = server_mgr
@@ -83,12 +86,11 @@ class VncPermissions(object):
 
         # retrieve object and permissions
         try:
-            if not perms2:
-                perms2 = self._server_mgr._db_conn.uuid_to_obj_perms2(obj_uuid)
-            if not obj_name:
-                obj_name = self._server_mgr._db_conn.uuid_to_fq_name(obj_uuid)
-            if not obj_type:
-                obj_type = self._server_mgr._db_conn.uuid_to_obj_type(obj_uuid)
+            if not perms2 or not obj_name or not obj_type:
+                config = self._server_mgr._db_conn.uuid_to_obj_dict(obj_uuid)
+                perms2 = config.get('prop:perms2')
+                obj_name = config.get("fq_name")
+                obj_type = config.get("type")
         except NoIdError:
             return (True, '')
 
@@ -101,6 +103,8 @@ class VncPermissions(object):
         tenant = env.get('HTTP_X_PROJECT_ID', None)
         tenant_name = env.get('HTTP_X_PROJECT_NAME', '*')
         if tenant is None:
+            msg = "rbac: Unable to find tenant id in headers"
+            self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
             return (False, err_msg)
 
         owner = perms2['owner']
@@ -109,13 +113,13 @@ class VncPermissions(object):
 
         # build perms
         mask = 07
-        if tenant == owner:
+        if tenant.replace('-','') == owner.replace('-',''):
             mask |= 0700
 
         share = perms2['share']
         tenants = [item['tenant'] for item in share]
         for item in share:
-            if tenant == item['tenant']:
+            if tenant.replace('-','') == item['tenant'].replace('-',''):
                 perms = perms | item['tenant_access'] << 3
                 mask |= 0070
                 break
@@ -124,12 +128,15 @@ class VncPermissions(object):
         ok = (mask & perms & mode_mask)
         granted = ok & 07 | (ok >> 3) & 07 | (ok >> 6) & 07
 
-        msg = '%s (%s:%s) %s %s admin=%s, mode=%03o mask=%03o perms=%03o, \
+        msg = 'rbac: %s (%s:%s) %s %s admin=%s, mode=%03o mask=%03o perms=%03o, \
             (usr=%s(%s)/own=%s/sh=%s)' \
             % ('+++' if ok else '---', self.mode_str[mode], obj_uuid, obj_type, obj_name,
                'yes' if is_admin else 'no', mode_mask, mask, perms,
                tenant, tenant_name, owner, tenants)
         self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
+        if not ok:
+            msg = "rbac: %s doesn't have %s permission in tenant %s" % (user, self.mode_str2[mode], owner)
+            self._server_mgr.config_log(msg, level=SandeshLevel.SYS_NOTICE)
 
         return (True, self.mode_str[granted]) if ok else (False, err_msg)
     # end validate_perms

@@ -22,6 +22,27 @@ using std::make_pair;
 using std::string;
 using std::vector;
 
+//
+// Return true if the prefix for the BgpRoute is the same as given IpAddress.
+//
+static bool RoutePrefixIsAddress(Address::Family family, const BgpRoute *route,
+    const IpAddress &address) {
+    if (family == Address::INET) {
+        const InetRoute *inet_route = static_cast<const InetRoute *>(route);
+        if (inet_route->GetPrefix().addr() == address.to_v4() &&
+            inet_route->GetPrefix().prefixlen() == Address::kMaxV4PrefixLen) {
+            return true;
+        }
+    } else if (family == Address::INET6) {
+        const Inet6Route *inet6_route = static_cast<const Inet6Route *>(route);
+        if (inet6_route->GetPrefix().addr() == address.to_v6() &&
+            inet6_route->GetPrefix().prefixlen() == Address::kMaxV6PrefixLen) {
+            return true;
+        }
+    }
+    return false;
+}
+
 class PathResolver::DeleteActor : public LifetimeActor {
 public:
     explicit DeleteActor(PathResolver *resolver)
@@ -104,7 +125,8 @@ Address::Family PathResolver::family() const {
 //
 void PathResolver::StartPathResolution(int part_id, const BgpPath *path,
     BgpRoute *route, BgpTable *nh_table) {
-    CHECK_CONCURRENCY("db::DBTable", "bgp::RouteAggregation", "bgp::Config");
+    CHECK_CONCURRENCY("db::DBTable", "bgp::RouteAggregation",
+        "bgp::Config", "bgp::ConfigHelper");
 
     if (!nh_table)
         nh_table = table_;
@@ -137,7 +159,8 @@ void PathResolver::UpdatePathResolution(int part_id, const BgpPath *path,
 // needed when the BgpPath changes nexthop.
 //
 void PathResolver::StopPathResolution(int part_id, const BgpPath *path) {
-    CHECK_CONCURRENCY("db::DBTable", "bgp::RouteAggregation", "bgp::Config");
+    CHECK_CONCURRENCY("db::DBTable", "bgp::RouteAggregation",
+        "bgp::Config", "bgp::ConfigHelper");
 
     partitions_[part_id]->StopPathResolution(path);
 }
@@ -190,7 +213,8 @@ PathResolverPartition *PathResolver::GetPartition(int part_id) {
 //
 ResolverNexthop *PathResolver::LocateResolverNexthop(IpAddress address,
     BgpTable *table) {
-    CHECK_CONCURRENCY("db::DBTable", "bgp::RouteAggregation", "bgp::Config");
+    CHECK_CONCURRENCY("db::DBTable", "bgp::RouteAggregation",
+        "bgp::Config", "bgp::ConfigHelper");
 
     tbb::mutex::scoped_lock lock(mutex_);
     ResolverNexthopKey key(address, table);
@@ -232,12 +256,12 @@ void PathResolver::RemoveResolverNexthop(ResolverNexthop *rnexthop) {
 // a ResolverNexthop.
 //
 // It's safe to unregister the ResolverNexthop at this point. However the
-// operation cannot be done in the context of db::DBTable Task. Enqueue the
+// operation cannot be done in the context of db::Walker Task. Enqueue the
 // ResolverNexthop to the register/unregister list.
 //
 void PathResolver::UnregisterResolverNexthopDone(BgpTable *table,
     ConditionMatch *match) {
-    CHECK_CONCURRENCY("db::DBTable");
+    CHECK_CONCURRENCY("db::Walker");
 
     ResolverNexthop *rnexthop = dynamic_cast<ResolverNexthop *>(match);
     assert(rnexthop);
@@ -604,7 +628,12 @@ void PathResolverPartition::StartPathResolution(const BgpPath *path,
         return;
     if (table()->IsDeleted() || nh_table->IsDeleted())
         return;
+
+    Address::Family family = table()->family();
     IpAddress address = path->GetAttr()->nexthop();
+    if (table() == nh_table && RoutePrefixIsAddress(family, route, address))
+        return;
+
     ResolverNexthop *rnexthop =
         resolver_->LocateResolverNexthop(address, nh_table);
     assert(!FindResolverPath(path));
@@ -651,7 +680,7 @@ void PathResolverPartition::StopPathResolution(const BgpPath *path) {
 //
 void PathResolverPartition::TriggerPathResolution(ResolverPath *rpath) {
     CHECK_CONCURRENCY("db::DBTable", "bgp::ResolverNexthop",
-                      "bgp::Config", "bgp::RouteAggregation");
+        "bgp::Config", "bgp::ConfigHelper", "bgp::RouteAggregation");
 
     rpath_update_list_.insert(rpath);
     rpath_update_trigger_->Set();
@@ -970,9 +999,9 @@ bool ResolverPath::UpdateResolvedPaths() {
             break;
 
         // Skip paths with duplicate forwarding information.  This ensures
-        // that we generate only one path with any given next hop and label
-        // when there are multiple nexthop paths from the original source
-        // received via different peers e.g. directly via XMPP and via BGP.
+        // that we generate only one path with any given next hop when there
+        // are multiple nexthop paths from the original source received via
+        // different peers e.g. directly via XMPP and via BGP.
         if (nh_route->DuplicateForwardingPath(nh_path))
             continue;
 
@@ -1053,19 +1082,8 @@ bool ResolverNexthop::Match(BgpServer *server, BgpTable *table,
     // Ignore if the route doesn't match the address.
     Address::Family family = table->family();
     assert(family == Address::INET || family == Address::INET6);
-    if (family == Address::INET) {
-        const InetRoute *inet_route = static_cast<InetRoute *>(route);
-        if (inet_route->GetPrefix().addr() != address_.to_v4() ||
-            inet_route->GetPrefix().prefixlen() != Address::kMaxV4PrefixLen) {
-            return false;
-        }
-    } else if (family == Address::INET6) {
-        const Inet6Route *inet6_route = static_cast<Inet6Route *>(route);
-        if (inet6_route->GetPrefix().addr() != address_.to_v6() ||
-            inet6_route->GetPrefix().prefixlen() != Address::kMaxV6PrefixLen) {
-            return false;
-        }
-    }
+    if (!RoutePrefixIsAddress(family, route, address_))
+        return false;
 
     // Set or remove MatchState as appropriate.
     BgpConditionListener *condition_listener =
@@ -1106,7 +1124,8 @@ bool ResolverNexthop::Match(BgpServer *server, BgpTable *table,
 // Do not attempt to access other partitions due to concurrency issues.
 //
 void ResolverNexthop::AddResolverPath(int part_id, ResolverPath *rpath) {
-    CHECK_CONCURRENCY("db::DBTable", "bgp::RouteAggregation", "bgp::Config");
+    CHECK_CONCURRENCY("db::DBTable", "bgp::RouteAggregation",
+        "bgp::Config", "bgp::ConfigHelper");
 
     if (rpath_lists_[part_id].empty())
         resolver_->RegisterUnregisterResolverNexthop(this);

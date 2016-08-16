@@ -63,6 +63,16 @@ TEST_F(FlowTest, Agent_Conf_file_1) {
     EXPECT_EQ(param.agent_mode(), AgentParam::VROUTER_AGENT);
     EXPECT_STREQ(param.agent_base_dir().c_str(), "/var/lib/contrail");
     EXPECT_EQ(param.subnet_hosts_resolvable(), true);
+
+    const std::vector<uint16_t> &ports = param.bgp_as_a_service_port_range_value();
+    EXPECT_EQ(ports[0], 100);
+    EXPECT_EQ(ports[1], 199);
+    EXPECT_EQ(param.services_queue_limit(), 8192);
+
+    // By default, flow-tracing must be enabled
+    EXPECT_TRUE(param.flow_trace_enable());
+    EXPECT_EQ(param.pkt0_tx_buffer_count(), 2000);
+    EXPECT_EQ(param.pkt0_tx_buffer_count(), 2000);
 }
 
 TEST_F(FlowTest, Agent_Conf_file_2) {
@@ -88,6 +98,9 @@ TEST_F(FlowTest, Agent_Conf_file_2) {
     EXPECT_EQ(param.metadata_proxy_port(), 8097);
     EXPECT_EQ(param.dns_client_port(), 8098);
     EXPECT_EQ(param.mirror_client_port(), 8097);
+    // Default value for pkt0_tx_buffer_count
+    EXPECT_EQ(param.pkt0_tx_buffer_count(), 1000);
+    EXPECT_EQ(param.services_queue_limit(), 1024);
 }
 
 TEST_F(FlowTest, Agent_Flows_Option_1) {
@@ -103,16 +116,26 @@ TEST_F(FlowTest, Agent_Flows_Option_1) {
     EXPECT_EQ(param.max_vm_flows(), 50);
     EXPECT_EQ(param.linklocal_system_flows(), 1024);
     EXPECT_EQ(param.linklocal_vm_flows(), 512);
+    EXPECT_FALSE(param.flow_trace_enable());
+    EXPECT_EQ(param.flow_add_tokens(), 1000);
+    EXPECT_EQ(param.flow_ksync_tokens(), 1000);
+    EXPECT_EQ(param.flow_del_tokens(), 1000);
+    EXPECT_EQ(param.flow_update_tokens(), 500);
 }
 
 TEST_F(FlowTest, Agent_Flows_Option_Arguments) {
-    int argc = 9;
+    int argc = 19;
     char *argv[] = {
         (char *) "",
         (char *) "--FLOWS.thread_count",                   (char *)"8",
         (char *) "--FLOWS.max_vm_flows",                   (char *)"100",
         (char *) "--FLOWS.max_system_linklocal_flows",     (char *)"24",
         (char *) "--FLOWS.max_vm_linklocal_flows",         (char *)"20",
+        (char *) "--FLOWS.trace_enable",                   (char *)"true",
+        (char *) "--FLOWS.add_tokens",                     (char *)"2000",
+        (char *) "--FLOWS.ksync_tokens",                   (char *)"2000",
+        (char *) "--FLOWS.del_tokens",                     (char *)"2000",
+        (char *) "--FLOWS.update_tokens",                  (char *)"1000",
     };
 
     AgentParam param;
@@ -123,6 +146,11 @@ TEST_F(FlowTest, Agent_Flows_Option_Arguments) {
     EXPECT_EQ(param.max_vm_flows(), 100);
     EXPECT_EQ(param.linklocal_system_flows(), 24);
     EXPECT_EQ(param.linklocal_vm_flows(), 20);
+    EXPECT_TRUE(param.flow_trace_enable());
+    EXPECT_EQ(param.flow_add_tokens(), 2000);
+    EXPECT_EQ(param.flow_ksync_tokens(), 2000);
+    EXPECT_EQ(param.flow_del_tokens(), 2000);
+    EXPECT_EQ(param.flow_update_tokens(), 1000);
 }
 
 TEST_F(FlowTest, Agent_Tbb_Option_1) {
@@ -235,15 +263,20 @@ TEST_F(FlowTest, Agent_Tbb_Option_Arguments) {
 // Check that linklocal flows are updated when the system limits are lowered
 TEST_F(FlowTest, Agent_Conf_file_3) {
     struct rlimit rl;
-    rl.rlim_max = 128;
-    rl.rlim_cur = 64;
+    rl.rlim_max = 1024;
+    rl.rlim_cur = 512;
     int result = setrlimit(RLIMIT_NOFILE, &rl);
     if (result == 0) {
         AgentParam param;
         param.Init("controller/src/vnsw/agent/init/test/cfg.ini", "test-param");
 
-        EXPECT_EQ(param.linklocal_system_flows(), 63);
-        EXPECT_EQ(param.linklocal_vm_flows(), 63);
+        const std::vector<uint16_t> &ports =
+            param.bgp_as_a_service_port_range_value();
+        EXPECT_EQ(ports[0], 100);
+        EXPECT_EQ(ports[1], 199);
+
+        EXPECT_EQ(param.linklocal_system_flows(), 411);
+        EXPECT_EQ(param.linklocal_vm_flows(), 411);
     }
 }
 
@@ -274,7 +307,7 @@ TEST_F(FlowTest, Agent_Conf_Xen_1) {
 }
 
 TEST_F(FlowTest, Agent_Param_1) {
-    int argc = 21;
+    int argc = 23;
     char *argv[] = {
         (char *) "",
         (char *) "--config_file", 
@@ -289,6 +322,7 @@ TEST_F(FlowTest, Agent_Param_1) {
         (char *) "--DEFAULT.dhcp_relay_mode",     (char *)"true",
         (char *) "--DEFAULT.agent_base_directory",     (char *)"/var/run/contrail",
         (char *) "--DEFAULT.subnet_hosts_resolvable",  (char *)"false",
+        (char *) "--DEFAULT.pkt0_tx_buffers",  (char *)"3000",
     };
 
     AgentParam param;
@@ -308,6 +342,7 @@ TEST_F(FlowTest, Agent_Param_1) {
     EXPECT_EQ(param.dhcp_relay_mode(), true);
     EXPECT_STREQ(param.agent_base_dir().c_str(), "/var/run/contrail");
     EXPECT_EQ(param.subnet_hosts_resolvable(), false);
+    EXPECT_EQ(param.pkt0_tx_buffer_count(), 3000);
 }
 
 TEST_F(FlowTest, Agent_Arg_Override_Config_1) {
@@ -337,12 +372,11 @@ TEST_F(FlowTest, Agent_Arg_Override_Config_1) {
 }
 
 TEST_F(FlowTest, Agent_Arg_Override_Config_2) {
-    int argc = 9;
+    int argc = 7;
     char *argv[] = {
         (char *) "",
         (char *) "--DNS.server",    (char *)"20.1.1.1:500", (char *)"21.1.1.1:15001", 
         (char *) "--CONTROL-NODE.server",   (char *)"22.1.1.1", (char *)"23.1.1.1",
-        (char *) "--DEFAULT.debug",   (char *)"0",
     };
 
     AgentParam param;

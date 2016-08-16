@@ -29,21 +29,39 @@
 // artificially create more RibOuts than otherwise necessary. This is used
 // to achieve higher concurrency at the expense of creating more state.
 //
+// Including llgr as part of the policy results in the creation of a different
+// ribout for each set of peers that do (or do not) support long lived
+// graceful restart functionality. In order to ensure correctness, we need
+// to not advertise LLGR_STALE community to peers who do not support LLGR.
+// Instead, we should bring down the local pref to make the paths less
+// preferable.
+//
 struct RibExportPolicy {
     enum Encoding {
         BGP,
         XMPP,
     };
 
+    struct RemovePrivatePolicy {
+        RemovePrivatePolicy();
+
+        bool enabled;
+        bool all;
+        bool replace;
+        bool peer_loop_check;
+    };
+
     RibExportPolicy();
     RibExportPolicy(BgpProto::BgpPeerType type, Encoding encoding,
         int affinity, u_int32_t cluster_id);
     RibExportPolicy(BgpProto::BgpPeerType type, Encoding encoding,
-        as_t as_number, bool as_override, int affinity, u_int32_t cluster_id);
+        as_t as_number, bool as_override, bool llgr, int affinity,
+        u_int32_t cluster_id);
     RibExportPolicy(BgpProto::BgpPeerType type, Encoding encoding,
-        as_t as_number, bool as_override, IpAddress nexthop,
+        as_t as_number, bool as_override, bool llgr, IpAddress nexthop,
         int affinity, u_int32_t cluster_id);
 
+    void SetRemovePrivatePolicy(bool all, bool replace, bool peer_loop_check);
     bool operator<(const RibExportPolicy &rhs) const;
 
     BgpProto::BgpPeerType type;
@@ -52,7 +70,9 @@ struct RibExportPolicy {
     bool as_override;
     IpAddress nexthop;
     int affinity;
+    bool llgr;
     uint32_t cluster_id;
+    RemovePrivatePolicy remove_private;
 };
 
 #endif  // SRC_BGP_BGP_RIB_POLICY_H_

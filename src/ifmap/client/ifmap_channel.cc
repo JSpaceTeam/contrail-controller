@@ -44,7 +44,7 @@
 #include <sandesh/request_pipeline.h>
 
 const int IFMapChannel::kSocketCloseTimeout = 2 * 1000;
-const uint64_t IFMapChannel::kRetryConnectionMax = 2;
+const uint64_t IFMapChannel::kRetryConnectionMax = 0;
 
 using namespace boost::assign;
 using namespace std;
@@ -118,34 +118,38 @@ void IFMapChannel::ChannelUseCertAuth(const std::string& certstore)
     return;
 }
  
-IFMapChannel::IFMapChannel(IFMapManager *manager, const std::string& user,
-                const std::string& passwd, const std::string& certstore)
+IFMapChannel::IFMapChannel(IFMapManager *manager,
+                           const IFMapConfigOptions& config_options)
     : manager_(manager), resolver_(*(manager->io_service())),
       ctx_(*(manager->io_service()), boost::asio::ssl::context::tlsv1_client),
       io_strand_(*(manager->io_service())),
       ssrc_socket_(new SslStream((*manager->io_service()), ctx_)),
       arc_socket_(new SslStream((*manager->io_service()), ctx_)),
-      username_(user), password_(passwd), state_machine_(NULL),
-      response_state_(NONE), sequence_number_(0), recv_msg_cnt_(0),
-      sent_msg_cnt_(0), reconnect_attempts_(0), connection_status_(NOCONN),
+      username_(config_options.user), password_(config_options.password),
+      state_machine_(NULL), response_state_(NONE), sequence_number_(0),
+      recv_msg_cnt_(0), sent_msg_cnt_(0), reconnect_attempts_(0),
+      connection_status_(NOCONN),
       connection_status_change_at_(UTCTimestampUsec()),
+      stale_entries_cleanup_timeout_ms_(
+          config_options.stale_entries_cleanup_timeout*1000), // ms
       stale_entries_cleanup_timer_(TimerManager::CreateTimer(
           *(manager->io_service()), "Stale entries cleanup timer")),
+      end_of_rib_timeout_ms_(config_options.end_of_rib_timeout*1000), // ms
       end_of_rib_timer_(TimerManager::CreateTimer(*(manager->io_service()),
                                                   "End of rib timer")) {
 
     set_start_stale_entries_cleanup(false);
     set_end_of_rib_computed(false);
     boost::system::error_code ec;
-    if (certstore.empty()) {
+    if (config_options.certs_store.empty()) {
         ctx_.set_verify_mode(boost::asio::ssl::context::verify_none, ec);
     } else {
-        ChannelUseCertAuth(certstore);
+        ChannelUseCertAuth(config_options.certs_store);
     }
     string auth_str = username_ + ":" + password_;
     b64_auth_str_ = base64_encode(auth_str);
 }
-
+ 
 IFMapChannel::~IFMapChannel() {
     TimerManager::DeleteTimer(stale_entries_cleanup_timer_);
     TimerManager::DeleteTimer(end_of_rib_timer_);
@@ -619,15 +623,27 @@ int IFMapChannel::ReadPollResponse() {
 
         // Manage timers.
         if (start_stale_entries_cleanup()) {
-            // If this is a reconnection, keep re-arming the stale entries
-            // cleanup timer as long as we keep receiving data.
-            StartStaleEntriesCleanupTimer();
+            if (reply_str.find("searchResult") != string::npos) {
+                // If this is a reconnection, keep re-arming the stale entries
+                // cleanup timer as long as we receive searchResults.
+                StartStaleEntriesCleanupTimer();
+            } else {
+                // Artificially expire the state entries cleanup timer if we
+                // receive updateResult or deleteResult.
+                ExpireStaleEntriesCleanupTimer();
+            }
         }
         if (!end_of_rib_computed()) {
-            // When the daemon is coming up, as long as we are receiving data,
-            // we have not received the entire db. Keep re-arming the EOR timer
-            // as long as we are receiving data.
-            StartEndOfRibTimer();
+            if (reply_str.find("searchResult") != string::npos) {
+                // When the daemon is coming up, as long as we are receiving
+                // searchResults, we have not received the entire db. Keep
+                // re-arming the EOR timer as long as we receive searchResults.
+                StartEndOfRibTimer();
+            } else {
+                // Artificially expire the EOR timer if we receive updateResult
+                // or deleteResult.
+                ExpireEndOfRibTimer();
+            }
         }
 
         // Send the message to the parser for further processing.
@@ -657,7 +673,7 @@ void IFMapChannel::StartStaleEntriesCleanupTimer() {
     if (stale_entries_cleanup_timer_->running()) {
         stale_entries_cleanup_timer_->Cancel();
     }
-    stale_entries_cleanup_timer_->Start(kStaleEntriesCleanupTimeout,
+    stale_entries_cleanup_timer_->Start(stale_entries_cleanup_timeout_ms_,
         boost::bind(&IFMapChannel::ProcessStaleEntriesTimeout, this), NULL);
 }
 
@@ -668,10 +684,20 @@ void IFMapChannel::StopStaleEntriesCleanupTimer() {
     }
 }
 
+void IFMapChannel::ExpireStaleEntriesCleanupTimer() {
+    CHECK_CONCURRENCY("ifmap::StateMachine");
+    IFMAP_PEER_DEBUG(IFMapServerConnection,
+                     integerToString(stale_entries_cleanup_timeout_ms_),
+                     "millisecond stale cleanup timer expired artificially");
+    stale_entries_cleanup_timer_->Cancel();
+    set_start_stale_entries_cleanup(false);
+    manager_->ifmap_server()->ProcessStaleEntriesTimeout();
+}
+
 // Called in the context of the main thread.
 bool IFMapChannel::ProcessStaleEntriesTimeout() {
-    int timeout = kStaleEntriesCleanupTimeout;
-    IFMAP_PEER_DEBUG(IFMapServerConnection, integerToString(timeout),
+    IFMAP_PEER_DEBUG(IFMapServerConnection,
+                     integerToString(stale_entries_cleanup_timeout_ms_),
                      "millisecond stale cleanup timer fired");
     set_start_stale_entries_cleanup(false);
     return manager_->ifmap_server()->ProcessStaleEntriesTimeout();
@@ -687,7 +713,7 @@ void IFMapChannel::StartEndOfRibTimer() {
     if (end_of_rib_timer_->running()) {
         end_of_rib_timer_->Cancel();
     }
-    end_of_rib_timer_->Start(kEndOfRibTimeout,
+    end_of_rib_timer_->Start(end_of_rib_timeout_ms_,
         boost::bind(&IFMapChannel::ProcessEndOfRibTimeout, this), NULL);
 }
 
@@ -698,10 +724,20 @@ void IFMapChannel::StopEndOfRibTimer() {
     }
 }
 
+void IFMapChannel::ExpireEndOfRibTimer() {
+    CHECK_CONCURRENCY("ifmap::StateMachine");
+    IFMAP_PEER_DEBUG(IFMapServerConnection,
+                     integerToString(end_of_rib_timeout_ms_),
+                     "millisecond end of rib timer expired artificially");
+    end_of_rib_timer_->Cancel();
+    set_end_of_rib_computed(true);
+    process::ConnectionState::GetInstance()->Update();
+}
+
 // Called in the context of the main thread.
 bool IFMapChannel::ProcessEndOfRibTimeout() {
-    int timeout = kEndOfRibTimeout;
-    IFMAP_PEER_DEBUG(IFMapServerConnection, integerToString(timeout),
+    IFMAP_PEER_DEBUG(IFMapServerConnection,
+                     integerToString(end_of_rib_timeout_ms_),
                      "millisecond end of rib timer fired");
     set_end_of_rib_computed(true);
     process::ConnectionState::GetInstance()->Update();
@@ -963,9 +999,13 @@ static bool IFMapServerInfoHandleRequest(const Sandesh *sr,
         channel->get_connection_status_and_time());
     server_conn_info.set_host(channel->get_host());
     server_conn_info.set_port(channel->get_port());
+    server_conn_info.set_end_of_rib_timeout_ms(
+        channel->end_of_rib_timeout_ms());
     server_conn_info.set_end_of_rib_computed(channel->end_of_rib_computed());
     server_conn_info.set_end_of_rib_timer_running(
         channel->EndOfRibTimerRunning());
+    server_conn_info.set_stale_entries_cleanup_timeout_ms(
+        channel->stale_entries_cleanup_timeout_ms());
     server_conn_info.set_start_stale_entries_cleanup(
         channel->start_stale_entries_cleanup());
     server_conn_info.set_stale_entries_cleanup_timer_running(
@@ -987,6 +1027,8 @@ static bool IFMapServerInfoHandleRequest(const Sandesh *sr,
     sm_info.set_workq_enqueues(sm->WorkQueueEnqueues());
     sm_info.set_workq_dequeues(sm->WorkQueueDequeues());
     sm_info.set_workq_length(sm->WorkQueueLength());
+    sm_info.set_max_response_wait_interval_ms(
+        sm->max_response_wait_interval_ms());
 
     ifmap_manager->GetAllDSPeerInfo(&ds_peer_info);
 

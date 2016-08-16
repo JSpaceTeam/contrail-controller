@@ -13,8 +13,8 @@
 #include <base/intrusive_ptr_back_ref.h>
 #include <cmn/agent_cmn.h>
 #include <base/connection_info.h>
-#include <base/timer.h>
 #include "net/mac_address.h"
+#include "oper/agent_types.h"
 
 class Agent;
 class AgentParam;
@@ -53,6 +53,10 @@ typedef boost::intrusive_ptr<VmEntry> VmEntryRef;
 typedef boost::intrusive_ptr<const VmEntry> VmEntryConstRef;
 void intrusive_ptr_release(const VmEntry* p);
 void intrusive_ptr_add_ref(const VmEntry* p);
+typedef IntrusivePtrRef<VmEntry> VmEntryBackRef;
+typedef IntrusivePtrRef<const VmEntry> VmEntryConstBackRef;
+void intrusive_ptr_add_back_ref(const IntrusiveReferrer ref, const VmEntry* p);
+void intrusive_ptr_del_back_ref(const IntrusiveReferrer ref, const VmEntry* p);
 
 class VnEntry;
 typedef boost::intrusive_ptr<VnEntry> VnEntryRef;
@@ -132,6 +136,24 @@ typedef boost::intrusive_ptr<HealthCheckService> HealthCheckServiceRef;
 void intrusive_ptr_release(const HealthCheckService* p);
 void intrusive_ptr_add_ref(const HealthCheckService* p);
 
+class ForwardingClass;
+typedef boost::intrusive_ptr<ForwardingClass> ForwardingClassRef;
+typedef boost::intrusive_ptr<const ForwardingClass> ForwardingClassConstRef;
+void intrusive_ptr_release(const ForwardingClass *p);
+void intrusive_ptr_add_ref(const ForwardingClass *p);
+
+class AgentQosConfig;
+typedef boost::intrusive_ptr<AgentQosConfig> AgentQosConfigRef;
+typedef boost::intrusive_ptr<const AgentQosConfig> AgentQosConfigConstRef;
+void intrusive_ptr_release(const AgentQosConfig *p);
+void intrusive_ptr_add_ref(const AgentQosConfig *p);
+
+class QosQueue;
+typedef boost::intrusive_ptr<QosQueue> QosQueueRef;
+typedef boost::intrusive_ptr<const QosQueue> QosQueueConstRef;
+void intrusive_ptr_release(const QosQueueRef *p);
+void intrusive_ptr_add_ref(const QosQueueRef *p);
+
 //class SecurityGroup;
 typedef std::vector<int> SecurityGroupList;
 typedef std::vector<std::string> CommunityList;
@@ -162,7 +184,9 @@ class VxLanTable;
 class MulticastGroupObject;
 class PhysicalDeviceTable;
 class PhysicalDeviceVnTable;
-
+class ForwardingClassTable;
+class AgentQosConfigTable;
+class QosQueueTable;
 class MirrorCfgTable;
 class IntfMirrorCfgTable;
 
@@ -172,6 +196,7 @@ class AgentIfMapXmppChannel;
 class AgentDnsXmppChannel;
 class DiscoveryServiceClient;
 class EventManager;
+class TaskTbbKeepAwake;
 class IFMapAgentStaleCleaner;
 
 class ArpProto;
@@ -188,10 +213,9 @@ class DiagTable;
 class VNController;
 class AgentSignal;
 class ServiceInstanceTable;
-class LoadbalancerTable;
-class LoadbalancerPoolTable;
 class Agent;
 class RESTServer;
+class PortIpcHandler;
 
 extern void RouterIdDepInit(Agent *agent);
 
@@ -206,25 +230,33 @@ extern void RouterIdDepInit(Agent *agent);
 #define METADATA_PORT 8775
 #define METADATA_NAT_PORT 80
 #define AGENT_INIT_TASKNAME "Agent::Init"
+#define INSTANCE_MANAGER_TASK_NAME "Agent::InstanceManager"
 #define AGENT_SHUTDOWN_TASKNAME "Agent::Shutdown"
 #define AGENT_FLOW_STATS_MANAGER_TASK "Agent::FlowStatsManager"
+#define AGENT_SANDESH_TASKNAME "Agent::Sandesh"
 #define IPV4_MULTICAST_BASE_ADDRESS "224.0.0.0"
 #define IPV6_MULTICAST_BASE_ADDRESS "ff00::"
 #define MULTICAST_BASE_ADDRESS_PLEN 8
 
 #define VROUTER_SERVER_PORT 20914
 
-#define kTaskFlowUpdate "Agent::FlowUpdate"
 #define kTaskFlowEvent "Agent::FlowEvent"
+#define kTaskFlowKSync "Agent::FlowKSync"
+#define kTaskFlowUpdate "Agent::FlowUpdate"
+#define kTaskFlowDelete "Agent::FlowDelete"
+#define kTaskFlowMgmt "Agent::FlowMgmt"
 #define kTaskFlowAudit "KSync::FlowAudit"
+#define kTaskFlowStatsCollector "Flow::StatsCollector"
 
 #define kTaskHealthCheck "Agent::HealthCheck"
+
+#define kTaskDBExclude "Agent::DBExcludeTask"
+#define kTaskConfigManager "Agent::ConfigManager"
 
 #define kInterfaceDbTablePrefix "db.interface"
 #define kVnDbTablePrefix  "db.vn"
 #define kVmDbTablePrefix  "db.vm"
 #define kVrfDbTablePrefix "db.vrf.0"
-#define kLoadBalnceDbTablePrefix "db.loadbalancer.0"
 #define kMplsDbTablePrefix "db.mpls"
 #define kAclDbTablePrefix  "db.acl"
 #define kV4UnicastRouteDbTableSuffix "uc.route.0"
@@ -237,16 +269,27 @@ class Agent {
 public:
     static const uint32_t kDefaultMaxLinkLocalOpenFds = 2048;
     // max open files in the agent, excluding the linklocal bind ports
-    static const uint32_t kMaxOtherOpenFds = 64;
+    static const uint32_t kMaxOtherOpenFds = 512;
+    // max BGP-as-a-server sessions, for which local ports are reserved
+    static const uint32_t kMaxBgpAsAServerSessions = 512;
     // default timeout zero means, this timeout is not used
     static const uint32_t kDefaultFlowCacheTimeout = 0;
     // default number of flow index-manager events logged per flow
     static const uint32_t kDefaultFlowIndexSmLogCount = 0;
     // default number of threads for flow setup
     static const uint32_t kDefaultFlowThreadCount = 1;
+    // Log a message if latency in processing flow queue exceeds limit
+    static const uint32_t kDefaultFlowLatencyLimit = 0;
     // Max number of threads
     static const uint32_t kMaxTbbThreads = 8;
     static const uint32_t kDefaultTbbKeepawakeTimeout = (20); //time-millisecs
+    // Default number of tx-buffers on pkt0 interface
+    static const uint32_t kPkt0TxBufferCount = 1000;
+
+    static const uint32_t kFlowAddTokens = 50;
+    static const uint32_t kFlowKSyncTokens = 25;
+    static const uint32_t kFlowDelTokens = 16;
+    static const uint32_t kFlowUpdateTokens = 16;
 
     enum ForwardingMode {
         NONE,
@@ -282,6 +325,7 @@ public:
     static const std::string &NullString() {return null_string_;}
     static const std::set<std::string> &NullStringList() {return null_string_list_;}
     static const MacAddress &vrrp_mac() {return vrrp_mac_;}
+    static const MacAddress &pkt_interface_mac() {return pkt_interface_mac_;}
     static const std::string &BcastMac() {return bcast_mac_;}
     static const std::string &xmpp_dns_server_prefix() {
         return xmpp_dns_server_connection_name_prefix_;
@@ -359,6 +403,28 @@ public:
     CfgIntTable *interface_config_table() const {return intf_cfg_table_;}
     void set_interface_config_table(CfgIntTable *table) {
         intf_cfg_table_ = table;
+    }
+
+    ForwardingClassTable *forwarding_class_table() const {
+        return forwarding_class_table_;
+    }
+    void set_forwarding_class_table(ForwardingClassTable *table) {
+        forwarding_class_table_ = table;
+    }
+
+    AgentQosConfigTable *qos_config_table() const {
+        return qos_config_table_;
+    }
+
+    void set_qos_config_table(AgentQosConfigTable *qos_config_table) {
+        qos_config_table_ = qos_config_table;
+    }
+
+    QosQueueTable *qos_queue_table() const {
+        return qos_queue_table_;
+    }
+    void set_qos_queue_table(QosQueueTable *table) {
+        qos_queue_table_ = table;
     }
 
     DomainConfig *domain_config_table() const;
@@ -560,24 +626,6 @@ public:
        service_instance_table_= table;
    }
 
-    // Loadbalancer
-   LoadbalancerTable *loadbalancer_table() const {
-       return loadbalancer_table_;
-   }
-
-   void set_loadbalancer_table(LoadbalancerTable *table) {
-       loadbalancer_table_ = table;
-   }
-
-    // Loadbalancer-pool
-   LoadbalancerPoolTable *loadbalancer_pool_table() const {
-       return loadbalancer_pool_table_;
-   }
-
-   void set_loadbalancer_pool_table(LoadbalancerPoolTable *table) {
-       loadbalancer_pool_table_ = table;
-   }
-
     // DNS XMPP Server
     const bool dns_auth_enabled() const {
         return dns_auth_enable_;
@@ -757,6 +805,7 @@ public:
     const Peer *multicast_tree_builder_peer() const {
         return multicast_tree_builder_peer_.get();}
     const Peer *mac_vm_binding_peer() const {return mac_vm_binding_peer_.get();}
+    const Peer *inet_evpn_peer() const {return inet_evpn_peer_.get();}
 
     // Agent Modules
     AgentConfig *cfg() const; 
@@ -798,6 +847,9 @@ public:
     RESTServer *rest_server() const;
     void set_rest_server(RESTServer *r);
 
+    PortIpcHandler *port_ipc_handler() const;
+    void set_port_ipc_handler(PortIpcHandler *r);
+
     OperDB *oper_db() const;
     void set_oper_db(OperDB *oper_db);
 
@@ -837,9 +889,6 @@ public:
         return ip_fabric_intf_name_;
     }
 
-    bool debug() { return debug_; }
-    void set_debug(bool debug) { debug_ = debug; }
-
     VxLanNetworkIdentifierMode vxlan_network_identifier_mode() const {
         return vxlan_network_identifier_mode_;
     }
@@ -857,6 +906,8 @@ public:
     void set_tsn_enabled(bool val) {tsn_enabled_ = val;}
     bool tor_agent_enabled() const {return tor_agent_enabled_;}
     void set_tor_agent_enabled(bool val) {tor_agent_enabled_ = val;}
+    bool server_gateway_mode() const {return server_gateway_mode_;}
+    void set_server_gateway_mode(bool val) {server_gateway_mode_ = val;}
 
     IFMapAgentParser *ifmap_parser() const {return ifmap_parser_;}
     void set_ifmap_parser(IFMapAgentParser *parser) {
@@ -880,12 +931,24 @@ public:
     bool test_mode() const { return test_mode_; }
     void set_test_mode(bool test_mode) { test_mode_ = test_mode; }
 
+    bool xmpp_dns_test_mode() const { return xmpp_dns_test_mode_; }
+    void set_xmpp_dns_test_mode(bool xmpp_dns_test_mode) {
+        xmpp_dns_test_mode_ = xmpp_dns_test_mode;
+    }
+
     uint32_t flow_table_size() const { return flow_table_size_; }
     void set_flow_table_size(uint32_t count);
 
     uint16_t flow_thread_count() const { return flow_thread_count_; }
+    bool flow_trace_enable() const { return flow_trace_enable_; }
+
     uint32_t max_vm_flows() const { return max_vm_flows_; }
     void set_max_vm_flows(uint32_t count) { max_vm_flows_ = count; }
+
+    uint32_t flow_add_tokens() const { return flow_add_tokens_; }
+    uint32_t flow_ksync_tokens() const { return flow_ksync_tokens_; }
+    uint32_t flow_del_tokens() const { return flow_del_tokens_; }
+    uint32_t flow_update_tokens() const { return flow_update_tokens_; }
 
     bool init_done() const { return init_done_; }
     void set_init_done(bool done) { init_done_ = done; }
@@ -972,6 +1035,19 @@ public:
         vrouter_max_oflow_bridge_entries_ = oflow_bridge_entries;
     }
 
+    uint32_t vrouter_max_flow_entries() const {
+        return vrouter_max_flow_entries_;
+    }
+    void set_vrouter_max_flow_entries(uint32_t value) {
+        vrouter_max_flow_entries_ = value;
+    }
+
+    uint32_t vrouter_max_oflow_entries() const {
+        return vrouter_max_oflow_entries_;
+    }
+    void set_vrouter_max_oflow_entries(uint32_t value) {
+        vrouter_max_oflow_entries_ = value;
+    }
     void set_vrouter_build_info(std::string version) {
         vrouter_build_info_ = version;
     }
@@ -988,11 +1064,13 @@ public:
         flow_stats_req_handler_ = req;
     }
  
+    void SetMeasureQueueDelay(bool val);
+    bool MeasureQueueDelay();
     void TaskTrace(const char *file_name, uint32_t line_no, const Task *task,
                    const char *description, uint32_t delay);
 
     static uint16_t ProtocolStringToInt(const std::string &str);
-    bool TbbKeepAwake();
+    VrouterObjectLimits GetVrouterObjectLimits();
 private:
 
     AgentParam *params_;
@@ -1006,11 +1084,13 @@ private:
     ServicesModule *services_;
     VirtualGateway *vgw_;
     RESTServer *rest_server_;
+    PortIpcHandler *port_ipc_handler_;
     OperDB *oper_db_;
     DiagTable *diag_table_;
     VNController *controller_;
 
     EventManager *event_mgr_;
+    TaskTbbKeepAwake *tbb_awake_task_;
     boost::shared_ptr<AgentXmppChannel> agent_xmpp_channel_[MAX_XMPP_SERVERS];
     AgentIfMapXmppChannel *ifmap_channel_[MAX_XMPP_SERVERS];
     XmppClient *xmpp_client_[MAX_XMPP_SERVERS];
@@ -1056,10 +1136,11 @@ private:
     VrfAssignTable *vrf_assign_table_;
     VxLanTable *vxlan_table_;
     ServiceInstanceTable *service_instance_table_;
-    LoadbalancerTable *loadbalancer_table_;
-    LoadbalancerPoolTable *loadbalancer_pool_table_;
     PhysicalDeviceTable *physical_device_table_;
     PhysicalDeviceVnTable *physical_device_vn_table_;
+    ForwardingClassTable *forwarding_class_table_;
+    QosQueueTable *qos_queue_table_;
+    AgentQosConfigTable *qos_config_table_;
     std::auto_ptr<ConfigManager> config_manager_;
  
     // Mirror config table
@@ -1122,6 +1203,7 @@ private:
     std::auto_ptr<Peer> multicast_tor_peer_;
     std::auto_ptr<Peer> multicast_tree_builder_peer_;
     std::auto_ptr<Peer> mac_vm_binding_peer_;
+    std::auto_ptr<Peer> inet_evpn_peer_;
 
     std::auto_ptr<AgentSignal> agent_signal_;
 
@@ -1137,17 +1219,23 @@ private:
     bool headless_agent_mode_;
     const Interface *vhost_interface_;
     process::ConnectionState* connection_state_;
-    bool debug_;
     bool test_mode_;
+    bool xmpp_dns_test_mode_;
     bool init_done_;
     bool simulate_evpn_tor_;
     bool tsn_enabled_;
     bool tor_agent_enabled_;
+    bool server_gateway_mode_;
 
     // Flow information
     uint32_t flow_table_size_;
     uint16_t flow_thread_count_;
+    bool flow_trace_enable_;
     uint32_t max_vm_flows_;
+    uint32_t flow_add_tokens_;
+    uint32_t flow_ksync_tokens_;
+    uint32_t flow_del_tokens_;
+    uint32_t flow_update_tokens_;
 
     // OVSDB client ptr
     OVSDB::OvsdbClient *ovsdb_client_;
@@ -1169,12 +1257,14 @@ private:
     //Bridge entries that can be porgrammed in vrouter
     uint32_t vrouter_max_bridge_entries_;
     uint32_t vrouter_max_oflow_bridge_entries_;
+    //Max Flow entries
+    uint32_t vrouter_max_flow_entries_;
+    //Max OverFlow entries
+    uint32_t vrouter_max_oflow_entries_;
     std::string vrouter_build_info_;
     FlowStatsReqHandler flow_stats_req_handler_;
 
     uint32_t tbb_keepawake_timeout_;
-    Timer *tbb_awake_timer_;
-    uint64_t tbb_awake_count_;
     // Constants
 public:
     static const std::string config_file_;
@@ -1186,6 +1276,7 @@ public:
     static const std::string link_local_vrf_name_;
     static const std::string link_local_vn_name_;
     static const MacAddress vrrp_mac_;
+    static const MacAddress pkt_interface_mac_;
     static const std::string bcast_mac_;
     static const std::string xmpp_dns_server_connection_name_prefix_;
     static const std::string xmpp_control_node_connection_name_prefix_;

@@ -5,22 +5,14 @@
 #include "gmock/gmock.h"
 
 #include "query.h"
-#ifdef USE_CASSANDRA_CQL
 #include "analytics/test/cql_if_mock.h"
-#else // USE_CASSANDRA_CQL
-#include "analytics/test/thrift_if_mock.h"
-#endif // !USE_CASSANDRA_CQL
 
 class AnalyticsQueryMock : public AnalyticsQuery {
 public:
     AnalyticsQueryMock() : 
         AnalyticsQuery(std::string(""),
-#ifdef USE_CASSANDRA_CQL
                        GenDbIfPtr(new CqlIfMock()),
-#else // USE_CASSANDRA_CQL
-                       GenDbIfPtr(new ThriftIfMock()),
-#endif // !USE_CASSANDRA_CQL
-                       std::map<std::string, std::string>(),
+                       std::map<std::string, std::string>(), -1, NULL,
                        TtlMap(), int(0), int(0)) {
     }
     

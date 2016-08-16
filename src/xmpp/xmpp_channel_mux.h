@@ -6,6 +6,7 @@
 #define __XMPP_CHANNEL_MUX_H__
 
 #include <boost/system/error_code.hpp>
+#include <tbb/atomic.h>
 #include <tbb/mutex.h>
 #include "xmpp/xmpp_channel.h"
 #include "xmpp/xmpp_proto.h"
@@ -22,9 +23,11 @@ public:
     virtual bool IsCloseInProgress() const;
     virtual void CloseComplete();
     virtual bool Send(const uint8_t *, size_t, xmps::PeerId, SendReadyCb);
+    virtual int GetTaskInstance() const;
     virtual void RegisterReceive(xmps::PeerId, ReceiveCb);
     virtual void UnRegisterReceive(xmps::PeerId);
     virtual void RegisterRxMessageTraceCallback(RxMessageTraceCb cb);
+    virtual void RegisterTxMessageTraceCallback(TxMessageTraceCb cb);
     size_t ReceiverCount() const;
     std::vector<std::string> GetReceiverList() const;
 
@@ -61,12 +64,16 @@ public:
                         const std::string &msg,
                         const XmppStanza::XmppMessage *xmpp_msg);
 
+    bool TxMessageTrace(const std::string &to_address, int port, int msg_size,
+                        const std::string &msg,
+                        const XmppStanza::XmppMessage *xmpp_msg);
+
 protected:
     friend class XmppChannelMuxMock;
 
 private:
     void RegisterWriteReady(xmps::PeerId, SendReadyCb);
-    void InitializeClosingCount();
+    bool InitializeClosingCount();
 
     typedef std::map<xmps::PeerId, SendReadyCb> WriteReadyCbMap;
     typedef std::map<xmps::PeerId, ReceiveCb> ReceiveCbMap;
@@ -77,7 +84,8 @@ private:
     XmppConnection *connection_;
     tbb::mutex mutex_;
     RxMessageTraceCb rx_message_trace_cb_;
-    int closing_count_;
+    TxMessageTraceCb tx_message_trace_cb_;
+    tbb::atomic<int> closing_count_;
 };
 
 #endif // __XMPP_CHANNEL_MUX_H__

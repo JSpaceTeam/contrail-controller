@@ -44,17 +44,18 @@ struct ShowBgpNeighborFamily {
 
 struct PeerCloseInfo {
     1: string state;
+    17: string membership_state;
     2: bool close_again;
+    16: bool non_graceful;
     3: u64 init;
     4: u64 close;
     5: u64 nested;
     6: u64 deletes;
     7: u64 stale;
+    15: u64 llgr_stale;
     8: u64 sweep;
     9: u64 gr_timer;
-    10: u64 deleted_state_paths;
-    11: u64 deleted_paths;
-    12: u64 marked_state_paths;
+    14: u64 llgr_timer;
 }
 
 struct BgpNeighborResp {
@@ -77,6 +78,7 @@ struct BgpNeighborResp {
     4: string local_address;    // local ip address and port
     26: string local_id;
     5: u32 local_asn;
+    56: u32 task_instance;
     54: optional PeerCloseInfo peer_close_info;
     9: optional string send_state;       // in sync/not in sync
     10: optional string last_event;
@@ -87,7 +89,11 @@ struct BgpNeighborResp {
     45: optional list<string> auth_keys;
     38: optional list<string> configured_address_families;
     39: optional list<string> negotiated_address_families;
+    57: optional list<string> graceful_restart_address_families;
+    58: optional list<string> long_lived_graceful_restart_address_families;
     49: optional list<ShowBgpNeighborFamily> family_attributes_list;
+    59: optional u16 graceful_restart_time;
+    60: optional u32 long_lived_graceful_restart_time;
     40: optional u32 configured_hold_time;
     41: u32 negotiated_hold_time;
     46: u32 primary_path_count;
@@ -226,7 +232,9 @@ struct ShowRouteTableSummary {
     6: u64 secondary_paths;
     7: u64 infeasible_paths;
     8: u64 walk_requests;
+    16: u64 walk_again_requests;
     9: u64 walk_completes;
+    17: u64 actual_walks;
     10: u64 walk_cancels;
     11: u64 pending_updates;
     12: u64 markers;
@@ -246,22 +254,38 @@ request sandesh ShowRouteSummaryReq {
     1: string search_string;
 }
 
+struct ShowMembershipPeerInfo {
+    1: string peer;
+    2: bool ribout_registered;
+    3: bool ribin_registered;
+    4: u32 instance_id;
+    5: u64 generation_id;
+}
+
+struct ShowTableMembershipInfo {
+    1: u32 requests;
+    2: u32 walks;
+    3: list<ShowMembershipPeerInfo> peers;
+}
+
 struct ShowRoutingInstanceTable {
     1: string name (link="ShowRouteReq");
     13: bool deleted;
-    2: list<string> peers;
     3: u64 prefixes;
     4: u64 paths;
     5: u64 primary_paths;
     6: u64 secondary_paths;
     7: u64 infeasible_paths;
     8: u64 walk_requests;
+    16: u64 walk_again_requests;
+    17: u64 actual_walks;
     9: u64 walk_completes;
     10: u64 walk_cancels;
     11: u64 pending_updates;
     12: u64 markers;
     14: u64 listeners;
     15: u64 walkers;
+    2: ShowTableMembershipInfo membership;
 }
 
 struct ShowInstanceRoutingPolicyInfo {
@@ -386,6 +410,36 @@ response sandesh ShowPathResolverResp {
 
 request sandesh ShowPathResolverReq {
     1: string search_string;
+}
+
+struct ShowRibOutStatistics {
+    1: string table;
+    2: string encoding;
+    3: string peer_type;
+    4: u32 peer_as;
+    5: string queue;
+    6: u32 peers;
+    7: u64 pending_updates;
+    8: u64 markers;
+    9: u64 messages_built;
+    10: u64 messages_sent;
+    11: u64 reach;
+    12: u64 unreach;
+    13: u64 tail_dequeues;
+    14: u64 peer_dequeues;
+    15: u64 marker_splits;
+    16: u64 marker_merges;
+    17: u64 marker_moves;
+}
+
+request sandesh ShowRibOutStatisticsReq {
+    1: string search_string;
+}
+
+response sandesh ShowRibOutStatisticsResp {
+    1: list<ShowRibOutStatistics> ribouts;
+    2: optional string next_batch (link="ShowRibOutStatisticsReqIterate",
+                                   link_title="next_batch");
 }
 
 struct ShowEvpnMcastLeaf {
@@ -632,6 +686,10 @@ struct BgpPeerInfoData {
    21: optional list<string> configured_families;
    14: optional list<string> families;
    22: optional list<string> negotiated_families;
+   28: optional list<string> graceful_restart_families;
+   29: optional list<string> long_lived_graceful_restart_families;
+   30: optional u16 graceful_restart_time;
+   31: optional u32 long_lived_graceful_restart_time;
    15: optional peer_info.PeerFlapInfo flap_info;
    16: optional peer_info.PeerStateInfo state_info;
    17: optional peer_info.PeerEventInfo event_info;

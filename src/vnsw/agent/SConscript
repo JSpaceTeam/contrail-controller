@@ -25,6 +25,7 @@ if GetOption('with_libvirt'):
 ##########################################################################
 env.Prepend(CPPPATH = '#/vrouter/include')
 env.Prepend(CPPPATH = env['TOP_INCLUDE'] + '/thrift')
+env.Prepend(CPPPATH = env['TOP'] + '/tools/sandesh/library/common')
 
 # Function to append TOP level directory
 def AddTopDir(list):
@@ -107,6 +108,7 @@ env.Append(LIBPATH = MapBuildDir([
 env.Prepend(LIBS = [
     'xmpp',
     'peer_sandesh',
+    'table_sandesh',
     'xmpp_multicast',
     'xmpp_enet',
     'xmpp_unicast',
@@ -132,6 +134,8 @@ env.Prepend(LIBS = [
     'ssl',
     'crypto',
     'sandesh',
+    'nodeinfo',
+    'cpuinfo',
     'process_info',
     'http',
     'http_parser',

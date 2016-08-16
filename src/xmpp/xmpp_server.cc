@@ -63,6 +63,8 @@ XmppServer::XmppServer(EventManager *evm, const string &server_addr,
       log_uve_(false),
       auth_enabled_(config->auth_enabled),
       tcp_hold_time_(config->tcp_hold_time),
+      gr_helper_enable_(config->gr_helper_enable),
+      end_of_rib_timeout_(config->end_of_rib_timeout),
       connection_queue_(TaskScheduler::GetInstance()->GetTaskId("bgp::Config"),
           0, boost::bind(&XmppServer::DequeueConnection, this, _1)) {
 
@@ -87,7 +89,11 @@ XmppServer::XmppServer(EventManager *evm, const string &server_addr,
 
             // Verify peer has CA signed certificate
             ctx->set_verify_mode(boost::asio::ssl::verify_peer, ec);
-            assert(ec.value() == 0);
+            if (ec.value() != 0) {
+                LOG(ERROR, "Error : " << ec.message()
+                    << ", while setting ssl verification mode");
+                exit(EINVAL);
+            }
 
             ctx->load_verify_file(config->path_to_ca_cert, ec);
             if (ec.value() != 0) {
@@ -120,6 +126,31 @@ XmppServer::XmppServer(EventManager *evm, const string &server_addr,
     }
 }
 
+class XmppConfigUpdater {
+public:
+    explicit XmppConfigUpdater(XmppServer *server,
+                               BgpConfigManager *config_manager) :
+            server_(server) {
+        BgpConfigManager::Observers obs;
+        obs.system= boost::bind(&XmppConfigUpdater::ProcessGlobalSystemConfig,
+            this, _1, _2);
+        config_manager->RegisterObservers(obs);
+    }
+
+    const BgpGlobalSystemConfig &config() const { return config_; }
+
+    void ProcessGlobalSystemConfig(const BgpGlobalSystemConfig *system,
+            BgpConfigManager::EventType event) {
+        config_.set_gr_time(system->gr_time());
+        config_.set_llgr_time(system->llgr_time());
+        server_->ClearAllConnections();
+    }
+
+private:
+    XmppServer *server_;
+    BgpGlobalSystemConfig config_;
+};
+
 XmppServer::XmppServer(EventManager *evm, const string &server_addr)
     : XmppConnectionManager(evm, ssl::context::tlsv1_server, false, false),
       max_connections_(0),
@@ -130,6 +161,9 @@ XmppServer::XmppServer(EventManager *evm, const string &server_addr)
       log_uve_(false),
       auth_enabled_(false),
       tcp_hold_time_(XmppChannelConfig::kTcpHoldTime),
+      gr_helper_enable_(false),
+      end_of_rib_timeout_(30),
+      xmpp_config_updater_(NULL),
       connection_queue_(TaskScheduler::GetInstance()->GetTaskId("bgp::Config"),
           0, boost::bind(&XmppServer::DequeueConnection, this, _1)) {
 }
@@ -144,23 +178,39 @@ XmppServer::XmppServer(EventManager *evm)
       log_uve_(false),
       auth_enabled_(false),
       tcp_hold_time_(XmppChannelConfig::kTcpHoldTime),
+      gr_helper_enable_(false),
+      end_of_rib_timeout_(30),
       connection_queue_(TaskScheduler::GetInstance()->GetTaskId("bgp::Config"),
           0, boost::bind(&XmppServer::DequeueConnection, this, _1)) {
 }
 
-bool XmppServer::IsPeerCloseGraceful() {
+void XmppServer::CreateConfigUpdater(BgpConfigManager *config_manager) {
+    xmpp_config_updater_.reset(new XmppConfigUpdater(this, config_manager));
+}
+
+const uint16_t XmppServer::GetGracefulRestartTime() const {
+    return xmpp_config_updater_ ? xmpp_config_updater_->config().gr_time() : 0;
+}
+
+const uint32_t XmppServer::GetLongLivedGracefulRestartTime() const {
+    return xmpp_config_updater_ ? xmpp_config_updater_->config().llgr_time():0;
+}
+
+const uint32_t XmppServer::GetEndOfRibReceiveTime() const {
+    return end_of_rib_timeout_;
+}
+
+bool XmppServer::IsPeerCloseGraceful() const {
+
     // If the server is deleted, do not do graceful restart
-    if (deleter()->IsDeleted()) return false;
+    if (deleter()->IsDeleted())
+        return false;
 
-    static bool init = false;
-    static bool enabled = false;
+    // Check if GR helper mode is disabled.
+    if (!gr_helper_enable())
+        return false;
 
-    if (!init) {
-        init = true;
-        char *p = getenv("XMPP_GRACEFUL_RESTART_ENABLE");
-        if (p && !strcasecmp(p, "true")) enabled = true;
-    }
-    return enabled;
+    return GetGracefulRestartTime() != 0;
 }
 
 XmppServer::~XmppServer() {
@@ -216,6 +266,10 @@ void XmppServer::Terminate() {
 }
 
 LifetimeActor *XmppServer::deleter() {
+    return deleter_.get();
+}
+
+LifetimeActor *XmppServer::deleter() const {
     return deleter_.get();
 }
 
@@ -562,9 +616,9 @@ void XmppServer::FillShowConnections(
 
 void XmppServer::FillShowServer(ShowXmppServerResp *resp) const {
     SocketIOStats peer_socket_stats;
-    GetRxSocketStats(peer_socket_stats);
+    GetRxSocketStats(&peer_socket_stats);
     resp->set_rx_socket_stats(peer_socket_stats);
-    GetTxSocketStats(peer_socket_stats);
+    GetTxSocketStats(&peer_socket_stats);
     resp->set_tx_socket_stats(peer_socket_stats);
     resp->set_current_connections(connection_map_.size());
     resp->set_max_connections(max_connections_);

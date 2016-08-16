@@ -14,6 +14,9 @@ struct PortInfo input[] = {
     {"vnet1", 1, "1.1.1.1", "00:00:00:01:01:01", 1, 1},
     {"vnet2", 2, "1.1.1.2", "00:00:00:01:01:02", 1, 2}
 };
+IpamInfo ipam_info[] = {
+    {"1.1.1.0", 24, "1.1.1.100"},
+};
 
 class TestVnswIf : public ::testing::Test {
 public:
@@ -22,6 +25,8 @@ public:
         vnswif_ = agent_->ksync()->vnsw_interface_listner();
 
         CreateVmportEnv(input, 2, 1);
+        client->WaitForIdle();
+        AddIPAM("vn1", ipam_info, 1);
         client->WaitForIdle();
         EXPECT_TRUE(VmPortActive(1));
         EXPECT_TRUE(VmPortActive(2));
@@ -34,13 +39,15 @@ public:
         InterfaceEvent(false, "vnet2", 0);
         DeleteVmportEnv(input, 2, true, 1);
         client->WaitForIdle();
+        DelIPAM("vn1");
+        client->WaitForIdle();
         EXPECT_EQ(0, vnswif_->GetHostInterfaceCount());
         WAIT_FOR(1000, 100, (VmPortFindRetDel(1) == false));
         WAIT_FOR(1000, 100, (VmPortFindRetDel(2) == false));
     }
 
-    void SetSeen(const string &ifname, bool oper) {
-        vnswif_->SetSeen(agent_->vhost_interface_name(), true);
+    void SetSeen(const string &ifname, bool oper, uint32_t id) {
+        vnswif_->SetSeen(agent_->vhost_interface_name(), true, id);
     }
 
     void ResetSeen(const string &ifname) {
@@ -132,7 +139,12 @@ TEST_F(TestVnswIf, host_route_del) {
 
 // On link flap of vhost, all link-local must be written again
 TEST_F(TestVnswIf, vhost_link_flap) {
-    SetSeen(agent_->vhost_interface_name(), true);
+    uint32_t id = Interface::kInvalidIndex;
+    const Interface *intf = agent_->vhost_interface();
+    if (intf) {
+        id = intf->id();
+    }
+    SetSeen(agent_->vhost_interface_name(), true, id);
     client->WaitForIdle();
 
     // Set link-state down
@@ -177,7 +189,12 @@ TEST_F(TestVnswIf, inactive_1) {
 
 // vhost-ip address update
 TEST_F(TestVnswIf, vhost_addr_1) {
-    SetSeen(agent_->vhost_interface_name(), true);
+    uint32_t id = Interface::kInvalidIndex;
+    const Interface *intf = agent_->vhost_interface();
+    if (intf) {
+        id = intf->id();
+    }
+    SetSeen(agent_->vhost_interface_name(), true, id);
     client->WaitForIdle();
 
     VnswInterfaceListener::HostInterfaceEntry *entry =
@@ -360,6 +377,21 @@ TEST_F(TestVnswIf, linklocal_2) {
     WAIT_FOR(1000, 100, (vnswif_->ll_del_count() >= (count + 1)));
 }
 
+class SetupTask : public Task {
+    public:
+        SetupTask() :
+            Task((TaskScheduler::GetInstance()->
+                  GetTaskId("db::DBTable")), 0) {
+        }
+
+        virtual bool Run() {
+            Agent::GetInstance()->ksync()->vnsw_interface_listner()->Shutdown();
+            return true;
+        }
+    std::string Description() const { return "SetupTask"; }
+};
+
+
 int main(int argc, char *argv[]) {
     GETUSERARGS();
 
@@ -369,7 +401,9 @@ int main(int argc, char *argv[]) {
 
     int ret = RUN_ALL_TESTS();
     TestShutdown();
-    Agent::GetInstance()->ksync()->vnsw_interface_listner()->Shutdown();
+    SetupTask * task = new SetupTask();
+    TaskScheduler::GetInstance()->Enqueue(task);
+    client->WaitForIdle();
     delete client;
     return ret;
 }

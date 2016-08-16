@@ -9,17 +9,23 @@ from StringIO import StringIO
 from ConfigParser import NoOptionError, NoSectionError
 import sys
 import os
+import psutil
 import socket
 import time
 import subprocess
 from subprocess import Popen, PIPE
 import supervisor.xmlrpc
 import xmlrpclib
+import platform
 
 from supervisor import childutils
 from nodemgr.common.event_listener_protocol_nodemgr import \
     EventListenerProtocolNodeMgr
 from nodemgr.common.process_stat import ProcessStat
+from nodemgr.common.sandesh.nodeinfo.ttypes import *
+from nodemgr.common.sandesh.nodeinfo.cpuinfo.ttypes import *
+from nodemgr.common.sandesh.nodeinfo.process_info.ttypes import *
+from nodemgr.common.cpuinfo import MemCpuUsageData
 from sandesh_common.vns.constants import INSTANCE_ID_DEFAULT
 import discoveryclient.client as client
 from buildinfo import build_info
@@ -27,10 +33,21 @@ from pysandesh.sandesh_logger import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 
 
+def package_installed(pkg):
+    (pdist, _, _) = platform.dist()
+    if pdist == 'Ubuntu':
+        cmd = "dpkg -l " + pkg
+    else:
+        cmd = "rpm -q " + pkg
+    with open(os.devnull, "w") as fnull:
+        return (not subprocess.call(cmd.split(), stdout=fnull, stderr=fnull))
+
+
 class EventManager(object):
     rules_data = []
     group_names = []
     process_state_db = {}
+    third_party_process_state_db = {}
     FAIL_STATUS_DUMMY = 0x1
     FAIL_STATUS_DISK_SPACE = 0x2
     FAIL_STATUS_SERVER_PORT = 0x4
@@ -62,6 +79,8 @@ class EventManager(object):
         self.curr_build_info = None
         self.new_build_info = None
         self.send_build_info = send_build_info
+        self.last_cpu = None
+        self.last_time = 0
 
     # Get all the current processes in the node
     def get_current_process(self):
@@ -71,11 +90,14 @@ class EventManager(object):
                 None, None, serverurl=self.supervisor_serverurl))
         # Add all current processes to make sure nothing misses the radar
         process_state_db = {}
+        # list of all processes on the node is made here
         for proc_info in proxy.supervisor.getAllProcessInfo():
             if (proc_info['name'] != proc_info['group']):
                 proc_name = proc_info['group'] + ":" + proc_info['name']
             else:
                 proc_name = proc_info['name']
+            proc_pid = proc_info['pid']
+
             process_stat_ent = self.get_process_stat_object(proc_name)
             process_stat_ent.process_state = "PROCESS_STATE_" + \
                 proc_info['statename']
@@ -83,6 +105,7 @@ class EventManager(object):
                     'PROCESS_STATE_RUNNING'):
                 process_stat_ent.start_time = str(proc_info['start'] * 1000000)
                 process_stat_ent.start_count += 1
+            process_stat_ent.pid = proc_pid
             process_state_db[proc_name] = process_stat_ent
         return process_state_db
     # end get_current_process
@@ -137,21 +160,59 @@ class EventManager(object):
             self.fail_status_bits &= ~self.FAIL_STATUS_NTP_SYNC
         self.send_nodemgr_process_status()
 
-    def _add_build_info(self, node_status):
+    def get_build_info(self):
         # Retrieve build_info from package/rpm and cache it
         if self.curr_build_info is None:
             command = "contrail-version contrail-nodemgr | grep contrail-nodemgr"
             version = os.popen(command).read()
-            _, rpm_version, build_num = version.split()
+            version_partials = version.split()
+            if len(version_partials) < 3:
+                sys.stderr.write('Not enough values to parse package version %s' % version)
+                return ""
+            else:
+                _, rpm_version, build_num = version_partials
             self.new_build_info = build_info + '"build-id" : "' + \
                 rpm_version + '", "build-number" : "' + \
                 build_num + '"}]}'
             if (self.new_build_info != self.curr_build_info):
                 self.curr_build_info = self.new_build_info
-                node_status.build_info = self.curr_build_info
+        return self.curr_build_info
 
-    def send_process_state_db_base(self, group_names, ProcessInfo,
-                                   NodeStatus, NodeStatusUVE):
+    def update_process_core_file_list(self):
+        #LOG_DEBUG sys.stderr.write('update_process_core_file_list: begin:')
+        ret_value = False
+        try:
+            ls_command = "ls -1 /var/crashes"
+            (corenames, stderr) = Popen(
+                ls_command.split(),
+                stdout=PIPE).communicate()
+
+            process_state_db_tmp = {}
+            for key in self.process_state_db:
+                #LOG_DEBUG sys.stderr.write('update_process_core_file_list: key: '+key+'\n')
+                proc_stat = self.get_process_stat_object(key)
+                process_state_db_tmp[key] = proc_stat
+
+            #LOG_DEBUG sys.stderr.write('update_process_core_file_list: corenames: '+corenames+'\n')
+            for corename in corenames.split():
+                exec_name = corename.split('.')[1]
+                for key in self.process_state_db:
+                    if key.startswith(exec_name):
+                        #LOG_DEBUG sys.stderr.write('update_process_core_file_list: startswith: '+exec_name+'\n')
+                        process_state_db_tmp[key].core_file_list.append(corename.rstrip())
+
+            for key in self.process_state_db:
+                if set(process_state_db_tmp[key].core_file_list) != set(self.process_state_db[key].core_file_list):
+                    self.process_state_db[key].core_file_list = process_state_db_tmp[key].core_file_list
+                    ret_value = True
+        except Exception as e:
+            sys.stderr.write('update_process_core_file_list: exception: '+str(e))
+
+        #LOG_DEBUG sys.stderr.write('update_process_core_file_list: ret_value: '+str(ret_value)+'\n')
+        return ret_value
+    #end update_process_core_file_list
+
+    def send_process_state_db_base(self, group_names, ProcessInfo):
         name = socket.gethostname()
         for group in group_names:
             process_infos = []
@@ -171,6 +232,7 @@ class EventManager(object):
                 process_info.last_exit_time = pstat.exit_time
                 process_info.core_file_list = pstat.core_file_list
                 process_infos.append(process_info)
+                #in tor-agent case, we should use tor-agent name as uve key
                 name = pstat.name
                 if pstat.deleted == False:
                     delete_status = False
@@ -183,22 +245,22 @@ class EventManager(object):
             node_status.name = name
             node_status.deleted = delete_status
             node_status.process_info = process_infos
-            node_status.all_core_file_list = self.all_core_file_list
             if (self.send_build_info):
-                self._add_build_info(node_status)
-            node_status_uve = NodeStatusUVE(data=node_status)
-	    msg = 'Sending UVE:' + str(node_status_uve) 
+                node_status.build_info = self.get_build_info()
+            node_status_uve = NodeStatusUVE(table=self.table,
+                                            data=node_status)
+	    msg = 'send_process_state_db_base: Sending UVE:' + str(node_status_uve)
             self.sandesh_global.logger().log(SandeshLogger.get_py_logger_level(
 			    SandeshLevel.SYS_INFO), msg)
             node_status_uve.send()
 
-    def send_all_core_file(self):
+    def update_all_core_file(self):
         stat_command_option = "stat --printf=%Y /var/crashes"
         modified_time = Popen(
             stat_command_option.split(),
             stdout=PIPE).communicate()
         if modified_time[0] == self.core_dir_modified_time:
-            return
+            return False
         self.core_dir_modified_time = modified_time[0]
         ls_command_option = "ls /var/crashes"
         (corename, stderr) = Popen(
@@ -206,6 +268,7 @@ class EventManager(object):
             stdout=PIPE).communicate()
         self.all_core_file_list = corename.split('\n')[0:-1]
         self.send_process_state_db(self.group_names)
+        return True
 
     def get_process_stat_object(self, pname):
         return ProcessStat(pname)
@@ -226,6 +289,7 @@ class EventManager(object):
             proc_stat.start_count += 1
             proc_stat.start_time = str(int(time.time() * 1000000))
             send_uve = True
+            proc_stat.pid = int(pheaders['pid'])
 
         if (pstate == 'PROCESS_STATE_STOPPED'):
             proc_stat.stop_count += 1
@@ -302,8 +366,7 @@ class EventManager(object):
             self.send_process_state_db([proc_stat.group])
 
     def send_nodemgr_process_status_base(self, ProcessStateNames,
-                                         ProcessState, ProcessStatus,
-                                         NodeStatus, NodeStatusUVE):
+                                         ProcessState, ProcessStatus):
         if (self.prev_fail_status_bits != self.fail_status_bits):
             self.prev_fail_status_bits = self.fail_status_bits
             fail_status_bits = self.fail_status_bits
@@ -316,19 +379,86 @@ class EventManager(object):
             node_status = NodeStatus(name=socket.gethostname(),
                             process_status=process_status_list)
             if (self.send_build_info):
-                self._add_build_info(node_status)
-            node_status_uve = NodeStatusUVE(data=node_status)
-            msg = 'Sending UVE:' + str(node_status_uve)
+                node_status.build_info = self.get_build_info()
+            node_status_uve = NodeStatusUVE(table=self.table,
+                                            data=node_status)
+            msg = 'send_nodemgr_process_status_base: Sending UVE:' + str(node_status_uve)
             self.sandesh_global.logger().log(SandeshLogger.get_py_logger_level(
                                     SandeshLevel.SYS_INFO), msg)
             node_status_uve.send()
 
-    def send_disk_usage_info_base(self, NodeStatusUVE, NodeStatus,
-                                  DiskPartitionUsageStats):
+    def send_system_cpu_info(self):
+        mem_cpu_usage_data = MemCpuUsageData(os.getpid(), self.last_cpu, self.last_time)
+        sys_cpu = SystemCpuInfo()
+        sys_cpu.num_socket = mem_cpu_usage_data.get_num_socket()
+        sys_cpu.num_cpu = mem_cpu_usage_data.get_num_cpu()
+        sys_cpu.num_core_per_socket = mem_cpu_usage_data.get_num_core_per_socket()
+        sys_cpu.num_thread_per_core = mem_cpu_usage_data.get_num_thread_per_core()
+        node_status = NodeStatus(name=socket.gethostname(),
+                                 system_cpu_info=sys_cpu)
+        node_status_uve = NodeStatusUVE(table=self.table,
+                                        data=node_status)
+        node_status_uve.send()
+
+    def get_system_mem_cpu_usage(self):
+        system_mem_cpu_usage_data = MemCpuUsageData(os.getpid(), self.last_cpu, self.last_time)
+        system_mem_cpu_usage = system_mem_cpu_usage_data.get_sys_mem_cpu_info()
+        self.last_cpu = system_mem_cpu_usage_data.last_cpu
+        self.last_time = system_mem_cpu_usage_data.last_time
+        return system_mem_cpu_usage
+
+    def get_all_processes_mem_cpu_usage(self):
+        process_mem_cpu_usage = {}
+        for key in self.process_state_db:
+            pstat = self.process_state_db[key]
+            if (pstat.process_state == 'PROCESS_STATE_RUNNING'):
+                try:
+                    mem_cpu_usage_data = MemCpuUsageData(pstat.pid, pstat.last_cpu, pstat.last_time)
+                    process_mem_cpu = mem_cpu_usage_data.get_process_mem_cpu_info()
+                except psutil.NoSuchProcess:
+                    sys.stderr.write("NoSuchProcess: process name:%s pid:%d\n"
+                                     % (pstat.pname, pstat.pid))
+                else:
+                    process_mem_cpu.__key = pstat.pname
+                    process_mem_cpu_usage[process_mem_cpu.__key] = process_mem_cpu
+                    pstat.last_cpu = mem_cpu_usage_data.last_cpu
+                    pstat.last_time = mem_cpu_usage_data.last_time
+
+        # walk through all processes being monitored by nodemgr,
+        # not spawned by supervisord
+        third_party_process_dict = self.get_node_third_party_process_dict()
+        for pname in third_party_process_dict:
+            pattern = third_party_process_dict[pname]
+            cmd = "ps -aux | grep " + pattern + " | awk '{print $2}' | head -n1"
+            proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = proc.communicate()
+            if (stdout != ''):
+                pid = int(stdout.strip('\n'))
+                if pname in self.third_party_process_state_db:
+                    pstat = self.third_party_process_state_db[pname]
+                else:
+                    pstat = self.get_process_stat_object(pname)
+                    pstat.pid = pid
+                    self.third_party_process_state_db[pname] = pstat
+                try:
+                    mem_cpu_usage_data = MemCpuUsageData(pstat.pid, pstat.last_cpu, pstat.last_time)
+                    process_mem_cpu = mem_cpu_usage_data.get_process_mem_cpu_info()
+                except psutil.NoSuchProcess:
+                    sys.stderr.write("NoSuchProcess: process name:%s pid:%d\n"
+                                     % (pstat.pname, pstat.pid))
+                    self.third_party_process_state_db.pop(pstat.pname)
+                else:
+                    process_mem_cpu.__key = pname
+                    process_mem_cpu_usage[process_mem_cpu.__key] = process_mem_cpu
+                    pstat.last_cpu = mem_cpu_usage_data.last_cpu
+                    pstat.last_time = mem_cpu_usage_data.last_time
+        return process_mem_cpu_usage
+
+    def get_disk_usage(self):
+        disk_usage_info = {}
         partition = subprocess.Popen(
-            "df -T -t ext2 -t ext3 -t ext4 -t xfs",
+            "df -PT -t ext2 -t ext3 -t ext4 -t xfs",
             shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        disk_usage_infos = []
         for line in partition.stdout:
             if 'Filesystem' in line:
                 continue
@@ -339,27 +469,23 @@ class EventManager(object):
             disk_usage_stat = DiskPartitionUsageStats()
             try:
                 disk_usage_stat.partition_type = str(partition_type)
-                disk_usage_stat.partition_name = str(partition_name)
+                disk_usage_stat.__key = str(partition_name)
                 disk_usage_stat.partition_space_used_1k = \
                     int(partition_space_used_1k)
                 disk_usage_stat.partition_space_available_1k = \
                     int(partition_space_available_1k)
+                total_disk_space = \
+                    disk_usage_stat.partition_space_used_1k + \
+                    disk_usage_stat.partition_space_available_1k
+                disk_usage_stat.percentage_partition_space_used = \
+                    int(round((float(disk_usage_stat.partition_space_used_1k)/ \
+                        float(total_disk_space))*100))
             except ValueError:
                 sys.stderr.write("Failed to get local disk space usage" + "\n")
             else:
-                disk_usage_infos.append(disk_usage_stat)
-
-        # send node UVE
-        node_status = NodeStatus(
-            name=socket.gethostname(), disk_usage_info=disk_usage_infos)
-        if (self.send_build_info):
-            self._add_build_info(node_status)
-        node_status_uve = NodeStatusUVE(data=node_status)
-	msg = 'Sending UVE:' + str(node_status_uve)
-	self.sandesh_global.logger().log(SandeshLogger.get_py_logger_level(
-			    SandeshLevel.SYS_INFO), msg)
-        node_status_uve.send()
-    # end send_disk_usage_info
+                disk_usage_info[partition_name] = disk_usage_stat
+        return disk_usage_info
+    # end get_disk_usage
 
     def get_process_state_base(self, fail_status_bits,
                                ProcessStateNames, ProcessState):
@@ -427,41 +553,62 @@ class EventManager(object):
                     cmd_and_args = ['/usr/bin/bash', '-c', rules['action']]
                     subprocess.Popen(cmd_and_args)
 
-    def event_tick_60(self, prev_current_time):
+    def event_tick_60(self):
         self.tick_count += 1
-        # send other core file
-        self.send_all_core_file()
-        # send disk usage info periodically
-        self.send_disk_usage_info()
+        # get disk usage info periodically
+        disk_usage_info = self.get_disk_usage()
+
         # typical ntp sync time is about 5 min - first time,
         # we scan only after 10 min
         if self.tick_count >= 10:
             self.check_ntp_status()
+        if self.update_process_core_file_list():
+            self.send_process_state_db(['default'])
+
+        # get system mem/cpu usage
+        system_mem_cpu_usage = self.get_system_mem_cpu_usage()
+
+        # get processes mem/cpu usage
+        process_mem_cpu_usage = self.get_all_processes_mem_cpu_usage()
+
+        # send above encoded buffer
+        node_status = NodeStatus(name=socket.gethostname(),
+                                 disk_usage_info=disk_usage_info,
+                                 system_mem_cpu_usage=system_mem_cpu_usage,
+                                 process_mem_cpu_usage=process_mem_cpu_usage)
+        # encode other core file
+        if self.update_all_core_file():
+            node_status.all_core_file_list = self.all_core_file_list
+        if (self.send_build_info):
+            node_status.build_info = self.get_build_info()
+        node_status_uve = NodeStatusUVE(table=self.table,
+                                        data=node_status)
+        node_status_uve.send()
 
         current_time = int(time.time())
-        if ((abs(current_time - prev_current_time)) > 300):
+        if ((abs(current_time - self.prev_current_time)) > 300):
             # update all process start_times with the updated time
             # Compute the elapsed time and subtract them from
             # current time to get updated values
             sys.stderr.write(
                 "Time lapse detected " +
-                str(abs(current_time - prev_current_time)) + "\n")
+                str(abs(current_time - self.prev_current_time)) + "\n")
             for key in self.process_state_db:
                 pstat = self.process_state_db[key]
                 if pstat.start_time is not '':
                     pstat.start_time = str(
-                        (int(current_time - (prev_current_time -
+                        (int(current_time - (self.prev_current_time -
                              ((int)(pstat.start_time)) / 1000000))) * 1000000)
                 if (pstat.process_state == 'PROCESS_STATE_STOPPED'):
                     if pstat.stop_time is not '':
                         pstat.stop_time = str(
-                            int(current_time - (prev_current_time -
+                            int(current_time - (self.prev_current_time -
                                 ((int)(pstat.stop_time)) / 1000000)) *
                             1000000)
                 if (pstat.process_state == 'PROCESS_STATE_EXITED'):
                     if pstat.exit_time is not '':
                         pstat.exit_time = str(
-                            int(current_time - (prev_current_time -
+                            int(current_time - (self.prev_current_time -
                                 ((int)(pstat.exit_time)) / 1000000)) *
                             1000000)
                 # update process state database
@@ -478,11 +625,13 @@ class EventManager(object):
                 sys.stderr.write("Unable to write json")
                 pass
             self.send_process_state_db(self.group_names)
-        prev_current_time = int(time.time())
-        return prev_current_time
+        self.prev_current_time = int(time.time())
+
+    def do_periodic_events(self):
+        self.event_tick_60()
 
     def runforever(self, test=False):
-        prev_current_time = int(time.time())
+        self.prev_current_time = int(time.time())
         while 1:
             # we explicitly use self.stdin, self.stdout, and self.stderr
             # instead of sys.* so we can unit test this code
@@ -498,5 +647,5 @@ class EventManager(object):
                 self.event_process_communication(pdata)
             # do periodic events
             if headers['eventname'].startswith("TICK_60"):
-                prev_current_time = self.event_tick_60(prev_current_time)
+                self.do_periodic_events()
             self.listener_nodemgr.ok(self.stdout)

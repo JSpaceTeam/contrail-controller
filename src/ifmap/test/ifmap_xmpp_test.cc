@@ -43,7 +43,8 @@ protected:
     static const string kDefaultXmppServerConfigName;
 
     XmppIfmapTest()
-         : ifmap_server_(&db_, &graph_, evm_.io_service()),
+         : db_(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable")),
+           ifmap_server_(&db_, &graph_, evm_.io_service()),
            exporter_(ifmap_server_.exporter()), parser_(NULL),
            xmpp_server_(NULL), vm_uuid_mapper_(NULL) {
     }
@@ -276,8 +277,9 @@ protected:
         exporter_->LinkTableExport(partition, link);
     }
 
-    size_t ClientConfigTrackerSize(int index) {
-        return exporter_->ClientConfigTrackerSize(index);
+    size_t InterestConfigTrackerSize(int index) {
+        return exporter_->ClientConfigTrackerSize(IFMapExporter::INTEREST,
+                                                  index);
     }
 
     DB db_;
@@ -938,7 +940,7 @@ TEST_F(XmppIfmapTest, VrVmSubThrice) {
     TASK_UTIL_EXPECT_EQ(true, vnsw_client->HasNMessages(num_msgs + 2));
     cout << "Rx msgs " << vnsw_client->Count() << endl;
     cout << "Sent msgs " << GetSentMsgs(xmpp_server_, client_name) << endl;
-    EXPECT_EQ(ifmap_channel_mgr_->get_dupicate_vmsub_messages(), 0);
+    EXPECT_EQ(ifmap_channel_mgr_->get_duplicate_vmsub_messages(), 0);
 
     link = LinkLookup(vr, vm);
     EXPECT_TRUE(link != NULL);
@@ -960,7 +962,7 @@ TEST_F(XmppIfmapTest, VrVmSubThrice) {
     vnsw_client->SendVmConfigSubscribe(host_vm_name);
     task_util::WaitForIdle();
     usleep(1000);
-    TASK_UTIL_EXPECT_EQ(ifmap_channel_mgr_->get_dupicate_vmsub_messages(), 1);
+    TASK_UTIL_EXPECT_EQ(ifmap_channel_mgr_->get_duplicate_vmsub_messages(), 1);
     EXPECT_EQ(vnsw_client->HasNMessages(num_msgs), true);
 
     link = LinkLookup(vr, vm);
@@ -976,7 +978,7 @@ TEST_F(XmppIfmapTest, VrVmSubThrice) {
     num_msgs = vnsw_client->Count();
     vnsw_client->SendVmConfigSubscribe(host_vm_name);
     usleep(1000);
-    TASK_UTIL_EXPECT_EQ(ifmap_channel_mgr_->get_dupicate_vmsub_messages(), 2);
+    TASK_UTIL_EXPECT_EQ(ifmap_channel_mgr_->get_duplicate_vmsub_messages(), 2);
     EXPECT_EQ(vnsw_client->HasNMessages(num_msgs), true);
 
     link = LinkLookup(vr, vm);
@@ -1460,8 +1462,8 @@ TEST_F(XmppIfmapTest, Cli1Vn1Vm3Add) {
     TASK_UTIL_EXPECT_EQ(client->msgs_sent(), vnsw_client->Count());
     size_t cli_index = static_cast<size_t>(client->index());
     int walk_count = ClientGraphWalkVerify(client_name, cli_index, true, true);
-    EXPECT_EQ(ClientConfigTrackerSize(client->index()), walk_count);
-    EXPECT_EQ(ClientConfigTrackerSize(client->index()), 32);
+    EXPECT_EQ(InterestConfigTrackerSize(client->index()), walk_count);
+    EXPECT_EQ(InterestConfigTrackerSize(client->index()), 32);
 
     EXPECT_EQ(ifmap_server_.GetClientMapSize(), 1);
     // client close generates a TcpClose event on server
@@ -3399,12 +3401,12 @@ TEST_F(XmppIfmapTest, SpuriousVrSub) {
     IFMapClient *client1 = ifmap_server_.FindClient(client_name);
     size_t index1 = client1->index();
     task_util::WaitForIdle();
-    EXPECT_EQ(ifmap_channel_mgr_->get_dupicate_vrsub_messages(), 0);
+    EXPECT_EQ(ifmap_channel_mgr_->get_duplicate_vrsub_messages(), 0);
 
     // Subscribe to config again to simulate a spurious vr-subscribe
     vnsw_client->SendConfigSubscribe();
     usleep(1000);
-    TASK_UTIL_EXPECT_EQ(ifmap_channel_mgr_->get_dupicate_vrsub_messages(), 1);
+    TASK_UTIL_EXPECT_EQ(ifmap_channel_mgr_->get_duplicate_vrsub_messages(), 1);
     IFMapClient *client2 = ifmap_server_.FindClient(client_name);
     size_t index2 = client2->index();
 
@@ -3932,6 +3934,69 @@ TEST_F(XmppIfmapTest, NodePropertyChanges) {
     }
 
     TASK_UTIL_EXPECT_TRUE(xmpp_server_->FindConnection(client_name) == NULL);
+}
+
+TEST_F(XmppIfmapTest, DeleteClientPendingVmregCleanup) {
+    SetObjectsPerMessage(1);
+
+    // Read the ifmap data from file and give it to the parser
+    string content(FileRead("controller/src/ifmap/testdata/vr_3vm_add.xml"));
+    assert(content.size() != 0);
+    parser_->Receive(&db_, content.data(), content.size(), 0);
+    task_util::WaitForIdle();
+
+    // create the mock client
+    string client_name =
+        string("default-global-system-config:a1s27.contrail.juniper.net");
+    string filename("/tmp/" + GetUserName() +
+                    "_cfgadd_reg_cfgdel_unreg.output");
+    IFMapXmppClientMock *vnsw_client =
+        new IFMapXmppClientMock(&evm_, xmpp_server_->GetPort(), client_name,
+                                filename);
+    TASK_UTIL_EXPECT_EQ(true, vnsw_client->IsEstablished());
+    vnsw_client->RegisterWithXmpp();
+
+    usleep(1000);
+    // Server connection
+    TASK_UTIL_EXPECT_TRUE(ServerIsEstablished(xmpp_server_, client_name)
+                          == true);
+
+    // verify ifmap_server client is not created until config subscribe
+    EXPECT_TRUE(ifmap_server_.FindClient(client_name) == NULL);
+    // no config messages sent until config subscribe
+    EXPECT_EQ(0, vnsw_client->Count());
+
+    vnsw_client->SendConfigSubscribe();
+    TASK_UTIL_EXPECT_TRUE(ifmap_server_.FindClient(client_name) != NULL);
+
+    // Send a VM subscribe for a VM that does not exist in the config. This
+    // should create a pending vm-reg entry.
+    TASK_UTIL_EXPECT_EQ(vm_uuid_mapper_->PendingVmRegCount(), 0);
+    vnsw_client->SendVmConfigSubscribe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    TASK_UTIL_EXPECT_EQ(vm_uuid_mapper_->PendingVmRegCount(), 1);
+
+    // Cleanup the client. This should clean up the pending vm-reg list too.
+    ConfigUpdate(vnsw_client, new XmppConfigData());
+    TASK_UTIL_EXPECT_EQ(ifmap_server_.GetClientMapSize(), 0);
+
+    // Verify ifmap_server client cleanup
+    EXPECT_EQ(true, IsIFMapClientUnregistered(&ifmap_server_, client_name));
+
+    vnsw_client->UnRegisterWithXmpp();
+    vnsw_client->Shutdown();
+    task_util::WaitForIdle();
+    TcpServerManager::DeleteServer(vnsw_client);
+
+    // Delete xmpp-channel explicitly
+    XmppConnection *sconnection = xmpp_server_->FindConnection(client_name);
+    if (sconnection) {
+        sconnection->Shutdown();
+    }
+    TASK_UTIL_EXPECT_EQ(xmpp_server_->ConnectionCount(), 0);
+    EXPECT_TRUE(xmpp_server_->FindConnection(client_name) == NULL);
+
+    // The pending vm-reg should be cleaned up when the client dies
+    TASK_UTIL_EXPECT_EQ(vm_uuid_mapper_->PendingVmRegCount(), 0);
 }
 
 }

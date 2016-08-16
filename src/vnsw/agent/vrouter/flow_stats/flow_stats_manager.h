@@ -44,10 +44,9 @@ struct FlowStatsCollectorReq {
     };
 
     FlowStatsCollectorReq(Event ev, const FlowAgingTableKey &k,
-                          uint64_t interval, uint64_t timeout,
-                          bool user_cfgd) :
+                          uint64_t interval, uint64_t timeout) :
         event(ev), key(k), flow_stats_interval(interval),
-        flow_cache_timeout(timeout), user_configured(user_cfgd) {}
+        flow_cache_timeout(timeout) {}
 
     FlowStatsCollectorReq(Event ev, const FlowAgingTableKey &k):
         event(ev), key(k) {}
@@ -56,7 +55,6 @@ struct FlowStatsCollectorReq {
     FlowAgingTableKey key;
     uint64_t flow_stats_interval;
     uint64_t flow_cache_timeout;
-    bool user_configured;
 };
 
 class FlowStatsManager {
@@ -79,25 +77,22 @@ public:
     FlowStatsCollector* default_flow_stats_collector() {
         return default_flow_stats_collector_.get();
     }
-    FlowStatsCollector* tcp_flow_stats_collector() {
-        return protocol_list_[IPPROTO_TCP];
-    }
 
     //Add protocol + port based flow aging table
     void Add(const FlowAgingTableKey &key,
              uint64_t flow_stats_interval,
-             uint64_t flow_cache_timeout, bool user_configured);
+             uint64_t flow_cache_timeout);
     void Delete(const FlowAgingTableKey &key);
     void Free(const FlowAgingTableKey &key);
 
     //Add flow entry to particular aging table
     void AddEvent(FlowEntryPtr &flow);
-    void DeleteEvent(const FlowEntryPtr &flow);
-    void FlowIndexUpdateEvent(const FlowEntryPtr &flow);
+    void DeleteEvent(const FlowEntryPtr &flow, const RevFlowDepParams &params);
     void UpdateStatsEvent(const FlowEntryPtr &flow, uint32_t bytes,
                           uint32_t packets, uint32_t oflow_bytes);
 
     void Init(uint64_t flow_stats_interval, uint64_t flow_cache_timeout);
+    void InitDone();
     void Shutdown();
 
     FlowAgingTableMap::iterator begin() {
@@ -130,13 +125,18 @@ public:
         return flow_export_count_.fetch_and_store(0);
     }
 
-    uint32_t flow_export_msg_drops() const {
-        return flow_export_msg_drops_;
+    uint32_t flow_export_disable_drops() const {
+        return flow_export_disable_drops_;
     }
 
-    void set_flow_export_msg_drops(uint32_t count) {
-        flow_export_msg_drops_ = count;
+    uint32_t flow_export_sampling_drops() const {
+        return flow_export_sampling_drops_;
     }
+
+    uint32_t flow_export_drops() const {
+        return flow_export_drops_;
+    }
+
     uint32_t threshold() const { return threshold_;}
     bool delete_short_flow() const {
         return delete_short_flow_;
@@ -151,6 +151,7 @@ public:
                                     uint64_t protocol);
     void FreeIndex(uint32_t idx);
 
+    void SetProfileData(ProfileData *data);
     friend class AgentUtXmlFlowThreshold;
     friend class AgentUtXmlFlowThresholdValidate;
 private:
@@ -166,7 +167,9 @@ private:
     uint64_t prev_flow_export_rate_compute_time_;
     uint32_t flow_export_rate_;
     uint32_t threshold_;
-    tbb::atomic<uint32_t> flow_export_msg_drops_;
+    tbb::atomic<uint64_t> flow_export_disable_drops_;
+    tbb::atomic<uint64_t> flow_export_sampling_drops_;
+    tbb::atomic<uint64_t> flow_export_drops_;
     uint32_t prev_cfg_flow_export_rate_;
     Timer* timer_;
     bool delete_short_flow_;

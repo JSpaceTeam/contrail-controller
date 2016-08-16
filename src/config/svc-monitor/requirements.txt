@@ -1,4 +1,7 @@
 # kazoo <-- putting deps on zope.interface >= 3.8.0
 pycassa
-python-novaclient
 requests
+psutil>=0.6.0
+bottle
+kazoo
+pyyaml

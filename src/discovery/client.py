@@ -77,14 +77,14 @@ class Subscribe(object):
             'blob'         : '',
         }
 
-        data = {
+        self.data = {
             'service': service_type,
             'instances': count,
             'client-type': dc._client_type,
-            'remote-addr': dc._myip,
+            'remote-addr': dc.remote_addr,
             'client': dc._myid
         }
-        self.post_body = json.dumps(data)
+        self.post_body = json.dumps(self.data)
 
         self.url = "http://%s:%s/subscribe" % (dc._server_ip, dc._server_port)
 
@@ -100,6 +100,10 @@ class Subscribe(object):
             self._query()
             self.done = True
     # end
+
+    def update_subscribe_data(self, key, val):
+        self.data[key] = val
+        self.post_body = json.dumps(self.data)
 
     def inc_stats(self, key):
         if key not in self.stats:
@@ -198,8 +202,8 @@ class DiscoveryClient(object):
     def __init__(self, server_ip, server_port, client_type, pub_id = None):
         self._server_ip = server_ip
         self._server_port = server_port
-        self._myid = socket.gethostname() + ':' + client_type
         self._pub_id = pub_id or socket.gethostname()
+        self._myid = self._pub_id + ':' + client_type
         self._client_type = client_type
         self._headers = {
             'Content-type': 'application/json',
@@ -213,14 +217,7 @@ class DiscoveryClient(object):
             'hb_iters'       : 0,
         }
         self.pub_stats = {}
-
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect((server_ip, server_port))
-            self._myip = s.getsockname()[0]
-            s.close()
-        except Exception as e:
-            self._myip = socket.gethostname()
+        self._myip = '127.0.0.1'
 
         # queue to publish information (sig => service data)
         self.pub_q = {}
@@ -243,9 +240,23 @@ class DiscoveryClient(object):
         self._subs = []
     # end __init__
 
-    def set_myip(self, ip):
-        self._myip = ip
- 
+    @property
+    def remote_addr(self):
+        if self._myip != '127.0.0.1':
+            return self._myip
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((self._server_ip, self._server_port))
+            self._myip = s.getsockname()[0]
+            s.close()
+        except Exception as e:
+            pass
+        return self._myip
+
+    @remote_addr.setter
+    def remote_addr(self, remote_addr):
+        self._myip = remote_addr
+
     def set_sandesh(self, sandesh):
         self._sandesh = sandesh
     # end set_sandesh
@@ -291,12 +302,14 @@ class DiscoveryClient(object):
                               for k, v in obj.__dict__.iteritems()))
         return obj_json
 
-    def _publish_int(self, service, data):
+    def _publish_int(self, service, data, oper_state = 'up', msg = ''):
         self.syslog('Publish service "%s", data "%s"' % (service, data))
         payload = {
-            service        : data,
-            'service-type' : service,
-            'remote-addr'  : self._myip
+            service             : data,
+            'service-type'      : service,
+            'remote-addr'       : self.remote_addr,
+            'oper-state'        : oper_state,
+            'oper-state-reason' : msg
         }
         emsg = None
         cookie = None
@@ -362,9 +375,9 @@ class DiscoveryClient(object):
     # end publish
 
     # API publish service and data
-    def publish(self, service, data):
+    def publish(self, service, data, state = 'up', msg = ''):
         self.pub_data[service] = data
-        self._publish_int(service, data)
+        self._publish_int(service, data, state, msg)
         return self.hbtask
     # end
 

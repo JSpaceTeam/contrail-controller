@@ -46,6 +46,7 @@ uve sandesh ModuleCpuStateTrace {
 struct  AnalyticsCpuState {
     1: string                                 name (key="ObjectCollectorInfo")
     2: optional bool                          deleted
+    /** @display_name:Analytics CPU Information*/
     3: optional list<cpuinfo.ProcessCpuInfo>  cpu_info (tags=".module_id,.mem_virt,.cpu_share,.mem_res", aggtype="union")
 }
 
@@ -56,34 +57,6 @@ struct  AnalyticsCpuState {
  */
 uve sandesh AnalyticsCpuStateTrace {
     1: AnalyticsCpuState data
-}
-
-/**
- * This structure used to send NodeStatus data for Analytics Node
- * - process_status carries process's status [functional/non-functional]
- * - process_info carries process's state [up/down]
- * Each of the processes on Analytics Node will send this information and aggregation
- * will happen on UVE queries.
- */
-struct NodeStatus {
-    1: string name (key="ObjectCollectorInfo")
-    2: optional bool deleted
-    3: optional string status
-    // Sent by process
-    4: optional list<process_info.ProcessStatus> process_status (aggtype="union")
-    // Sent by node manager
-    5: optional list<process_info.ProcessInfo> process_info (aggtype="union")
-    6: optional list<process_info.DiskPartitionUsageStats> disk_usage_info (tags="")
-    7: optional string description
-    8: optional list<string> all_core_file_list
-}
-
-/**
- * @description: UVE to send NodeStatus data for Analytics Node
- * @object: analytics-node
- */
-uve sandesh NodeStatusUVE {
-    1: NodeStatus data
 }
 
 /**
@@ -114,6 +87,7 @@ struct QueryStats {
 objectlog sandesh QueryPerfInfo {
     1: string                      name (key="ObjectCollectorInfo")
     3: string                      table
+    /** @display_name:QE Performance*/
     10: QueryStats                 query_stats (tags="table,name:.qid,.rows,.time")
 }
 
@@ -126,7 +100,10 @@ struct AnalyticsApiSample {
     5: string object_type
     6: string request_url
     8: u64 response_time_in_usec
-    9: u64 response_size
+    9: u64 response_size_objects
+    11: u64 response_size_bytes
+    12: string resp_code
+    13: string useragent
     10: string node (key="ObjectCollectorInfo")
 }
 
@@ -135,5 +112,35 @@ struct AnalyticsApiSample {
  * @object: analytics-node
  */
 objectlog sandesh AnalyticsApiStats {
+    /** @display_name:Analytics API Statistics*/
     1: AnalyticsApiSample api_stats (tags=".operation_type,.remote_ip,.object_type")
+}
+
+/**
+ * This structure is used to send UserDefinedLogStatistic data
+ * - name: user given name to identify the LogStatistic object
+ * - rx_event it is hit everytime conter is hit
+ * - count total number of hits happened
+ *
+ */
+
+struct uint64_t_P_ {
+    1: optional u64 staging
+    2: optional u64 value
+}
+
+struct UserDefinedLogStatistic {
+    1: string name (key="UserDefinedLogStatTable")
+    2: optional bool deleted
+    3: optional u64 rx_event (hidden="yes")
+    /** @display_name:User defined log statistics*/
+    4: optional uint64_t_P_ count (stats="rx_event:DSSum:", tags="")
+} (period="60")
+
+/**
+ * @description: UVE to send UserDefinedLogStatistic data
+ * @object: analytics-node
+ */
+uve sandesh UserDefinedLogStatisticUVE {
+    1: UserDefinedLogStatistic data
 }

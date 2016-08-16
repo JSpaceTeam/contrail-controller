@@ -9,6 +9,7 @@
 #include <boost/scoped_ptr.hpp>
 #include <tbb/spin_mutex.h>
 
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -72,6 +73,11 @@ struct BgpPeerFamilyAttributesCompare {
 // A BGP peer along with its session and state machine.
 class BgpPeer : public IPeer {
 public:
+    static const int kMinEndOfRibSendTimeUsecs = 10000000;  // 10 Seconds
+    static const int kMaxEndOfRibSendTimeUsecs = 60000000;  // 60 Seconds
+    static const int kEndOfRibSendRetryTimeMsecs = 2000;    // 2 Seconds
+    static const size_t kBufferSize = 32768;
+
     typedef std::set<Address::Family> AddressFamilyList;
     typedef AuthenticationData::KeyType KeyType;
 
@@ -88,6 +94,7 @@ public:
     // thread: bgp::SendTask
     // Used to send an UPDATE message on the socket.
     virtual bool SendUpdate(const uint8_t *msg, size_t msgsize);
+    virtual bool FlushUpdate();
 
     // thread: bgp::config
     void ConfigUpdate(const BgpNeighborConfig *config);
@@ -99,7 +106,7 @@ public:
 
     BgpSession *CreateSession();
 
-    void SetAdminState(bool down);
+    virtual void SetAdminState(bool down);
 
     // Messages
 
@@ -121,12 +128,11 @@ public:
                             size_t size);
 
     void StartKeepaliveTimer();
-    void StopKeepaliveTimer();
     bool KeepaliveTimerRunning();
     void SetSendReady();
 
     // thread: io::ReaderTask
-    void SetCapabilities(const BgpProto::OpenMessage *msg);
+    bool SetCapabilities(const BgpProto::OpenMessage *msg);
     void ResetCapabilities();
 
     // Table registration.
@@ -134,7 +140,7 @@ public:
 
     // accessors
     virtual BgpServer *server() { return server_; }
-    const BgpServer *server() const { return server_; }
+    virtual BgpServer *server() const { return server_; }
 
     uint32_t PeerAddress() const { return peer_key_.address(); }
     const std::string peer_address_string() const {
@@ -159,6 +165,7 @@ public:
     uint16_t hold_time() const { return hold_time_; }
     as_t local_as() const { return local_as_; }
     as_t peer_as() const { return peer_as_; }
+    size_t buffer_len() const { return buffer_len_; }
 
     // The BGP Identifier in host byte order.
     virtual uint32_t local_bgp_identifier() const;
@@ -175,14 +182,11 @@ public:
     }
 
     bool IsFamilyNegotiated(Address::Family family);
+    RoutingInstance *GetRoutingInstance() { return rtinstance_; }
+    RoutingInstance *GetRoutingInstance() const { return rtinstance_; }
 
-    RoutingInstance *GetRoutingInstance() {
-        return rtinstance_;
-    }
-
-    int GetIndex() const {
-        return index_;
-    }
+    int GetIndex() const { return index_; }
+    int GetTaskInstance() const;
 
     virtual BgpProto::BgpPeerType PeerType() const {
         return peer_type_;
@@ -201,8 +205,11 @@ public:
     bool IsCloseInProgress() const;
     virtual bool IsReady() const;
     virtual bool IsXmppPeer() const;
+    virtual bool CanUseMembershipManager() const;
+    virtual bool IsRegistrationRequired() const { return true; }
+    virtual uint64_t GetElapsedTimeSinceLastStateChange() const;
 
-    void Close();
+    void Close(bool non_graceful);
     void Clear(int subcode);
 
     virtual IPeerClose *peer_close();
@@ -213,9 +220,13 @@ public:
     LifetimeActor *deleter();
     void Initialize();
 
+    void NotifyEstablished(bool established);
+
     void increment_flap_count();
     void reset_flap_count();
     uint64_t flap_count() const { return flap_count_; }
+    uint64_t last_flap() const { return last_flap_; }
+    uint64_t total_flap_count() const { return total_flap_count_; }
 
     std::string last_flap_at() const;
 
@@ -263,20 +274,23 @@ public:
     uint64_t get_open_error() const;
     uint64_t get_update_error() const;
 
+    uint64_t get_socket_reads() const;
+    uint64_t get_socket_writes() const;
+
     static void FillBgpNeighborDebugState(BgpNeighborResp *bnr,
         const IPeerDebugStats *peer);
 
     bool ResumeClose();
-    void MembershipRequestCallback(IPeer *ipeer, BgpTable *table);
+    void MembershipRequestCallback(BgpTable *table);
 
-    virtual void UpdateRefCount(int count) const { refcount_ += count; }
-    virtual tbb::atomic<int> GetRefCount() const { return refcount_; }
+    virtual void UpdateTotalPathCount(int count) const {
+        total_path_count_ += count;
+    }
+    virtual int GetTotalPathCount() const { return total_path_count_; }
     virtual void UpdatePrimaryPathCount(int count) const {
         primary_path_count_ += count;
     }
-    virtual int GetPrimaryPathCount() const {
-        return primary_path_count_;
-    }
+    virtual int GetPrimaryPathCount() const { return primary_path_count_; }
 
     void RegisterToVpnTables();
 
@@ -290,12 +304,45 @@ public:
                                 KeyType key_type);
     void ClearListenSocketAuthKey();
     void SetSessionSocketAuthKey(TcpSession *session);
+    void AddGRCapabilities(BgpProto::OpenMessage::OptParam *opt_param);
+    bool SetGRCapabilities(BgpPeerInfoData *peer_info);
+    void AddLLGRCapabilities(BgpProto::OpenMessage::OptParam *opt_param);
+    const BgpProto::OpenMessage::Capability::GR &gr_params() const {
+        return gr_params_;
+    }
+    BgpProto::OpenMessage::Capability::GR &gr_params() { return gr_params_; }
+    BgpProto::OpenMessage::Capability::LLGR &llgr_params() {
+        return llgr_params_;
+    }
+    const BgpProto::OpenMessage::Capability::LLGR &llgr_params() const {
+        return llgr_params_;
+    }
+    bool SkipNotificationSend(int code, int subcode) const;
+    virtual bool SkipNotificationReceive(int code, int subcode) const;
+    void Register(BgpTable *table, const RibExportPolicy &policy);
+    void Register(BgpTable *table);
+    bool EndOfRibSendTimerExpired(Address::Family family);
 
 protected:
-    std::vector<std::string> &negotiated_families() {
+    const std::vector<std::string> &negotiated_families() const {
         return negotiated_families_;
     }
-    void SendEndOfRIB(Address::Family family);
+    const std::vector<std::string> &graceful_restart_families() const {
+        return graceful_restart_families_;
+    }
+    std::vector<std::string> &graceful_restart_families() {
+        return graceful_restart_families_;
+    }
+    const std::vector<std::string> &
+        long_lived_graceful_restart_families() const {
+        return long_lived_graceful_restart_families_;
+    }
+    std::vector<std::string> &long_lived_graceful_restart_families() {
+        return long_lived_graceful_restart_families_;
+    }
+    virtual void SendEndOfRIBActual(Address::Family family);
+    virtual void SendEndOfRIB(Address::Family family);
+    int membership_req_pending() const { return membership_req_pending_; }
 
 private:
     friend class BgpConfigTest;
@@ -307,6 +354,7 @@ private:
     class PeerClose;
     class PeerStats;
 
+    typedef std::map<Address::Family, const uint8_t *> FamilyToCapabilityMap;
     typedef std::vector<BgpPeerFamilyAttributes *> FamilyAttributesList;
 
     void KeepaliveTimerErrorHandler(std::string error_name,
@@ -319,6 +367,8 @@ private:
     void ReceiveEndOfRIB(Address::Family family, size_t msgsize);
     void StartEndOfRibTimer();
     bool EndOfRibTimerExpired();
+    void StartEndOfRouteTargetRibTimer();
+    bool EndOfRouteTargetRibTimerExpired();
     void EndOfRibTimerErrorHandler(std::string error_name,
                                    std::string error_message);
 
@@ -326,6 +376,8 @@ private:
     void UnregisterAllTables();
     void BGPPeerInfoSend(const BgpPeerInfoData &peer_info) const;
 
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+                                        BgpRoute *route, BgpPath *path);
     uint32_t GetPathFlags(Address::Family family, const BgpAttr *attr) const;
     virtual bool MpNlriAllowed(uint16_t afi, uint8_t safi);
     BgpAttrPtr GetMpNlriNexthop(BgpMpNlri *nlri, BgpAttrPtr attr);
@@ -351,7 +403,9 @@ private:
     void FillCloseInfo(BgpNeighborResp *resp) const;
 
     std::string BytesToHexString(const u_int8_t *msg, size_t size);
+    virtual uint32_t GetOutputQueueDepth(Address::Family family) const;
 
+    static const std::vector<Address::Family> supported_families_;
     BgpServer *server_;
     RoutingInstance *rtinstance_;
     TcpSession::Endpoint endpoint_;
@@ -360,6 +414,8 @@ private:
     std::string peer_name_;
     std::string peer_basename_;
     std::string router_type_;         // bgp_schema.xsd:BgpRouterType
+    mutable std::string to_str_;
+    mutable std::string uve_key_str_;
     const BgpNeighborConfig *config_;
 
     // Global peer index
@@ -386,17 +442,21 @@ private:
     // and the io thread should need to lock it once every few seconds at
     // most.  Hence we choose a spin_mutex.
     tbb::spin_mutex spin_mutex_;
+    uint8_t buffer_[kBufferSize];
+    size_t buffer_len_;
     BgpSession *session_;
     Timer *keepalive_timer_;
     Timer *end_of_rib_timer_;
+    Timer *end_of_rib_send_timer_[Address::NUM_FAMILIES];
     bool send_ready_;
     bool admin_down_;
     bool passive_;
     bool resolve_paths_;
     bool as_override_;
 
-    uint64_t membership_req_pending_;
+    tbb::atomic<int> membership_req_pending_;
     bool defer_close_;
+    bool non_graceful_close_;
     bool vpn_tables_registered_;
     std::vector<BgpProto::OpenMessage::Capability *> capabilities_;
     uint16_t hold_time_;
@@ -407,19 +467,24 @@ private:
     FamilyAttributesList family_attributes_list_;
     std::vector<std::string> configured_families_;
     std::vector<std::string> negotiated_families_;
+    std::vector<std::string> graceful_restart_families_;
+    std::vector<std::string> long_lived_graceful_restart_families_;
     BgpProto::BgpPeerType peer_type_;
     boost::scoped_ptr<StateMachine> state_machine_;
     boost::scoped_ptr<PeerClose> peer_close_;
     boost::scoped_ptr<PeerStats> peer_stats_;
     boost::scoped_ptr<DeleteActor> deleter_;
     LifetimeRef<BgpPeer> instance_delete_ref_;
-    mutable tbb::atomic<int> refcount_;
+    mutable tbb::atomic<int> total_path_count_;
     mutable tbb::atomic<int> primary_path_count_;
     uint64_t flap_count_;
+    uint64_t total_flap_count_;
     uint64_t last_flap_;
     AuthenticationData auth_data_;
     AuthenticationKey inuse_auth_key_;
     KeyType inuse_authkey_type_;
+    BgpProto::OpenMessage::Capability::GR gr_params_;
+    BgpProto::OpenMessage::Capability::LLGR llgr_params_;
 
     DISALLOW_COPY_AND_ASSIGN(BgpPeer);
 };

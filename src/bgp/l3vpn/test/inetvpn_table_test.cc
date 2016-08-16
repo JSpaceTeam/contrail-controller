@@ -18,23 +18,25 @@ public:
     virtual std::string ToUVEKey() const { return "test-peer"; }
     virtual bool SendUpdate(const uint8_t *msg, size_t msgsize) { return true; }
     virtual BgpServer *server() { return NULL; }
+    virtual BgpServer *server() const { return NULL; }
     virtual IPeerClose *peer_close() { return NULL; }
     virtual IPeerDebugStats *peer_stats() { return NULL; }
     virtual const IPeerDebugStats *peer_stats() const { return NULL; }
     virtual bool IsReady() const { return true; }
     virtual bool IsXmppPeer() const { return false; }
-    virtual void Close() { }
+    virtual void Close(bool non_graceful) { }
     BgpProto::BgpPeerType PeerType() const { return BgpProto::IBGP; }
     virtual uint32_t bgp_identifier() const { return 0; }
     virtual const std::string GetStateName() const { return "UNKNOWN"; }
-    virtual void UpdateRefCount(int count) const { }
-    virtual tbb::atomic<int> GetRefCount() const {
-        tbb::atomic<int> count;
-        count = 0;
-        return count;
-    }
+    virtual void UpdateTotalPathCount(int count) const { }
+    virtual int GetTotalPathCount() const { return 0; }
     virtual void UpdatePrimaryPathCount(int count) const { }
     virtual int GetPrimaryPathCount() const { return 0; }
+    virtual bool IsRegistrationRequired() const { return true; }
+    virtual void MembershipRequestCallback(BgpTable *table) { }
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+        BgpRoute *route, BgpPath *path) { return false; }
+    virtual bool CanUseMembershipManager() const { return true; }
 
 private:
 };

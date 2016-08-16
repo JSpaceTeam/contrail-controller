@@ -33,15 +33,15 @@ const std::string IFMapXmppChannel::NoFqnSet = "NoFqnSet";
 
 // There are 3 task interactions:
 // "xmpp::StateMachine" gives all the channel triggers.
-// "db::DBTable" does all the work related to those triggers - except Ready
+// "db::IFMapTable" does all the work related to those triggers - except Ready
 // "bgp::Config" does the final channel-unregister
 //
 // "xmpp::StateMachine" task gives us 5 triggers:
 // 1. Ready/NotReady indicating the channel create/delete
 // 2. VR-subscribe indicating the existence of the agent
 // 3. VM-sub/unsub indicating the create/delete of a virtual-machine
-// Process all the triggers in the context of the db::DBTable task - except the
-// 'ready' trigger that is processed right away.
+// Process all the triggers in the context of the db::IFMapTable task - except
+// the 'ready' trigger that is processed right away.
 // #1 must be processed via the IFMapChannelManager.
 // #2/#3 must be processed via the IFMapXmppChannel since they are
 // channel-specific
@@ -54,14 +54,14 @@ public:
     // To be used for #1
     explicit ChannelEventProcTask(const ChannelEventInfo &ev,
                                   IFMapChannelManager *mgr)
-        : Task(TaskScheduler::GetInstance()->GetTaskId("db::DBTable"), 0),
+        : Task(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable"), 0),
           event_info_(ev), ifmap_channel_manager_(mgr) {
     }
 
     // To be used for #2/#3
     explicit ChannelEventProcTask(const ChannelEventInfo &ev,
                                   IFMapXmppChannel *chnl)
-        : Task(TaskScheduler::GetInstance()->GetTaskId("db::DBTable"), 0),
+        : Task(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable"), 0),
           event_info_(ev), ifmap_chnl_(chnl) {
     }
 
@@ -198,7 +198,7 @@ const std::string& IFMapXmppChannel::FQName() const {
 void IFMapXmppChannel::ProcessVrSubscribe(const std::string &identifier) {
     // If we have already received a vr-subscribe on this channel...
     if (client_added_) {
-        ifmap_channel_manager_->incr_dupicate_vrsub_messages();
+        ifmap_channel_manager_->incr_duplicate_vrsub_messages();
         IFMAP_XMPP_WARN(IFMapDuplicateVrSub, channel_name(), FQName());
         return;
     }
@@ -229,7 +229,7 @@ void IFMapXmppChannel::ProcessVmSubscribe(const std::string &vm_uuid) {
                          FQName(), vm_uuid);
     } else {
         // If we have already received a subscribe for this vm
-        ifmap_channel_manager_->incr_dupicate_vmsub_messages();
+        ifmap_channel_manager_->incr_duplicate_vmsub_messages();
         IFMAP_XMPP_WARN(IFMapDuplicateVmSub, channel_name(), FQName(), vm_uuid);
     }
 }
@@ -279,7 +279,7 @@ void IFMapXmppChannel::EnqueueVmSubUnsub(bool subscribe,
 }
 
 // This runs in the context of the "xmpp::StateMachine" and queues all requests
-// which are then processed in the context of "db::DBTable"
+// which are then processed in the context of "db::IFMapTable"
 void IFMapXmppChannel::ReceiveUpdate(const XmppStanza::XmppMessage *msg) {
 
     if (msg->type == XmppStanza::IQ_STANZA) {
@@ -345,14 +345,18 @@ IFMapChannelManager::IFMapChannelManager(XmppServer *xmpp_server,
       config_task_work_queue_(
           TaskScheduler::GetInstance()->GetTaskId("bgp::Config"),
           0, boost::bind(&IFMapChannelManager::ProcessChannelUnregister,
-                         this, _1)),
-      unknown_subscribe_messages(0), unknown_unsubscribe_messages(0),
-      duplicate_channel_ready_messages(0),
-      invalid_channel_not_ready_messages(0), invalid_channel_state_messages(0),
-      invalid_vm_subscribe_messages(0), vmsub_novrsub_messages(0),
-      vmunsub_novrsub_messages(0), vmunsub_novmsub_messages(0),
-      dupicate_vrsub_messages(0), dupicate_vmsub_messages(0) {
-
+                         this, _1)) {
+    unknown_subscribe_messages = 0;
+    unknown_unsubscribe_messages = 0;
+    duplicate_channel_ready_messages = 0;
+    invalid_channel_not_ready_messages = 0;
+    invalid_channel_state_messages = 0;
+    invalid_vm_subscribe_messages = 0;
+    vmsub_novrsub_messages = 0;
+    vmunsub_novrsub_messages = 0;
+    vmunsub_novmsub_messages = 0;
+    duplicate_vrsub_messages = 0;
+    duplicate_vmsub_messages = 0;
     xmpp_server_->RegisterConnectionEvent(xmps::CONFIG,
         boost::bind(&IFMapChannelManager::IFMapXmppChannelEventCb, this, _1,
                     _2));
@@ -451,7 +455,7 @@ void IFMapChannelManager::IFMapXmppChannelEventCb(XmppChannel *channel,
         // Process the READY right away
         ProcessChannelReady(channel);
     } else if (state == xmps::NOT_READY) {
-        // Queue the NOT_READY to be processed via the "db::DBTable" task
+        // Queue the NOT_READY to be processed via the "db::IFMapTable" task
         EnqueueChannelEvent(XCE_NOT_READY, channel);
     } else {
         incr_invalid_channel_state_messages();
@@ -530,10 +534,10 @@ static bool IFMapXmppShowReqHandleRequest(const Sandesh *sr,
         ifmap_channel_manager->get_vmunsub_novrsub_messages());
     channel_manager_stats.set_vmunsub_novmsub_messages(
         ifmap_channel_manager->get_vmunsub_novmsub_messages());
-    channel_manager_stats.set_dupicate_vrsub_messages(
-        ifmap_channel_manager->get_dupicate_vrsub_messages());
-    channel_manager_stats.set_dupicate_vmsub_messages(
-        ifmap_channel_manager->get_dupicate_vmsub_messages());
+    channel_manager_stats.set_duplicate_vrsub_messages(
+        ifmap_channel_manager->get_duplicate_vrsub_messages());
+    channel_manager_stats.set_duplicate_vmsub_messages(
+        ifmap_channel_manager->get_duplicate_vmsub_messages());
 
     IFMapXmppChannelMapList channel_map_list;
     std::vector<IFMapXmppChannelMapEntry> channel_map;
@@ -556,7 +560,7 @@ void IFMapXmppShowReq::HandleRequest() const {
     RequestPipeline::StageSpec s0;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s0.taskId_ = scheduler->GetTaskId("db::DBTable");
+    s0.taskId_ = scheduler->GetTaskId("db::IFMapTable");
     s0.cbFn_ = IFMapXmppShowReqHandleRequest;
     s0.instances_.push_back(0);
 

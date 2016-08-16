@@ -33,6 +33,10 @@
 #include "uflow_types.h"
 #include "viz_constants.h"
 #include <database/cassandra/cql/cql_types.h>
+#include "usrdef_counters.h"
+
+class Options;
+class DiscoveryServiceClient;
 
 class DbHandler {
 public:
@@ -88,7 +92,7 @@ public:
         std::string name, const TtlMap& ttl_map,
         const std::string& cassandra_user,
         const std::string& cassandra_password,
-        bool use_cql, const std::string &zookeeper_server_list,
+        const std::string &zookeeper_server_list,
         bool use_zookeeper);
     DbHandler(GenDb::GenDbIf *dbif, const TtlMap& ttl_map);
     virtual ~DbHandler();
@@ -101,45 +105,30 @@ public:
     bool Init(bool initial, int instance);
     void UnInit(int instance);
     void UnInitUnlocked(int instance);
-
-    bool AllowMessageTableInsert(const SandeshHeader &header);
-    bool MessageIndexTableInsert(const std::string& cfname,
-        const SandeshHeader& header, const std::string& message_type,
-        const boost::uuids::uuid& unm, const std::string keyword);
-    virtual void MessageTableInsert(const VizMsg *vmsgp);
-    void MessageTableOnlyInsert(const VizMsg *vmsgp);
-    void FieldNamesTableInsert(uint64_t timestamp,
-        const std::string& table_name,
-        const std::string& field_name, const std::string& field_val, int ttl);
     void GetRuleMap(RuleMap& rulemap);
 
+    virtual void MessageTableInsert(const VizMsg *vmsgp,
+        GenDb::GenDbIf::DbAddColumnCb db_cb);
     void ObjectTableInsert(const std::string &table, const std::string &rowkey,
         uint64_t &timestamp, const boost::uuids::uuid& unm,
-        const VizMsg *vmsgp);
-
-    static std::vector<std::string> StatTableSelectStr(
-            const std::string& statName, const std::string& statAttr,
-            const AttribMap & attribs);
-
+        const VizMsg *vmsgp, GenDb::GenDbIf::DbAddColumnCb db_cb);
     void StatTableInsert(uint64_t ts, 
             const std::string& statName,
             const std::string& statAttr,
             const TagMap & attribs_tag,
-            const AttribMap & attribs_all);
-
-    void StatTableInsertTtl(uint64_t ts, 
-            const std::string& statName,
-            const std::string& statAttr,
-            const TagMap & attribs_tag,
-            const AttribMap & attribs_all, int ttl);
-
+            const AttribMap & attribs_all,
+            GenDb::GenDbIf::DbAddColumnCb db_cb);
     bool FlowTableInsert(const pugi::xml_node& parent,
-        const SandeshHeader &header);
+        const SandeshHeader &header, GenDb::GenDbIf::DbAddColumnCb db_cb);
     bool UnderlayFlowSampleInsert(const UFlowData& flow_data,
-        uint64_t timestamp);
+        uint64_t timestamp, GenDb::GenDbIf::DbAddColumnCb db_cb);
+
     bool GetStats(uint64_t *queue_count, uint64_t *enqueues) const;
     bool GetStats(std::vector<GenDb::DbTableInfo> *vdbti,
         GenDb::DbErrors *dbe, std::vector<GenDb::DbTableInfo> *vstats_dbti);
+    bool GetCumulativeStats(std::vector<GenDb::DbTableInfo> *vdbti,
+        GenDb::DbErrors *dbe, std::vector<GenDb::DbTableInfo> *vstats_dbti)
+        const;
     void GetSandeshStats(std::string *drop_level,
         std::vector<SandeshStats> *vdropmstats) const;
     bool GetCqlMetrics(cass::cql::Metrics *metrics) const;
@@ -149,9 +138,28 @@ public:
     void ResetDbQueueWaterMarkInfo();
     std::vector<boost::asio::ip::tcp::endpoint> GetEndpoints() const;
     std::string GetName() const;
-    bool UseCql() const;
+    void UpdateUdc(Options *o, DiscoveryServiceClient *c) {
+        udc_->Update(o, c);
+    }
 
 private:
+    void StatTableInsertTtl(uint64_t ts,
+        const std::string& statName,
+        const std::string& statAttr,
+        const TagMap & attribs_tag,
+        const AttribMap & attribs_all, int ttl,
+        GenDb::GenDbIf::DbAddColumnCb db_cb);
+    void FieldNamesTableInsert(uint64_t timestamp,
+        const std::string& table_name, const std::string& field_name,
+        const std::string& field_val, int ttl,
+        GenDb::GenDbIf::DbAddColumnCb db_cb);
+    void MessageTableOnlyInsert(const VizMsg *vmsgp,
+        GenDb::GenDbIf::DbAddColumnCb db_cb);
+    bool MessageIndexTableInsert(const std::string& cfname,
+        const SandeshHeader& header, const std::string& message_type,
+        const boost::uuids::uuid& unm, const std::string keyword,
+        GenDb::GenDbIf::DbAddColumnCb db_cb);
+    bool AllowMessageTableInsert(const SandeshHeader &header);
     bool CreateTables();
     void SetDropLevel(size_t queue_count, SandeshLevel::type level,
         boost::function<void (void)> cb);
@@ -164,9 +172,11 @@ private:
         const std::pair<std::string,DbHandler::Var>& ptag,
         const std::pair<std::string,DbHandler::Var>& stag,
         uint32_t t1, const boost::uuids::uuid& unm,
-        const std::string& jsonline, int ttl);
+        const std::string& jsonline, int ttl,
+        GenDb::GenDbIf::DbAddColumnCb db_cb);
     bool FlowSampleAdd(const pugi::xml_node& flowdata,
-        const SandeshHeader& header);
+        const SandeshHeader& header,
+        GenDb::GenDbIf::DbAddColumnCb db_cb);
     uint64_t GetTtl(TtlType::type type) {
         return GetTtlFromMap(ttl_map_, type);
     }
@@ -188,12 +198,16 @@ private:
     static uint8_t old_t2_index_;
     static uint8_t new_t2_index_;
     static tbb::mutex fmutex_;
-    bool use_cql_;
     std::string tablespace_;
     UniformInt8RandomGenerator gen_partition_no_;
     std::string zookeeper_server_list_;
     bool use_zookeeper_;
     bool CanRecordDataForT2(uint32_t, std::string);
+    boost::scoped_ptr<UserDefinedCounters> udc_;
+    Timer *udc_cfg_poll_timer_;
+    static const int kUDCPollInterval = 120 * 1000; // in ms
+    bool PollUDCCfg() { if(udc_) udc_->PollCfg(); return true; }
+    void PollUDCCfgErrorHandler(std::string err_name, std::string err_message);
     friend class DbHandlerTest;
     DISALLOW_COPY_AND_ASSIGN(DbHandler);
 };
@@ -232,7 +246,6 @@ class DbHandlerInitializer {
         const TtlMap& ttl_map,
         const std::string& cassandra_user,
         const std::string& cassandra_password,
-        bool use_cql,
         const std::string &zookeeper_server_list,
         bool use_zookeeper);
     DbHandlerInitializer(EventManager *evm,

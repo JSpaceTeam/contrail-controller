@@ -38,13 +38,15 @@ public:
 
     struct VmIntfFlowHandlerState : public FlowMgmtState {
         VmIntfFlowHandlerState(const VnEntry *vn) : vn_(vn),
-            vrf_assign_acl_(NULL) { }
+            vrf_assign_acl_(NULL), is_vn_qos_config_(false) { }
         virtual ~VmIntfFlowHandlerState() { }
 
         VnEntryConstRef vn_;
         bool policy_;
         VmInterface::SecurityGroupEntryList sg_l_;
         AclDBEntryConstRef vrf_assign_acl_;
+        bool is_vn_qos_config_;
+        AgentQosConfigConstRef qos_config_;
     };
 
     struct VrfFlowHandlerState : public FlowMgmtState {
@@ -56,7 +58,7 @@ public:
         void Unregister(FlowMgmtDbClient *client, VrfEntry *vrf);
 
         // Unregister from the route tables
-        void Unregister(VrfEntry *vrf);
+        bool Unregister(VrfEntry *vrf);
 
         DBTableBase::ListenerId GetListenerId(Agent::RouteTableType type) {
             if (type == Agent::INET4_UNICAST)
@@ -103,6 +105,7 @@ public:
     void Init();
     void Shutdown();
     bool FreeDBState(const DBEntry *entry, uint32_t gen_id);
+    void FreeVrfState(VrfEntry *vrf, uint32_t gen_id);
 
 private:
     friend class FlowMgmtRouteTest;
@@ -122,7 +125,6 @@ private:
     void FreeNhState(NextHop *nh, uint32_t gen_id);
     void NhNotify(DBTablePartBase *part, DBEntryBase *e);
 
-    void FreeVrfState(VrfEntry *vrf, uint32_t gen_id);
     void VrfNotify(DBTablePartBase *part, DBEntryBase *e);
 
     void TraceMsg(AgentRoute *entry, const AgentPath *path,

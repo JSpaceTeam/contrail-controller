@@ -107,6 +107,10 @@ class TestCrudBasic(object):
         pass
     # end test_floating_ip_crud
 
+    def test_alias_ip_crud(self):
+        pass
+    # end test_alias_ip_crud
+
     def test_id_perms(self):
         # create object in enabled state
         # create object in disabled state
@@ -296,6 +300,30 @@ class TestNetAddrAlloc(object):
                 auto_prop_val=False, floating_ip_address='1.1.1.3'))
         ip_allocated = fip_fixt.getObj().floating_ip_address
         self.assertThat(ip_allocated, Equals('1.1.1.3'))
+        logger.info("...verified")
+
+        logger.info("Creating alias-ip-pool")
+        aip_pool_fixt = self.useFixture(
+            AliasIpPoolTestFixtureGen(self._vnc_lib, 'aip-pool',
+                                         parent_fixt=vn_fixt,
+                                         auto_prop_val=False))
+
+        logger.info("Creating auto-alloc alias-ip, expecting 1.1.1.251...")
+        aip_fixt = self.useFixture(
+            AliasIpTestFixtureGen(
+                self._vnc_lib, 'aip1', parent_fixt=aip_pool_fixt,
+                auto_prop_val=False))
+        ip_allocated = aip_fixt.getObj().alias_ip_address
+        self.assertThat(ip_allocated, Equals('1.1.1.251'))
+        logger.info("...verified")
+
+        logger.info("Creating specific alias-ip, expecting 1.1.1.4...")
+        aip_fixt = self.useFixture(
+            AliasIpTestFixtureGen(
+                self._vnc_lib, 'aip2', parent_fixt=aip_pool_fixt,
+                auto_prop_val=False, alias_ip_address='1.1.1.4'))
+        ip_allocated = aip_fixt.getObj().alias_ip_address
+        self.assertThat(ip_allocated, Equals('1.1.1.4'))
         logger.info("...verified")
 
         logger.info("Creating subnet 2.2.2.0/24, gateway 2.2.2.128")
@@ -572,7 +600,7 @@ class TestListUpdate(test_case.ApiServerTestCase):
                    dst_addresses=[AddressType(virtual_network='any')],
                    dst_ports=[PortType(3, 4)]),
 
-            PolicyRuleType(direction='<>', 
+            PolicyRuleType(direction='<>',
                            action_list=ActionListType(simple_action='deny'),
                            protocol='any',
                            src_addresses=
@@ -634,10 +662,18 @@ class TestCrud(test_case.ApiServerTestCase):
 class TestVncCfgApiServer(test_case.ApiServerTestCase):
     def _create_vn_ri_vmi(self, obj_count=1):
         vn_objs = []
+        ipam_objs = []
         ri_objs = []
         vmi_objs = []
         for i in range(obj_count):
             vn_obj = VirtualNetwork('%s-vn-%s' %(self.id(), i))
+            vn_obj.set_virtual_network_network_id(i)
+
+            ipam_obj = NetworkIpam('%s-ipam-%s' % (self.id(), i))
+            vn_obj.add_network_ipam(ipam_obj, VnSubnetsType())
+            self._vnc_lib.network_ipam_create(ipam_obj)
+            ipam_objs.append(ipam_obj)
+
             self._vnc_lib.virtual_network_create(vn_obj)
             vn_objs.append(vn_obj)
 
@@ -652,7 +688,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             self._vnc_lib.virtual_machine_interface_create(vmi_obj)
             vmi_objs.append(vmi_obj)
 
-        return vn_objs, ri_objs, vmi_objs
+        return vn_objs, ipam_objs, ri_objs, vmi_objs
     # end _create_vn_ri_vmi
 
     def test_fq_name_to_id_http_post(self):
@@ -714,7 +750,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         self.addDetail('useragent-kv-post-wrongop', content.json_content(test_body))
         (code, msg) = self._http_post('/useragent-kv', test_body)
         self.assertEqual(code, 404)
-        
+
     def test_err_on_max_rabbit_pending(self):
         self.ignore_err_in_log = True
         api_server = test_common.vnc_cfg_api_server.server
@@ -960,7 +996,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
 
         self.assertTill(ifmap_has_update_2)
     # end test_reconnect_to_rabbit
- 
+
     def test_handle_trap_on_exception(self):
         self.ignore_err_in_log = True
         api_server = test_common.vnc_cfg_api_server.server
@@ -970,7 +1006,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             self.assertTrue(False)
 
         def exception_on_vn_read(obj_type, *args, **kwargs):
-            if obj_type.replace('-', '_') == 'virtual_network':
+            if obj_type == 'virtual_network':
                 raise Exception("fake vn read exception")
             orig_read(obj_type, *args, **kwargs)
 
@@ -1037,7 +1073,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         logger.info('Creating Project %s', project_name)
         orig_project_obj = Project(project_name, domain_obj)
         self._vnc_lib.project_create(orig_project_obj)
- 
+
         logger.info('Creating Dup Project in default domain with same uuid')
         dup_project_obj = Project(project_name)
         dup_project_obj.uuid = orig_project_obj.uuid
@@ -1119,13 +1155,49 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         ip_allocated = fip_fixt.getObj().floating_ip_address
 
         logger.info("Creating auto-alloc instance-ip, expecting an error")
-        with ExpectedException(PermissionDenied) as e:
+        with ExpectedException(BadRequest) as e:
             iip_fixt = self.useFixture(
                 InstanceIpTestFixtureGen(
                     self._vnc_lib, 'iip1', auto_prop_val=False,
                     instance_ip_address=ip_allocated,
                     virtual_network_refs=[vn_fixt.getObj()]))
     # end test_floatingip_as_instanceip
+
+    def test_aliasip_as_instanceip(self):
+        ipam_fixt = self.useFixture(NetworkIpamTestFixtureGen(self._vnc_lib))
+
+        project_fixt = self.useFixture(ProjectTestFixtureGen(self._vnc_lib, 'default-project'))
+
+        subnet_vnc = IpamSubnetType(subnet=SubnetType('1.1.1.0', 24))
+        vnsn_data = VnSubnetsType([subnet_vnc])
+        logger.info("Creating a virtual network")
+        logger.info("Creating subnet 1.1.1.0/24")
+        vn_fixt = self.useFixture(VirtualNetworkTestFixtureGen(self._vnc_lib,
+                  'vn-%s' %(self.id()),
+                  network_ipam_ref_infos=[(ipam_fixt.getObj(), vnsn_data)]))
+        vn_fixt.getObj().set_router_external(True)
+        self._vnc_lib.virtual_network_update(vn_fixt.getObj())
+
+        logger.info("Fetching alias-ip-pool")
+        aip_pool_fixt = self.useFixture(
+            AliasIpPoolTestFixtureGen(self._vnc_lib, 'alias-ip-pool',
+                                         parent_fixt=vn_fixt))
+
+        logger.info("Creating auto-alloc alias-ip")
+        aip_fixt = self.useFixture(
+            AliasIpTestFixtureGen(
+                self._vnc_lib, 'aip1', parent_fixt=aip_pool_fixt,
+                project_refs=[project_fixt.getObj()]))
+        ip_allocated = aip_fixt.getObj().alias_ip_address
+
+        logger.info("Creating auto-alloc instance-ip, expecting an error")
+        with ExpectedException(BadRequest) as e:
+            iip_fixt = self.useFixture(
+                InstanceIpTestFixtureGen(
+                    self._vnc_lib, 'iip1', auto_prop_val=False,
+                    instance_ip_address=ip_allocated,
+                    virtual_network_refs=[vn_fixt.getObj()]))
+    # end test_aliasip_as_instanceip
 
     def test_name_with_reserved_xml_char(self):
         self.skipTest("Skipping test_name_with_reserved_xml_char")
@@ -1210,7 +1282,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         ri_uuids = []
         vmi_uuids = []
         logger.info("Creating %s VNs, RIs, VMIs.", obj_count)
-        vn_objs, ri_objs, vmi_objs = self._create_vn_ri_vmi(obj_count)
+        vn_objs, _, ri_objs, vmi_objs = self._create_vn_ri_vmi(obj_count)
 
         vn_uuids = [o.uuid for o in vn_objs]
         ri_uuids = [o.uuid for o in ri_objs]
@@ -1276,6 +1348,42 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             Equals(set(ret_ri_uuids) & set(ri_uuids)))
         self.assertThat(set(vmi_uuids), Equals(set(ret_vmi_uuids)))
     # end test_list_bulk_collection
+
+    def test_list_bulk_collection_with_malformed_filters(self):
+        obj_count = self._vnc_lib.POST_FOR_LIST_THRESHOLD + 1
+        vn_objs, _, _, _ = self._create_vn_ri_vmi()
+        vn_uuid = vn_objs[0].uuid
+        vn_uuids = [vn_uuid] +\
+                   ['bad-uuid'] * self._vnc_lib.POST_FOR_LIST_THRESHOLD
+
+        try:
+            results = self._vnc_lib.resource_list('virtual-network',
+                                                  obj_uuids=vn_uuids)
+            self.assertEqual(len(results['virtual-networks']), 1)
+            self.assertEqual(results['virtual-networks'][0]['uuid'], vn_uuid)
+        except HttpError:
+            self.fail('Malformed object UUID filter was not ignored')
+
+        try:
+            results = self._vnc_lib.resource_list('routing-instance',
+                                                  parent_id=vn_uuids,
+                                                  detail=True)
+            self.assertEqual(len(results), 2)
+            for ri_obj in results:
+                self.assertEqual(ri_obj.parent_uuid, vn_uuid)
+        except HttpError:
+            self.fail('Malformed parent UUID filter was not ignored')
+
+        try:
+            results = self._vnc_lib.resource_list('virtual-machine-interface',
+                                                  back_ref_id=vn_uuids,
+                                                  detail=True)
+            self.assertEqual(len(results), 1)
+            vmi_obj = results[0]
+            self.assertEqual(vmi_obj.get_virtual_network_refs()[0]['uuid'],
+                             vn_uuid)
+        except HttpError:
+            self.fail('Malformed back-ref UUID filter was not ignored')
 
     def test_list_lib_api(self):
         num_objs = 5
@@ -1418,7 +1526,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             back_ref_id=ipam_obj.uuid, detail=True)
         self.assertThat(len(read_vn_objs), Equals(num_objs))
         read_display_names = [o.display_name for o in read_vn_objs]
-        read_ipam_uuids = [o.network_ipam_refs[0]['uuid'] 
+        read_ipam_uuids = [o.network_ipam_refs[0]['uuid']
                            for o in read_vn_objs]
         for obj in vn_objs:
             self.assertThat(read_display_names,
@@ -1432,7 +1540,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             filters={'display_name':vn_objs[2].display_name,
                      'is_shared':vn_objs[2].is_shared})
         self.assertThat(len(read_vn_objs), Equals(1))
-        read_ipam_fq_names = [o.network_ipam_refs[0]['to'] 
+        read_ipam_fq_names = [o.network_ipam_refs[0]['to']
                               for o in read_vn_objs]
         for ipam_fq_name in read_ipam_fq_names:
             self.assertThat(ipam_fq_name,
@@ -1486,8 +1594,41 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             self.assertEqual(read_vn_dicts[0]['uuid'], vn1_obj.uuid)
             self.assertEqual(read_vn_dicts[0]['is_shared'], True)
             self.assertEqual(read_vn_dicts[0]['router_external'], False)
-
     # end test_list_for_coverage
+
+    def test_list_with_malformed_filters(self):
+        vn_objs, _, _, _ = self._create_vn_ri_vmi()
+        vn_uuid = vn_objs[0].uuid
+        vn_uuids = [vn_uuid, 'bad-uuid']
+
+        try:
+            results = self._vnc_lib.resource_list('virtual-network',
+                                                  obj_uuids=vn_uuids)
+            self.assertEqual(len(results['virtual-networks']), 1)
+            self.assertEqual(results['virtual-networks'][0]['uuid'], vn_uuid)
+        except HttpError:
+            self.fail('Malformed object UUID filter was not ignored')
+
+        try:
+            results = self._vnc_lib.resource_list('routing-instance',
+                                                  parent_id=vn_uuids,
+                                                  detail=True)
+            self.assertEqual(len(results), 2)
+            for ri_obj in results:
+                self.assertEqual(ri_obj.parent_uuid, vn_uuid)
+        except HttpError:
+            self.fail('Malformed parent UUID filter was not ignored')
+
+        try:
+            results = self._vnc_lib.resource_list('virtual-machine-interface',
+                                                  back_ref_id=vn_uuids,
+                                                  detail=True)
+            self.assertEqual(len(results), 1)
+            vmi_obj = results[0]
+            self.assertEqual(vmi_obj.get_virtual_network_refs()[0]['uuid'],
+                             vn_uuid)
+        except HttpError:
+            self.fail('Malformed back-ref UUID filter was not ignored')
 
     def test_create_with_wrong_type(self):
         vn_obj = VirtualNetwork('%s-bad-prop-type' %(self.id()))
@@ -1506,7 +1647,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
 
     def test_read_rest_api(self):
         logger.info("Creating VN, RI, VMI.")
-        vn_objs, ri_objs, vmi_objs = self._create_vn_ri_vmi()
+        vn_objs, ipam_objs, ri_objs, vmi_objs = self._create_vn_ri_vmi()
 
         listen_ip = self._api_server_ip
         listen_port = self._api_server._args.listen_port
@@ -1583,6 +1724,75 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         self.assertThat(ret_vn.keys(), Not(Contains('routing_instances')))
         self.assertThat(ret_vn.keys(), Not(Contains(
             'virtual_machine_interface_back_refs')))
+
+        # Properties and references are always returned irrespective of what
+        # fields are requested
+        property = 'virtual_network_network_id'
+        reference = 'network_ipam_refs'
+        children = 'routing_instances'
+        back_reference = 'virtual_machine_interface_back_refs'
+
+        logger.info("Reading VN with one specific property field.")
+        query_param_str = 'fields=%s' % property
+        url = 'http://%s:%s/virtual-network/%s?%s' % (
+            listen_ip, listen_port, vn_objs[0].uuid, query_param_str)
+        resp = requests.get(url)
+        self.assertEqual(resp.status_code, 200)
+        ret_vn = json.loads(resp.text)['virtual-network']
+        self.assertThat(ret_vn.keys(), Contains(property))
+        self.assertThat(ret_vn.keys(), Contains(reference))
+        self.assertThat(ret_vn.keys(), Not(Contains(children)))
+        self.assertThat(ret_vn.keys(), Not(Contains(back_reference)))
+
+        logger.info("Reading VN with one specific ref field.")
+        query_param_str = 'fields=%s' % reference
+        url = 'http://%s:%s/virtual-network/%s?%s' % (
+            listen_ip, listen_port, vn_objs[0].uuid, query_param_str)
+        resp = requests.get(url)
+        self.assertEqual(resp.status_code, 200)
+        ret_vn = json.loads(resp.text)['virtual-network']
+        self.assertThat(ret_vn.keys(), Contains(property))
+        self.assertThat(ret_vn.keys(), Contains(reference))
+        self.assertThat(ret_vn.keys(), Not(Contains(children)))
+        self.assertThat(ret_vn.keys(), Not(Contains(back_reference)))
+
+        logger.info("Reading VN with one specific children field.")
+        query_param_str = 'fields=%s' % children
+        url = 'http://%s:%s/virtual-network/%s?%s' % (
+            listen_ip, listen_port, vn_objs[0].uuid, query_param_str)
+        resp = requests.get(url)
+        self.assertEqual(resp.status_code, 200)
+        ret_vn = json.loads(resp.text)['virtual-network']
+        self.assertThat(ret_vn.keys(), Contains(property))
+        self.assertThat(ret_vn.keys(), Contains(reference))
+        self.assertThat(ret_vn.keys(), Contains(children))
+        self.assertThat(ret_vn.keys(), Not(Contains(back_reference)))
+
+        logger.info("Reading VN with one specific back-reference field.")
+        query_param_str = 'fields=%s' % back_reference
+        url = 'http://%s:%s/virtual-network/%s?%s' % (
+            listen_ip, listen_port, vn_objs[0].uuid, query_param_str)
+        resp = requests.get(url)
+        self.assertEqual(resp.status_code, 200)
+        ret_vn = json.loads(resp.text)['virtual-network']
+        self.assertThat(ret_vn.keys(), Contains(property))
+        self.assertThat(ret_vn.keys(), Contains(reference))
+        self.assertThat(ret_vn.keys(), Not(Contains(children)))
+        self.assertThat(ret_vn.keys(), Contains(back_reference))
+
+        logger.info("Reading VN with property, reference, children and "
+                    "back-reference fields.")
+        query_param_str = ('fields=%s,%s,%s,%s' % (property, reference,
+                                                   children, back_reference))
+        url = 'http://%s:%s/virtual-network/%s?%s' % (
+            listen_ip, listen_port, vn_objs[0].uuid, query_param_str)
+        resp = requests.get(url)
+        self.assertEqual(resp.status_code, 200)
+        ret_vn = json.loads(resp.text)['virtual-network']
+        self.assertThat(ret_vn.keys(), Contains(property))
+        self.assertThat(ret_vn.keys(), Contains(reference))
+        self.assertThat(ret_vn.keys(), Contains(children))
+        self.assertThat(ret_vn.keys(), Contains(back_reference))
     # end test_read_rest_api
 
     def test_delete_after_unref(self):
@@ -1735,7 +1945,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         iip_obj = self._vnc_lib.instance_ip_read(id=iip_obj.uuid)
 
         def err_on_delete(orig_method, *args, **kwargs):
-            if args[0].replace('-', '_') == 'instance_ip':
+            if args[0] == 'instance_ip':
                 raise Exception("Faking db delete for instance ip")
             return orig_method(*args, **kwargs)
         with test_common.patch(
@@ -1771,8 +1981,10 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         fip_obj = self._vnc_lib.floating_ip_read(id=fip_obj.uuid)
 
         def err_on_delete(orig_method, *args, **kwargs):
-            if args[0].replace('-', '_') == 'floating_ip':
+            if args[0] == 'floating_ip':
                 raise Exception("Faking db delete for floating ip")
+            if args[0] == 'alias_ip':
+                raise Exception("Faking db delete for alias ip")
             return orig_method(*args, **kwargs)
         with test_common.patch(
             self._api_server._db_conn, 'dbe_delete', err_on_delete):
@@ -1795,6 +2007,38 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
                     self._vnc_lib.floating_ip_read(
                         id=fip_obj.uuid).floating_ip_address,
                     fip_obj.floating_ip_address)
+
+        # alias-ip test
+        aip_pool_obj = AliasIpPool(
+            'aip-pool-%s' %(self.id()), parent_obj=vn_obj)
+        self._vnc_lib.alias_ip_pool_create(aip_pool_obj)
+        aip_obj = AliasIp('aip-%s' %(self.id()), parent_obj=aip_pool_obj)
+        aip_obj.add_project(Project())
+        self._vnc_lib.alias_ip_create(aip_obj)
+        # read back to get allocated alias-ip
+        aip_obj = self._vnc_lib.alias_ip_read(id=aip_obj.uuid)
+
+        with test_common.patch(
+            self._api_server._db_conn, 'dbe_delete', err_on_delete):
+            try:
+                self._vnc_lib.alias_ip_delete(id=aip_obj.uuid)
+                self.assertTrue(
+                    False, 'Alias IP delete worked unexpectedly')
+            except Exception as e:
+                self.assertThat(str(e),
+                    Contains('"Faking db delete for alias ip"'))
+                # assert reservation present in zookeeper and value in iip
+                zk_node = "%(#)010d" % {'#': int(netaddr.IPAddress(
+                    aip_obj.alias_ip_address))}
+                zk_path = '/api-server/subnets/%s:1.1.1.0/28/%s' %(
+                    vn_obj.get_fq_name_str(), zk_node)
+                mock_zk = self._api_server._db_conn._zk_db._zk_client._zk_client
+                self.assertEqual(
+                    mock_zk._values[zk_path][0], aip_obj.uuid)
+                self.assertEqual(
+                    self._vnc_lib.alias_ip_read(
+                        id=aip_obj.uuid).alias_ip_address,
+                    aip_obj.alias_ip_address)
     # end test_ip_addr_not_released_on_delete_error
 
     def test_uve_trace_delete_name_from_msg(self):
@@ -1826,20 +2070,227 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             self.assertEqual(len(uuid_to_fq_name_on_delete_invoked), 0,
                 'uuid_to_fq_name invoked in delete at dbe_uve_trace')
     # end test_uve_trace_delete_name_from_msg
+
+    def test_ref_update_with_resource_type_underscored(self):
+        vn_obj = VirtualNetwork('%s-vn' % self.id())
+        ipam_obj = NetworkIpam('%s-vmi' % self.id())
+        self._vnc_lib.network_ipam_create(ipam_obj)
+        self._vnc_lib.virtual_network_create(vn_obj)
+        subnet_type = IpamSubnetType(subnet=SubnetType('1.1.1.0', 2))
+
+        self._vnc_lib.ref_update(vn_obj.get_type().replace('-', '_'),
+                                 vn_obj.uuid,
+                                 ipam_obj.get_type().replace('-', '_'),
+                                 ipam_obj.uuid,
+                                 ipam_obj.fq_name,
+                                 'ADD',
+                                 VnSubnetsType([subnet_type]))
+
+        vn_obj = self._vnc_lib.virtual_network_read(id=vn_obj.uuid)
+        fq_name = vn_obj.get_network_ipam_refs()[0]['to']
+        ipam_name = self._vnc_lib.network_ipam_read(fq_name=fq_name).name
+        self.assertEqual(ipam_obj.name, ipam_name)
+
+    def test_fq_name_to_id_with_resource_type_underscored(self):
+        test_obj = self._create_test_object()
+
+        test_uuid = self._vnc_lib.fq_name_to_id(
+            test_obj.get_type().replace('-', '_'), test_obj.get_fq_name())
+
+        # check that format is correct
+        try:
+            uuid.UUID(test_uuid)
+        except ValueError:
+            self.assertTrue(False, 'Bad form UUID ' + test_uuid)
+
+    def test_resource_list_with_resource_type_underscored(self):
+        test_obj = self._create_test_object()
+
+        resources = self._vnc_lib.resource_list(
+            test_obj.get_type().replace('-', '_'),
+            obj_uuids=[test_obj.uuid])
+        resource_ids = [resource['uuid'] for resource in
+                             resources['%ss' % test_obj.get_type()]]
+        self.assertEqual([test_obj.uuid], resource_ids)
+
+    def test_allocate_vn_id(self):
+        mock_zk = self._api_server._db_conn._zk_db
+        vn_obj = VirtualNetwork('%s-vn' % self.id())
+
+        self._vnc_lib.virtual_network_create(vn_obj)
+
+        vn_obj = self._vnc_lib.virtual_network_read(id=vn_obj.uuid)
+        vn_id = vn_obj.virtual_network_network_id
+        self.assertEqual(vn_obj.get_fq_name_str(),
+                         mock_zk.get_vn_from_id(vn_id))
+
+    def test_deallocate_vn_id(self):
+        mock_zk = self._api_server._db_conn._zk_db
+        vn_obj = VirtualNetwork('%s-vn' % self.id())
+        self._vnc_lib.virtual_network_create(vn_obj)
+        vn_obj = self._vnc_lib.virtual_network_read(id=vn_obj.uuid)
+        vn_id = vn_obj.virtual_network_network_id
+
+        self._vnc_lib.virtual_network_delete(id=vn_obj.uuid)
+
+        self.assertIsNone(mock_zk.get_vn_from_id(vn_id))
+
+    # TODO(ethuleau): As we keep the virtual network ID allocation in
+    #                 schema and in the vnc API for one release overlap to
+    #                 prevent any upgrade issue, we still authorize to
+    #                 set or update the virtual network ID until release
+    #                 (3.2 + 1)
+    def test_cannot_set_vn_id(self):
+        self.skipTest("Skipping test_cannot_set_vn_id")
+        vn_obj = VirtualNetwork('%s-vn' % self.id())
+        vn_obj.set_virtual_network_network_id(42)
+
+        with ExpectedException(PermissionDenied):
+            self._vnc_lib.virtual_network_create(vn_obj)
+
+    # TODO(ethuleau): As we keep the virtual network ID allocation in
+    #                 schema and in the vnc API for one release overlap to
+    #                 prevent any upgrade issue, we still authorize to
+    #                 set or update the virtual network ID until release
+    #                 (3.2 + 1)
+    def test_cannot_update_vn_id(self):
+        self.skipTest("Skipping test_cannot_update_vn_id")
+        vn_obj = VirtualNetwork('%s-vn' % self.id())
+        self._vnc_lib.virtual_network_create(vn_obj)
+        vn_obj = self._vnc_lib.virtual_network_read(id=vn_obj.uuid)
+
+        vn_obj.set_virtual_network_network_id(42)
+        with ExpectedException(PermissionDenied):
+            self._vnc_lib.virtual_network_update(vn_obj)
+
+        # test can update with same value, needed internally
+        vn_obj = self._vnc_lib.virtual_network_read(id=vn_obj.uuid)
+        vn_obj.set_virtual_network_network_id(
+            vn_obj.virtual_network_network_id)
+        self._vnc_lib.virtual_network_update(vn_obj)
+
+    def test_allocate_sg_id(self):
+        mock_zk = self._api_server._db_conn._zk_db
+        sg_obj = SecurityGroup('%s-sg' % self.id())
+
+        self._vnc_lib.security_group_create(sg_obj)
+
+        sg_obj = self._vnc_lib.security_group_read(id=sg_obj.uuid)
+        sg_id = sg_obj.security_group_id
+        self.assertEqual(sg_obj.get_fq_name_str(),
+                         mock_zk.get_sg_from_id(sg_id))
+
+    def test_deallocate_sg_id(self):
+        mock_zk = self._api_server._db_conn._zk_db
+        sg_obj = SecurityGroup('%s-sg' % self.id())
+        self._vnc_lib.security_group_create(sg_obj)
+        sg_obj = self._vnc_lib.security_group_read(id=sg_obj.uuid)
+        sg_id = sg_obj.security_group_id
+
+        self._vnc_lib.security_group_delete(id=sg_obj.uuid)
+
+        self.assertIsNone(mock_zk.get_sg_from_id(sg_id))
+
+    # TODO(ethuleau): As we keep the virtual network ID allocation in
+    #                 schema and in the vnc API for one release overlap to
+    #                 prevent any upgrade issue, we still authorize to
+    #                 set or update the virtual network ID until release
+    #                 (3.2 + 1)
+    def test_cannot_set_sg_id(self):
+        self.skipTest("Skipping test_cannot_set_sg_id")
+        sg_obj = SecurityGroup('%s-sg' % self.id())
+
+        sg_obj.set_security_group_id(42)
+        with ExpectedException(PermissionDenied):
+            self._vnc_lib.security_group_create(sg_obj)
+
+    # TODO(ethuleau): As we keep the virtual network ID allocation in
+    #                 schema and in the vnc API for one release overlap to
+    #                 prevent any upgrade issue, we still authorize to
+    #                 set or update the virtual network ID until release
+    #                 (3.2 + 1)
+    def test_cannot_update_sg_id(self):
+        self.skipTest("Skipping test_cannot_update_sg_id")
+        sg_obj = SecurityGroup('%s-sg' % self.id())
+        self._vnc_lib.security_group_create(sg_obj)
+        sg_obj = self._vnc_lib.security_group_read(id=sg_obj.uuid)
+
+        sg_obj.set_security_group_id(42)
+        with ExpectedException(PermissionDenied):
+            self._vnc_lib.security_group_update(sg_obj)
+
+        # test can update with same value, needed internally
+        sg_obj = self._vnc_lib.security_group_read(id=sg_obj.uuid)
+        sg_obj.set_security_group_id(sg_obj.security_group_id)
+        self._vnc_lib.security_group_update(sg_obj)
+
+    def test_create_sg_with_configured_id(self):
+        mock_zk = self._api_server._db_conn._zk_db
+        sg_obj = SecurityGroup('%s-sg' % self.id())
+        sg_obj.set_configured_security_group_id(42)
+
+        self._vnc_lib.security_group_create(sg_obj)
+
+        sg_obj = self._vnc_lib.security_group_read(id=sg_obj.uuid)
+        sg_id = sg_obj.security_group_id
+        configured_sg_id = sg_obj.configured_security_group_id
+        self.assertEqual(sg_id, 42)
+        self.assertEqual(configured_sg_id, 42)
+        self.assertIsNone(mock_zk.get_sg_from_id(sg_id))
+
+    def test_update_sg_with_configured_id(self):
+        mock_zk = self._api_server._db_conn._zk_db
+        sg_obj = SecurityGroup('%s-sg' % self.id())
+
+        self._vnc_lib.security_group_create(sg_obj)
+
+        sg_obj = self._vnc_lib.security_group_read(id=sg_obj.uuid)
+        allocated_sg_id = sg_obj.security_group_id
+        configured_sg_id = sg_obj.configured_security_group_id
+        self.assertEqual(sg_obj.get_fq_name_str(),
+                         mock_zk.get_sg_from_id(allocated_sg_id))
+        self.assertIsNone(configured_sg_id)
+
+        sg_obj.set_configured_security_group_id(42)
+        self._vnc_lib.security_group_update(sg_obj)
+
+        sg_obj = self._vnc_lib.security_group_read(id=sg_obj.uuid)
+        sg_id = sg_obj.security_group_id
+        configured_sg_id = sg_obj.configured_security_group_id
+        self.assertEqual(sg_id, 42)
+        self.assertEqual(configured_sg_id, 42)
+        self.assertIsNone(mock_zk.get_sg_from_id(allocated_sg_id))
+
+        sg_obj.set_configured_security_group_id(0)
+        self._vnc_lib.security_group_update(sg_obj)
+
+        sg_obj = self._vnc_lib.security_group_read(id=sg_obj.uuid)
+        allocated_sg_id = sg_obj.security_group_id
+        configured_sg_id = sg_obj.configured_security_group_id
+        self.assertEqual(sg_obj.get_fq_name_str(),
+                         mock_zk.get_sg_from_id(allocated_sg_id))
+        self.assertEqual(configured_sg_id, 0)
+
+    def test_qos_config(self):
+        project = Project()
+        qc = QosConfig('test-qos-config', parent_obj=project)
+        self._vnc_lib.qos_config_create(qc)
+        qc = self._vnc_lib.qos_config_read(fq_name=qc.get_fq_name())
+        self.assertEqual(len(qc.get_global_system_config_refs()), 1)
 # end class TestVncCfgApiServer
 
 
 class TestStaleLockRemoval(test_case.ApiServerTestCase):
-    STALE_LOCK_SECS = '0.1'
+    STALE_LOCK_SECS = '0.2'
     @classmethod
     def setUpClass(cls):
         super(TestStaleLockRemoval, cls).setUpClass(
-            extra_config_knobs=[('DEFAULTS', 'stale_lock_seconds', 
+            extra_config_knobs=[('DEFAULTS', 'stale_lock_seconds',
             cls.STALE_LOCK_SECS)])
     # end setUpClass
 
     def test_stale_fq_name_lock_removed_on_partial_create(self):
-        # 1. partially create an object i.e zk done, cass 
+        # 1. partially create an object i.e zk done, cass
         #    cass silently not(simulating process restart).
         # 2. create same object again, expect RefsExist
         # 3. wait for stale_lock_seconds and attempt create
@@ -1901,7 +2352,7 @@ class TestStaleLockRemoval(test_case.ApiServerTestCase):
 
         # create entry in cassandra too and assert
         # not a stale lock on re-create
-        uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+        uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid', 'obj_uuid_table')
         with uuid_cf.patch_row(str(vn_UUID),
             new_columns={'fq_name':json.dumps(vn_obj.fq_name),
                          'type':json.dumps(vn_obj._type)}):
@@ -1973,7 +2424,7 @@ class TestVncCfgApiServerRequests(test_case.ApiServerTestCase):
         api_server = test_common.vnc_cfg_api_server.server
         self.blocked = True
         def slow_response_on_vn_read(obj_type, *args, **kwargs):
-            if obj_type.replace('-', '_') == 'virtual_network':
+            if obj_type == 'virtual_network':
                 while self.blocked:
                     gevent.sleep(1)
             return orig_vn_read(obj_type, *args, **kwargs)
@@ -1997,8 +2448,8 @@ class TestVncCfgApiServerRequests(test_case.ApiServerTestCase):
 
         # when there are pipe-lined requests, responses have content-length
         # calculated only once. see _cast() in bottle.py for 'out' as bytes.
-        # in this test, without resetting as below, read of def-nw-ipam 
-        # in create_vn will be the size returned for read_vn and 
+        # in this test, without resetting as below, read of def-nw-ipam
+        # in create_vn will be the size returned for read_vn and
         # deserialization fails
         @bottle.hook('after_request')
         def reset_response_content_length():
@@ -2276,7 +2727,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
         TestExtensionApi.test_case = self
         super(TestExtensionApi, self).setUp()
     # end setUp
-  
+
     def test_transform_request(self):
         # create
         obj = VirtualNetwork('transform-create')
@@ -2382,7 +2833,7 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
             rd_ff_proto.fat_flow_protocol[1].protocol, Equals('p2'))
 
         # verify db storage format (wrapper/container type stripped in storage)
-        uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+        uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid', 'obj_uuid_table')
         cols = uuid_cf.get(vmi_obj.uuid,
             column_start='propl:virtual_machine_interface_fat_flow_protocols:',
             column_finish='propl:virtual_machine_interface_fat_flow_protocols;')
@@ -2765,10 +3216,38 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
         self.assertEqual(response.status_code, 400)
     # end test_prop_list_wrong_type_should_fail
 
+    def test_resource_list_with_field_prop_list(self):
+        vmi_obj = VirtualMachineInterface('vmi-%s' % (self.id()),
+                                          parent_obj=Project())
+        fname = 'virtual_machine_interface_fat_flow_protocols'
+        # needed for backend type-specific handling
+        vmi_obj.add_virtual_network(VirtualNetwork())
+        self._vnc_lib.virtual_machine_interface_create(vmi_obj)
+
+        vmis = self._vnc_lib.virtual_machine_interfaces_list(
+            obj_uuids=[vmi_obj.uuid], fields=[fname])
+        vmi_ids = [vmi['uuid'] for vmi in vmis['virtual-machine-interfaces']]
+        self.assertEqual([vmi_obj.uuid], vmi_ids)
+        self.assertNotIn(fname, vmis['virtual-machine-interfaces'][0])
+
+        vmi_obj = self._vnc_lib.virtual_machine_interface_read(id=vmi_obj.uuid)
+        proto_type = ProtocolType(protocol='proto', port='port')
+        vmi_obj.add_virtual_machine_interface_fat_flow_protocols(proto_type,
+                                                                 'pos')
+        self._vnc_lib.virtual_machine_interface_update(vmi_obj)
+        vmis = self._vnc_lib.virtual_machine_interfaces_list(
+            obj_uuids=[vmi_obj.uuid], fields=[fname])
+        vmi_ids = [vmi['uuid'] for vmi in vmis['virtual-machine-interfaces']]
+        self.assertEqual([vmi_obj.uuid], vmi_ids)
+        self.assertIn(fname, vmis['virtual-machine-interfaces'][0])
+        self.assertDictEqual({'fat_flow_protocol': [vars(proto_type)]},
+                             vmis['virtual-machine-interfaces'][0][fname])
 # end class TestPropertyWithlist
 
 
 class TestPropertyWithMap(test_case.ApiServerTestCase):
+    _excluded_vmi_bindings = ['vif_type', 'vnic_type']
+
     def assert_kvpos(self, rd_bindings, idx, k, v, pos):
         self.assertEqual(rd_bindings[idx][0]['key'], k)
         self.assertEqual(rd_bindings[idx][0]['value'], v)
@@ -2785,16 +3264,15 @@ class TestPropertyWithMap(test_case.ApiServerTestCase):
         self._vnc_lib.virtual_machine_interface_create(vmi_obj)
 
         # ensure stored as list order
-        rd_vmi_obj = self._vnc_lib.virtual_machine_interface_read(
-            id=vmi_obj.uuid)
-        rd_bindings = rd_vmi_obj.virtual_machine_interface_bindings
-        self.assertThat(
-            rd_bindings.key_value_pair[0].key, Equals('k1'))
-        self.assertThat(
-            rd_bindings.key_value_pair[1].key, Equals('k2'))
+        rd_bindings = self._vnc_lib.virtual_machine_interface_read(
+            id=vmi_obj.uuid).virtual_machine_interface_bindings
+        bindings_dict = {binding.key: binding.value for binding in
+                         rd_bindings.key_value_pair
+                         if binding.key not in self._excluded_vmi_bindings}
+        self.assertDictEqual(bindings_dict, {'k1': 'v1', 'k2': 'v2'})
 
         # verify db storage format (wrapper/container type stripped in storage)
-        uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+        uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid','obj_uuid_table')
         cols = uuid_cf.get(vmi_obj.uuid,
             column_start='propm:virtual_machine_interface_bindings:',
             column_finish='propm:virtual_machine_interface_bindings;')
@@ -2823,8 +3301,11 @@ class TestPropertyWithMap(test_case.ApiServerTestCase):
         vmi_obj = VirtualMachineInterface('vmi-%s' %(self.id()),
             parent_obj=Project())
 
-        for key,val in [('k2','v2'), ('k1','v1'),
-                            ('k3','v3'), ('k4', 'v4')]:
+        fake_bindings_dict = {'k1': 'v1',
+                              'k2': 'v2',
+                              'k3': 'v3',
+                              'k4': 'v4'}
+        for key, val in fake_bindings_dict.iteritems():
             vmi_obj.add_virtual_machine_interface_bindings(
                 KeyValuePair(key=key, value=val))
 
@@ -2836,29 +3317,52 @@ class TestPropertyWithMap(test_case.ApiServerTestCase):
 
         self.assertEqual(len(rd_bindings.key_value_pair), 4)
 
-        self.assertEqual(rd_bindings.key_value_pair[0].key, 'k1')
-        self.assertEqual(rd_bindings.key_value_pair[0].value, 'v1')
-        self.assertEqual(rd_bindings.key_value_pair[1].key, 'k2')
-        self.assertEqual(rd_bindings.key_value_pair[1].value, 'v2')
-        self.assertEqual(rd_bindings.key_value_pair[2].key, 'k3')
-        self.assertEqual(rd_bindings.key_value_pair[2].value, 'v3')
-        self.assertEqual(rd_bindings.key_value_pair[3].key, 'k4')
-        self.assertEqual(rd_bindings.key_value_pair[3].value, 'v4')
+        bindings_dict = {binding.key: binding.value for binding in
+                         rd_bindings.key_value_pair
+                         if binding.key not in self._excluded_vmi_bindings}
+        self.assertDictEqual(bindings_dict, fake_bindings_dict)
 
         for pos in ['k1', 'k4']:
-            vmi_obj.del_virtual_machine_interface_bindings(
-                elem_position=pos)
+            vmi_obj.del_virtual_machine_interface_bindings(elem_position=pos)
+            fake_bindings_dict.pop(pos)
         self._vnc_lib.virtual_machine_interface_update(vmi_obj)
         rd_bindings = self._vnc_lib.virtual_machine_interface_read(
             id=vmi_obj.uuid).virtual_machine_interface_bindings
 
         self.assertEqual(len(rd_bindings.key_value_pair), 2)
 
-        self.assertEqual(rd_bindings.key_value_pair[0].key, 'k2')
-        self.assertEqual(rd_bindings.key_value_pair[0].value, 'v2')
-        self.assertEqual(rd_bindings.key_value_pair[1].key, 'k3')
-        self.assertEqual(rd_bindings.key_value_pair[1].value, 'v3')
+        bindings_dict = {binding.key: binding.value for binding in
+                         rd_bindings.key_value_pair
+                         if binding.key not in self._excluded_vmi_bindings}
+        self.assertDictEqual(bindings_dict, fake_bindings_dict)
     # end test_element_set_del_in_object
+
+    def test_resource_list_with_field_prop_map(self):
+        vmi_obj = VirtualMachineInterface('vmi-%s' % (self.id()),
+                                          parent_obj=Project())
+        fname = 'virtual_machine_interface_bindings'
+        # needed for backend type-specific handling
+        vmi_obj.add_virtual_network(VirtualNetwork())
+        self._vnc_lib.virtual_machine_interface_create(vmi_obj)
+
+        vmis = self._vnc_lib.virtual_machine_interfaces_list(
+            obj_uuids=[vmi_obj.uuid], fields=[fname])
+        vmi_ids = [vmi['uuid'] for vmi in vmis['virtual-machine-interfaces']]
+        self.assertEqual([vmi_obj.uuid], vmi_ids)
+        self.assertNotIn(fname, vmis['virtual-machine-interfaces'][0])
+
+        vmi_obj = self._vnc_lib.virtual_machine_interface_read(id=vmi_obj.uuid)
+        kv_pairs = KeyValuePairs([KeyValuePair(key='k', value='v')])
+        vmi_obj.set_virtual_machine_interface_bindings(kv_pairs)
+        self._vnc_lib.virtual_machine_interface_update(vmi_obj)
+
+        vmis = self._vnc_lib.virtual_machine_interfaces_list(
+            obj_uuids=[vmi_obj.uuid], fields=[fname])
+        vmi_ids = [vmi['uuid'] for vmi in vmis['virtual-machine-interfaces']]
+        self.assertEqual([vmi_obj.uuid], vmi_ids)
+        self.assertIn(fname, vmis['virtual-machine-interfaces'][0])
+        self.assertDictEqual(kv_pairs.exportDict()['KeyValuePairs'],
+                             vmis['virtual-machine-interfaces'][0][fname])
 # end class TestPropertyWithMap
 
 
@@ -2907,7 +3411,7 @@ class TestDBAudit(test_case.ApiServerTestCase):
         with self.audit_mocks():
             from vnc_cfg_api_server import db_manage
             test_obj = self._create_test_object()
-            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid', 'obj_uuid_table')
             orig_col_val_ts = uuid_cf.get(test_obj.uuid,
                 include_timestamp=True)
             omit_col_names = random.sample(set(
@@ -2930,7 +3434,7 @@ class TestDBAudit(test_case.ApiServerTestCase):
             test_obj = self._create_test_object()
             self.assertTill(self.ifmap_has_ident, obj=test_obj)
 
-            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid', 'obj_uuid_table')
             orig_col_val_ts = uuid_cf.get(test_obj.uuid,
                 include_timestamp=True)
             wrong_col_val_ts = copy.deepcopy(orig_col_val_ts)
@@ -2952,8 +3456,8 @@ class TestDBAudit(test_case.ApiServerTestCase):
         with self.audit_mocks():
             from vnc_cfg_api_server import db_manage
             test_obj = self._create_test_object()
-            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
-            fq_name_cf = test_common.CassandraCFs.get_cf('obj_fq_name_table')
+            uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid','obj_uuid_table')
+            fq_name_cf = test_common.CassandraCFs.get_cf('config_db_uuid','obj_fq_name_table')
             with uuid_cf.patch_row(test_obj.uuid, new_columns=None):
                 db_checker = db_manage.DatabaseChecker(
                     '--ifmap-credentials a:b')
@@ -2968,8 +3472,8 @@ class TestDBAudit(test_case.ApiServerTestCase):
             from vnc_cfg_api_server import db_manage
             test_obj = self._create_test_object()
             self.assertTill(self.ifmap_has_ident, obj=test_obj)
-            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
-            fq_name_cf = test_common.CassandraCFs.get_cf('obj_fq_name_table')
+            uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid','obj_uuid_table')
+            fq_name_cf = test_common.CassandraCFs.get_cf('config_db_uuid','obj_fq_name_table')
             test_obj_type = test_obj.get_type().replace('-', '_')
             orig_col_val_ts = fq_name_cf.get(test_obj_type,
                 include_timestamp=True)
@@ -2990,8 +3494,8 @@ class TestDBAudit(test_case.ApiServerTestCase):
             from vnc_cfg_api_server import db_manage
             test_obj = self._create_test_object()
             self.assertTill(self.ifmap_has_ident, obj=test_obj)
-     
-            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+
+            uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid','obj_uuid_table')
             with uuid_cf.patch_row(test_obj.uuid, new_columns=None):
                 db_checker = db_manage.DatabaseChecker(
                     '--ifmap-credentials a:b')
@@ -3002,11 +3506,11 @@ class TestDBAudit(test_case.ApiServerTestCase):
     # test_checker_ifmap_identifier_extra
 
     def test_checker_ifmap_identifier_missing(self):
-        # ifmap has doesn't have an identifier but obj_uuid table 
+        # ifmap has doesn't have an identifier but obj_uuid table
         # in cassandra does
         with self.audit_mocks():
             from vnc_cfg_api_server import db_manage
-            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid','obj_uuid_table')
             with uuid_cf.patch_row(str(uuid.uuid4()),
                     new_columns={'type': json.dumps(''),
                                  'fq_name':json.dumps(''),
@@ -3045,7 +3549,7 @@ class TestDBAudit(test_case.ApiServerTestCase):
 
     def test_checker_zk_vn_extra(self):
         vn_obj, _ = self._create_vn_subnet_ipam(self.id())
-        fq_name_cf = test_common.CassandraCFs.get_cf('obj_fq_name_table')
+        fq_name_cf = test_common.CassandraCFs.get_cf('config_db_uuid','obj_fq_name_table')
         orig_col_val_ts = fq_name_cf.get('virtual_network',
             include_timestamp=True)
         # remove test obj in fq-name table
@@ -3091,7 +3595,7 @@ class TestDBAudit(test_case.ApiServerTestCase):
             iip_obj = vnc_api.InstanceIp(self.id())
             iip_obj.add_virtual_network(vn_obj)
             self._vnc_lib.instance_ip_create(iip_obj)
-            uuid_cf = test_common.CassandraCFs.get_cf('obj_uuid_table')
+            uuid_cf = test_common.CassandraCFs.get_cf('config_db_uuid','obj_uuid_table')
             with uuid_cf.patch_row(iip_obj.uuid, None):
                 errors = db_checker.check_subnet_addr_alloc()
                 error_types = [type(x) for x in errors]

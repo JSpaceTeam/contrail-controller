@@ -22,7 +22,6 @@ class DBEntryBase;
 class DBTableBase;
 class DBTablePartBase;
 class TaskTrigger;
-class WalkRequest;
 
 //
 // ConditionMatch
@@ -32,7 +31,7 @@ class WalkRequest;
 //
 class ConditionMatch {
 public:
-    ConditionMatch() : deleted_(false), num_matchstate_(0) {
+    ConditionMatch() : deleted_(false), walk_done_(false), num_matchstate_(0) {
         refcount_ = 0;
     }
 
@@ -71,7 +70,12 @@ private:
     void SetDeleted() {
         deleted_ = true;
     }
+    bool walk_done() const { return walk_done_; }
+    void set_walk_done() { walk_done_ = true; }
+    void reset_walk_done() { walk_done_ = false; }
+
     bool deleted_;
+    bool walk_done_;
 
     tbb::mutex mutex_;
     uint32_t num_matchstate_;
@@ -141,22 +145,17 @@ private:
 class ConditionMatchTableState;
 
 //
-// Store the Walk request and current walk state for each BgpTable with active
-// Walk request
-//
-class WalkRequest;
-
-//
 // BgpConditionListener
 // Provides a generic interface to match a condition and call action function
 // Application module registers with this module with ConditionMatch class
 // to start applying the match condition on all BgpRoutes
 // Provides an interface to add/remove module specific data on each BgpRoute
 //
+// A mutex is used to serialize access from multiple bgp::ConfigHelper tasks.
+//
 class BgpConditionListener {
 public:
     typedef std::map<BgpTable *, ConditionMatchTableState *> TableMap;
-    typedef std::map<BgpTable *, WalkRequest *> WalkRequestMap;
 
     // Called upon completion of Add or Delete operations
     typedef boost::function<void(BgpTable *, ConditionMatch *)> RequestDoneCb;
@@ -201,29 +200,29 @@ public:
 
 private:
     template <typename U> friend class PathResolverTest;
-
-    BgpServer *server_;
-
-    TableMap map_;
-
-    WalkRequestMap walk_map_;
+    typedef std::set<ConditionMatchTableState *> PurgeTableStateList;
 
     // Table listener
     bool BgpRouteNotify(BgpServer *server, DBTablePartBase *root,
                         DBEntryBase *entry);
 
-    void TableWalk(BgpTable *table, ConditionMatch *obj, RequestDoneCb cb);
+    void TableWalk(ConditionMatchTableState *ts,
+                   ConditionMatch *obj, RequestDoneCb cb);
 
-    bool StartWalk();
+    bool PurgeTableState();
 
     // WalkComplete function
-    void WalkDone(DBTableBase *table);
+    void WalkDone(ConditionMatchTableState *ts, DBTableBase *table);
 
     // For testing only.
     void DisableTableWalkProcessing();
     void EnableTableWalkProcessing();
 
-    boost::scoped_ptr<TaskTrigger> walk_trigger_;
+    BgpServer *server_;
+    tbb::mutex mutex_;
+    TableMap map_;
+    PurgeTableStateList purge_list_;
+    boost::scoped_ptr<TaskTrigger> purge_trigger_;
 
     DISALLOW_COPY_AND_ASSIGN(BgpConditionListener);
 };

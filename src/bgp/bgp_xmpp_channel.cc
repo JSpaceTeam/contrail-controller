@@ -5,27 +5,31 @@
 #include "bgp/bgp_xmpp_channel.h"
 
 #include <boost/foreach.hpp>
+#include <boost/regex.hpp>
 
 #include <limits>
-#include <vector>
 #include <sstream>
+#include <vector>
 
 #include "base/task_annotations.h"
 #include "bgp/bgp_config.h"
 #include "bgp/bgp_factory.h"
 #include "bgp/bgp_log.h"
+#include "bgp/bgp_membership.h"
 #include "bgp/bgp_peer_close.h"
-#include "bgp/bgp_peer_membership.h"
+#include "bgp/bgp_server.h"
 #include "bgp/inet/inet_table.h"
 #include "bgp/inet6/inet6_table.h"
 #include "bgp/extended-community/load_balance.h"
 #include "bgp/extended-community/mac_mobility.h"
 #include "bgp/ermvpn/ermvpn_table.h"
 #include "bgp/evpn/evpn_table.h"
+#include "bgp/peer_stats.h"
 #include "bgp/rtarget/rtarget_table.h"
 #include "bgp/scheduling_group.h"
 #include "bgp/security_group/security_group.h"
 #include "bgp/tunnel_encap/tunnel_encap.h"
+#include "control-node/sandesh/control_node_types.h"
 #include "net/community_type.h"
 #include "schema/xmpp_multicast_types.h"
 #include "schema/xmpp_enet_types.h"
@@ -49,6 +53,9 @@ using autogen::SecurityGroupListType;
 using autogen::CommunityTagListType;
 using autogen::TunnelEncapsulationListType;
 
+using boost::regex;
+using boost::regex_search;
+using boost::smatch;
 using boost::system::error_code;
 using pugi::xml_node;
 using std::auto_ptr;
@@ -127,18 +134,34 @@ BgpXmppChannel::ChannelStats::ChannelStats()
 
 class BgpXmppChannel::PeerClose : public IPeerClose {
 public:
+
     explicit PeerClose(BgpXmppChannel *channel)
        : parent_(channel),
-         manager_(BgpObjectFactory::Create<PeerCloseManager>(channel->Peer())) {
+         manager_(BgpObjectFactory::Create<PeerCloseManager>(this)) {
     }
-    virtual ~PeerClose() {
-    }
+    virtual ~PeerClose() { }
+    virtual bool IsReady() const { return parent_->Peer()->IsReady(); }
+    virtual IPeer *peer() const { return parent_->Peer(); }
+
     virtual string ToString() const {
         return parent_ ? parent_->ToString() : "";
     }
 
     virtual PeerCloseManager *close_manager() {
         return manager_.get();
+    }
+
+    virtual const int GetGracefulRestartTime() const {
+        if (!parent_)
+            return 0;
+        return parent_->manager()->xmpp_server()->GetGracefulRestartTime();
+    }
+
+    virtual const int GetLongLivedGracefulRestartTime() const {
+        if (!parent_)
+            return 0;
+        return parent_->manager()->xmpp_server()->
+                                       GetLongLivedGracefulRestartTime();
     }
 
     // Mark all current subscription as 'stale'
@@ -148,30 +171,59 @@ public:
             parent_->StaleCurrentSubscriptions();
     }
 
-    // Delete all current sbscriptions which are still stale.
+    // Mark all current subscriptions as 'llgr_stale'
+    // Concurrency: Protected with a mutex from peer close manager
+    virtual void LongLivedGracefulRestartStale() {
+        if (parent_)
+            parent_->LlgrStaleCurrentSubscriptions();
+    }
+
+    // Delete all current subscriptions which are still stale.
     // Concurrency: Protected with a mutex from peer close manager
     virtual void GracefulRestartSweep() {
         if (parent_)
             parent_->SweepCurrentSubscriptions();
     }
 
-    virtual bool IsCloseGraceful() {
+    virtual bool IsCloseGraceful() const {
         if (!parent_ || !parent_->channel_)
             return false;
 
         XmppConnection *connection =
             const_cast<XmppConnection *>(parent_->channel_->connection());
 
-        if (!connection || connection->IsActiveChannel()) return false;
+        if (!connection || connection->IsActiveChannel())
+            return false;
 
-        // Check from the server, if GR is enabled or not.
-        return static_cast<XmppServer *>(
-            connection->server())->IsPeerCloseGraceful();
+        return parent_->manager()->xmpp_server()->IsPeerCloseGraceful();
+    }
+
+    virtual bool IsCloseLongLivedGraceful() const {
+        return IsCloseGraceful() && GetLongLivedGracefulRestartTime() != 0;
     }
 
     // EoR from xmpp is afi independent at the moment.
-    virtual void GetNegotiatedFamilies(Families *families) const {
+    virtual void GetGracefulRestartFamilies(Families *families) const {
         families->insert(Address::UNSPEC);
+    }
+
+    virtual void ReceiveEndOfRIB(Address::Family family) {
+        parent_->ReceiveEndOfRIB(family);
+    }
+
+    // Process any pending subscriptions if close manager is now no longer
+    // using membership manager.
+    virtual void MembershipRequestCallbackComplete() {
+        CHECK_CONCURRENCY("xmpp::StateMachine");
+        if (parent_) {
+            assert(parent_->membership_unavailable());
+            parent_->ProcessPendingSubscriptions();
+        }
+    }
+
+    virtual const char *GetTaskName() const { return "xmpp::StateMachine"; };
+    virtual int GetTaskInstance() const {
+        return parent_->channel()->GetTaskInstance();
     }
 
     virtual void CustomClose() {
@@ -179,8 +231,7 @@ public:
             return;
         BgpServer *server = parent_->bgp_server_;
         RoutingInstanceMgr *instance_mgr = server->routing_instance_mgr();
-        RoutingInstance *master =
-            instance_mgr->GetRoutingInstance(BgpConfigManager::kMasterInstance);
+        RoutingInstance *master = instance_mgr->GetDefaultRoutingInstance();
         assert(master);
         BgpTable *rtarget_table = master->GetTable(Address::RTARGET);
         assert(rtarget_table);
@@ -194,6 +245,7 @@ public:
         }
         parent_->routing_instances_.clear();
         parent_->rtarget_routes_.clear();
+        parent_->end_of_rib_timer_->Cancel();
     }
 
     virtual void CloseComplete() {
@@ -216,11 +268,13 @@ public:
         parent_ = NULL;
     }
 
-    void Close() {
+    virtual void Close(bool non_graceful) {
         if (parent_) {
             assert(parent_->peer_deleted());
             assert(parent_->channel_->IsCloseInProgress());
-            manager_->Close();
+            if (!IsCloseGraceful())
+                non_graceful = true;
+            manager_->Close(non_graceful);
         }
     }
 
@@ -232,7 +286,7 @@ private:
 class BgpXmppChannel::PeerStats : public IPeerDebugStats {
 public:
     explicit PeerStats(BgpXmppChannel *peer)
-        : peer_(peer) {
+        : parent_(peer) {
     }
 
     // Used when peer flaps.
@@ -242,16 +296,16 @@ public:
 
     // Printable name
     virtual string ToString() const {
-        return peer_->ToString();
+        return parent_->ToString();
     }
 
     // Previous State of the peer
     virtual string last_state() const {
-        return (peer_->channel_->LastStateName());
+        return (parent_->channel_->LastStateName());
     }
     // Last state change occurred at
     virtual string last_state_change_at() const {
-        return (peer_->channel_->LastStateChangeAt());
+        return (parent_->channel_->LastStateChangeAt());
     }
 
     // Last error on this peer
@@ -261,47 +315,47 @@ public:
 
     // Last Event on this peer
     virtual string last_event() const {
-        return (peer_->channel_->LastEvent());
+        return (parent_->channel_->LastEvent());
     }
 
     // When was the Last
     virtual string last_flap() const {
-        return (peer_->channel_->LastFlap());
+        return (parent_->channel_->LastFlap());
     }
 
     // Total number of flaps
     virtual uint64_t num_flaps() const {
-        return (peer_->channel_->FlapCount());
+        return (parent_->channel_->FlapCount());
     }
 
     virtual void GetRxProtoStats(ProtoStats *stats) const {
-        stats->open = peer_->channel_->rx_open();
-        stats->close = peer_->channel_->rx_close();
-        stats->keepalive = peer_->channel_->rx_keepalive();
-        stats->update = peer_->channel_->rx_update();
+        stats->open = parent_->channel_->rx_open();
+        stats->close = parent_->channel_->rx_close();
+        stats->keepalive = parent_->channel_->rx_keepalive();
+        stats->update = parent_->channel_->rx_update();
     }
 
     virtual void GetTxProtoStats(ProtoStats *stats) const {
-        stats->open = peer_->channel_->tx_open();
-        stats->close = peer_->channel_->tx_close();
-        stats->keepalive = peer_->channel_->tx_keepalive();
-        stats->update = peer_->channel_->tx_update();
+        stats->open = parent_->channel_->tx_open();
+        stats->close = parent_->channel_->tx_close();
+        stats->keepalive = parent_->channel_->tx_keepalive();
+        stats->update = parent_->channel_->tx_update();
     }
 
     virtual void GetRxRouteUpdateStats(UpdateStats *stats)  const {
-        stats->total = peer_->stats_[RX].rt_updates;
-        stats->reach = peer_->stats_[RX].reach;
-        stats->unreach = peer_->stats_[RX].unreach;
+        stats->total = parent_->stats_[RX].rt_updates;
+        stats->reach = parent_->stats_[RX].reach;
+        stats->unreach = parent_->stats_[RX].unreach;
     }
 
     virtual void GetTxRouteUpdateStats(UpdateStats *stats)  const {
-        stats->total = peer_->stats_[TX].rt_updates;
-        stats->reach = peer_->stats_[TX].reach;
-        stats->unreach = peer_->stats_[TX].unreach;
+        stats->total = parent_->stats_[TX].rt_updates;
+        stats->reach = parent_->stats_[TX].reach;
+        stats->unreach = parent_->stats_[TX].unreach;
     }
 
     virtual void GetRxSocketStats(IPeerDebugStats::SocketStats *stats) const {
-        const XmppSession *session = peer_->GetSession();
+        const XmppSession *session = parent_->GetSession();
         if (session) {
             io::SocketStats socket_stats(session->GetSocketStats());
             stats->calls = socket_stats.read_calls;
@@ -310,7 +364,7 @@ public:
     }
 
     virtual void GetTxSocketStats(IPeerDebugStats::SocketStats *stats) const {
-        const XmppSession *session = peer_->GetSession();
+        const XmppSession *session = parent_->GetSession();
         if (session) {
             io::SocketStats socket_stats(session->GetSocketStats());
             stats->calls = socket_stats.write_calls;
@@ -322,7 +376,7 @@ public:
     }
 
     virtual void GetRxErrorStats(RxErrorStats *stats) const {
-        const BgpXmppChannel::ErrorStats &err_stats = peer_->error_stats();
+        const BgpXmppChannel::ErrorStats &err_stats = parent_->error_stats();
         stats->inet6_bad_xml_token_count =
             err_stats.get_inet6_rx_bad_xml_token_count();
         stats->inet6_bad_prefix_count =
@@ -333,16 +387,21 @@ public:
             err_stats.get_inet6_rx_bad_afi_safi_count();
     }
 
+    virtual void GetRxRouteStats(RxRouteStats *stats) const {
+        stats->total_path_count = parent_->Peer()->GetTotalPathCount();
+        stats->primary_path_count = parent_->Peer()->GetPrimaryPathCount();
+    }
+
     virtual void UpdateTxUnreachRoute(uint64_t count) {
-        peer_->stats_[TX].unreach += count;
+        parent_->stats_[TX].unreach += count;
     }
 
     virtual void UpdateTxReachRoute(uint64_t count) {
-        peer_->stats_[TX].reach += count;
+        parent_->stats_[TX].reach += count;
     }
 
 private:
-    BgpXmppChannel *peer_;
+    BgpXmppChannel *parent_;
 };
 
 class BgpXmppChannel::XmppPeer : public IPeer {
@@ -353,12 +412,32 @@ public:
           is_closed_(false),
           send_ready_(true),
           closed_at_(0) {
-        refcount_ = 0;
+        total_path_count_ = 0;
         primary_path_count_ = 0;
     }
 
     virtual ~XmppPeer() {
-        assert(GetRefCount() == 0);
+        assert(GetTotalPathCount() == 0);
+
+        XmppPeerInfoData peer_info;
+        peer_info.set_name(ToUVEKey());
+        peer_info.set_deleted(true);
+        parent_->XMPPPeerInfoSend(peer_info);
+
+        PeerStatsData peer_stats_data;
+        peer_stats_data.set_name(ToUVEKey());
+        peer_stats_data.set_deleted(true);
+        PeerStatsUve::Send(peer_stats_data, "ObjectXmppPeerInfo");
+    }
+
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart, BgpRoute *rt,
+                                        BgpPath *path) {
+        PeerCloseManager *close_manager = peer_close()->close_manager();
+        if (close_manager->IsMembershipInUse())
+            return close_manager->MembershipPathCallback(tpart, rt, path);
+
+        BgpTable *table = static_cast<BgpTable *>(tpart->parent());
+        return table->DeletePath(tpart, rt, path);
     }
 
     virtual bool SendUpdate(const uint8_t *msg, size_t msgsize);
@@ -366,13 +445,18 @@ public:
         return parent_->ToString();
     }
 
+    virtual bool CanUseMembershipManager() const {
+        return parent_->GetMembershipRequestQueueSize() == 0;
+    }
+
+    virtual bool IsRegistrationRequired() const { return true; }
+
     virtual string ToUVEKey() const {
         return parent_->ToUVEKey();
     }
 
-    virtual BgpServer *server() {
-        return server_;
-    }
+    virtual BgpServer *server() { return server_; }
+    virtual BgpServer *server() const { return server_; }
     virtual IPeerClose *peer_close() {
         return parent_->peer_close_.get();
     }
@@ -399,7 +483,7 @@ public:
     virtual bool IsXmppPeer() const {
         return true;
     }
-    virtual void Close();
+    virtual void Close(bool non_graceful);
 
     const bool IsDeleted() const { return is_closed_; }
     void SetPeerClosed(bool closed) {
@@ -421,13 +505,21 @@ public:
         return 0;
     }
 
-    virtual void UpdateRefCount(int count) const { refcount_ += count; }
-    virtual tbb::atomic<int> GetRefCount() const { return refcount_; }
+    virtual void UpdateTotalPathCount(int count) const {
+        total_path_count_ += count;
+    }
+    virtual int GetTotalPathCount() const {
+        return total_path_count_;
+    }
     virtual void UpdatePrimaryPathCount(int count) const {
         primary_path_count_ += count;
     }
     virtual int GetPrimaryPathCount() const {
          return primary_path_count_;
+    }
+
+    void MembershipRequestCallback(BgpTable *table) {
+        parent_->MembershipRequestCallback(table);
     }
 
 private:
@@ -446,30 +538,36 @@ private:
 
     BgpServer *server_;
     BgpXmppChannel *parent_;
-    mutable tbb::atomic<int> refcount_;
+    mutable tbb::atomic<int> total_path_count_;
     mutable tbb::atomic<int> primary_path_count_;
     bool is_closed_;
     bool send_ready_;
     uint64_t closed_at_;
 };
 
-static bool SkipUpdateSend() {
-    static bool init_;
-    static bool skip_;
+// Skip sending updates if the destinatin matches against the pattern.
+// XXX Used in test environments only
+bool BgpXmppChannel::SkipUpdateSend() {
+    static char *skip_env_ = getenv("XMPP_SKIP_UPDATE_SEND");
+    if (!skip_env_)
+        return false;
 
-    if (init_) return skip_;
-
-    skip_ = getenv("XMPP_SKIP_UPDATE_SEND") != NULL;
-    init_ = true;
-
-    return skip_;
+    // Use XMPP_SKIP_UPDATE_SEND as a regex pattern to match against destination
+    // Cache the result to avoid redundant regex evaluation
+    if (!skip_update_send_cached_) {
+        smatch matches;
+        skip_update_send_ = regex_search(ToString(), matches, regex(skip_env_));
+        skip_update_send_cached_ = true;
+    }
+    return skip_update_send_;
 }
 
 bool BgpXmppChannel::XmppPeer::SendUpdate(const uint8_t *msg, size_t msgsize) {
     XmppChannel *channel = parent_->channel_;
     if (channel->GetPeerState() == xmps::READY) {
         parent_->stats_[TX].rt_updates++;
-        if (SkipUpdateSend()) return true;
+        if (parent_->SkipUpdateSend())
+            return true;
         send_ready_ = channel->Send(msg, msgsize, xmps::BGP,
                 boost::bind(&BgpXmppChannel::XmppPeer::WriteReadyCb, this, _1));
         if (!send_ready_) {
@@ -486,7 +584,7 @@ bool BgpXmppChannel::XmppPeer::SendUpdate(const uint8_t *msg, size_t msgsize) {
     }
 }
 
-void BgpXmppChannel::XmppPeer::Close() {
+void BgpXmppChannel::XmppPeer::Close(bool non_graceful) {
     parent_->set_peer_closed(true);
     if (server_ == NULL)
         return;
@@ -494,8 +592,13 @@ void BgpXmppChannel::XmppPeer::Close() {
     XmppConnection *connection =
         const_cast<XmppConnection *>(parent_->channel_->connection());
 
-    if (connection && !connection->IsActiveChannel())
-        parent_->peer_close_->Close();
+    if (connection && !connection->IsActiveChannel()) {
+        parent_->peer_close_->Close(false);
+        XmppPeerInfoData peer_info;
+        peer_info.set_name(parent_->ToUVEKey());
+        peer_info.set_send_state("not advertising");
+        parent_->XMPPPeerInfoSend(peer_info);
+    }
 }
 
 BgpXmppChannel::BgpXmppChannel(XmppChannel *channel, BgpServer *bgp_server,
@@ -511,11 +614,22 @@ BgpXmppChannel::BgpXmppChannel(XmppChannel *channel, BgpServer *bgp_server,
       delete_in_progress_(false),
       deleted_(false),
       defer_peer_close_(false),
+      membership_unavailable_(false),
+      skip_update_send_(false),
+      skip_update_send_cached_(false),
+      end_of_rib_timer_(NULL),
       membership_response_worker_(
             TaskScheduler::GetInstance()->GetTaskId("xmpp::StateMachine"),
-            channel->connection()->GetIndex(),
+            channel->GetTaskInstance(),
             boost::bind(&BgpXmppChannel::MembershipResponseHandler, this, _1)),
       lb_mgr_(new LabelBlockManager()) {
+    if (bgp_server) {
+        end_of_rib_timer_ = TimerManager::CreateTimer(*bgp_server->ioservice(),
+                                "EndOfRib timer",
+                                TaskScheduler::GetInstance()->GetTaskId(
+                                    "xmpp::StateMachine"),
+                                channel->GetTaskInstance());
+    }
     channel_->RegisterReceive(peer_id_,
          boost::bind(&BgpXmppChannel::ReceiveUpdate, this, _1));
     BGP_LOG_PEER(Event, peer_.get(), SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
@@ -533,6 +647,9 @@ BgpXmppChannel::~BgpXmppChannel() {
         manager_->decrement_deleting_count();
     STLDeleteElements(&defer_q_);
     assert(peer_deleted());
+    assert(!peer_->peer_close()->close_manager()->IsMembershipInUse());
+    assert(routingtable_membership_request_map_.empty());
+    TimerManager::DeleteTimer(end_of_rib_timer_);
     BGP_LOG_PEER(Event, peer_.get(), SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
         BGP_PEER_DIR_NA, "Deleted");
     channel_->UnRegisterReceive(peer_id_);
@@ -591,8 +708,7 @@ void BgpXmppChannel::ASNUpdateCallback(as_t old_asn, as_t old_local_asn) {
 
     RoutingInstanceMgr *instance_mgr = bgp_server_->routing_instance_mgr();
     assert(instance_mgr);
-    RoutingInstance *master =
-        instance_mgr->GetRoutingInstance(BgpConfigManager::kMasterInstance);
+    RoutingInstance *master = instance_mgr->GetDefaultRoutingInstance();
     assert(master);
     BgpTable *rtarget_table = master->GetTable(Address::RTARGET);
     assert(rtarget_table);
@@ -619,8 +735,7 @@ void BgpXmppChannel::IdentifierUpdateCallback(Ip4Address old_identifier) {
 
     RoutingInstanceMgr *instance_mgr = bgp_server_->routing_instance_mgr();
     assert(instance_mgr);
-    RoutingInstance *master =
-        instance_mgr->GetRoutingInstance(BgpConfigManager::kMasterInstance);
+    RoutingInstance *master = instance_mgr->GetDefaultRoutingInstance();
     assert(master);
     BgpTable *rtarget_table = master->GetTable(Address::RTARGET);
     assert(rtarget_table);
@@ -638,6 +753,10 @@ void BgpXmppChannel::IdentifierUpdateCallback(Ip4Address old_identifier) {
         RTargetRouteOp(rtarget_table, bgp_server_->local_autonomous_system(),
                        it->first, attr, true);
     }
+}
+
+size_t BgpXmppChannel::GetMembershipRequestQueueSize() const {
+    return routingtable_membership_request_map_.size();
 }
 
 void
@@ -702,8 +821,7 @@ void BgpXmppChannel::RoutingInstanceCallback(string vrf_name, int op) {
 
         // Prepare for route add to rtarget table
         // get rtarget_table and locate the attr
-        RoutingInstance *master =
-            instance_mgr->GetRoutingInstance(BgpConfigManager::kMasterInstance);
+        RoutingInstance *master = instance_mgr->GetDefaultRoutingInstance();
         assert(master);
         BgpTable *rtarget_table = master->GetTable(Address::RTARGET);
         assert(rtarget_table);
@@ -808,7 +926,7 @@ bool BgpXmppChannel::GetMembershipInfo(BgpTable *table,
         return true;
     } else {
         *req_type = NONE;
-        PeerRibMembershipManager *mgr = bgp_server_->membership_mgr();
+        BgpMembershipManager *mgr = bgp_server_->membership_mgr();
         mgr->GetRegistrationInfo(peer_.get(), table,
                                  instance_id, subscription_gen_id);
         return false;
@@ -1638,9 +1756,19 @@ bool BgpXmppChannel::ProcessEnetItem(string vrf_name,
                 if (first_nh) {
                     ext.communities.push_back(
                         tun_encap.GetExtCommunityValue());
+                    if (tun_encap.tunnel_encap() == TunnelEncapType::GRE) {
+                        TunnelEncap alt_tun_encap(TunnelEncapType::MPLS_O_GRE);
+                        ext.communities.push_back(
+                            alt_tun_encap.GetExtCommunityValue());
+                    }
                 }
                 nexthop.tunnel_encapsulations_.push_back(
                     tun_encap.GetExtCommunity());
+                if (tun_encap.tunnel_encap() == TunnelEncapType::GRE) {
+                    TunnelEncap alt_tun_encap(TunnelEncapType::MPLS_O_GRE);
+                    nexthop.tunnel_encapsulations_.push_back(
+                        alt_tun_encap.GetExtCommunity());
+                }
             }
 
             // Mark the path as infeasible if all tunnel encaps published
@@ -1769,7 +1897,7 @@ void BgpXmppChannel::DequeueRequest(const string &table_name,
         return;
     }
 
-    PeerRibMembershipManager *mgr = bgp_server_->membership_mgr();
+    BgpMembershipManager *mgr = bgp_server_->membership_mgr();
     if (mgr) {
         int instance_id = -1;
         uint64_t subscription_gen_id = 0;
@@ -1791,32 +1919,85 @@ void BgpXmppChannel::DequeueRequest(const string &table_name,
 }
 
 bool BgpXmppChannel::ResumeClose() {
-    peer_->Close();
+    peer_->Close(false);
     return true;
 }
 
-void BgpXmppChannel::RegisterTable(BgpTable *table, int instance_id) {
-    PeerRibMembershipManager *mgr = bgp_server_->membership_mgr();
+void BgpXmppChannel::RegisterTable(int line, BgpTable *table, int instance_id) {
+    // Reset EndOfRib timer as membership registration is in progress.
+    if (end_of_rib_timer_->running())
+        StartEndOfRibTimer();
+
+    // Defer if Membership manager is in use (by close manager).
+    if (membership_unavailable_) {
+        BGP_LOG_PEER_TABLE(Peer(), SandeshLevel::SYS_DEBUG,
+                           BGP_LOG_FLAG_ALL, table, "RegisterTable deferred "
+                           "from :" << line);
+        return;
+    }
+
+    BgpMembershipManager *mgr = bgp_server_->membership_mgr();
     BGP_LOG_PEER(Membership, Peer(), SandeshLevel::SYS_DEBUG,
                  BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                  "Subscribe to table " << table->name() <<
                  " with id " << instance_id);
-    mgr->Register(peer_.get(), table, bgp_policy_, instance_id,
-        boost::bind(&BgpXmppChannel::MembershipRequestCallback, this, _1, _2));
+    mgr->Register(peer_.get(), table, bgp_policy_, instance_id);
     channel_stats_.table_subscribe++;
 }
 
-void BgpXmppChannel::UnregisterTable(BgpTable *table) {
-    PeerRibMembershipManager *mgr = bgp_server_->membership_mgr();
+void BgpXmppChannel::UnregisterTable(int line, BgpTable *table) {
+    // Reset EndOfRib timer as membership registration is in progress.
+    if (end_of_rib_timer_->running())
+        StartEndOfRibTimer();
+
+    // Defer if Membership manager is in use (by close manager).
+    if (membership_unavailable_) {
+        BGP_LOG_PEER_TABLE(Peer(), SandeshLevel::SYS_DEBUG,
+                           BGP_LOG_FLAG_ALL, table, "UnregisterTable deferred "
+                           "from :" << line);
+        return;
+    }
+
+    BgpMembershipManager *mgr = bgp_server_->membership_mgr();
     BGP_LOG_PEER(Membership, Peer(), SandeshLevel::SYS_DEBUG,
                  BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                  "Unsubscribe to table " << table->name());
-    mgr->Unregister(peer_.get(), table,
-        boost::bind(&BgpXmppChannel::MembershipRequestCallback, this, _1, _2));
+    mgr->Unregister(peer_.get(), table);
     channel_stats_.table_unsubscribe++;
 }
 
+#define RegisterTable(table, id) RegisterTable(__LINE__, table, id)
+#define UnregisterTable(table) UnregisterTable(__LINE__, table)
+
+// Process all pending membership requests of various tables.
+//
+// This must be done before opening gate for normal register and
+// unregister requessts. Hence membership_unavailable_ state is
+// maintained with the BgpXmppChannel object.
+void BgpXmppChannel::ProcessPendingSubscriptions() {
+    membership_unavailable_ = false;
+    assert(!peer_close_->close_manager()->IsMembershipInUse());
+    BOOST_FOREACH(RoutingTableMembershipRequestMap::value_type &i,
+                  routingtable_membership_request_map_) {
+        BgpTable *table = static_cast<BgpTable *>(
+            bgp_server_->database()->FindTable(i.first));
+        MembershipRequestState state = i.second;
+        if (state.current_req == SUBSCRIBE) {
+            RegisterTable(table, state.instance_id);
+        } else {
+            assert(state.current_req == UNSUBSCRIBE);
+            UnregisterTable(table);
+        }
+    }
+}
+
 bool BgpXmppChannel::MembershipResponseHandler(string table_name) {
+    if (peer_close_->close_manager()->IsMembershipInUse()) {
+        membership_unavailable_ = true;
+        Peer()->peer_close()->close_manager()->MembershipRequestCallback();
+        return true;
+    }
+
     RoutingTableMembershipRequestMap::iterator loc =
         routingtable_membership_request_map_.find(table_name);
     if (loc == routingtable_membership_request_map_.end()) {
@@ -1842,22 +2023,32 @@ bool BgpXmppChannel::MembershipResponseHandler(string table_name) {
 
     if (defer_peer_close_) {
         routingtable_membership_request_map_.erase(loc);
-        if (routingtable_membership_request_map_.size()) {
+        if (routingtable_membership_request_map_.size())
             return true;
-        }
         defer_peer_close_ = false;
         ResumeClose();
-        return true;
+    } else {
+        ProcessMembershipResponse(table_name, loc);
     }
 
+    // If Close manager is waiting to use membership, try now.
+    if (peer_close_->close_manager()->IsMembershipInWait())
+        peer_close_->close_manager()->MembershipRequest();
+
+    return true;
+}
+
+bool BgpXmppChannel::ProcessMembershipResponse(string table_name,
+        RoutingTableMembershipRequestMap::iterator loc) {
     BgpTable *table = static_cast<BgpTable *>
         (bgp_server_->database()->FindTable(table_name));
     if (!table) {
         routingtable_membership_request_map_.erase(loc);
         return true;
     }
+    BgpMembershipManager *mgr = bgp_server_->membership_mgr();
+    MembershipRequestState state = loc->second;
 
-    PeerRibMembershipManager *mgr = bgp_server_->membership_mgr();
     if ((state.current_req == UNSUBSCRIBE) &&
         (state.pending_req == SUBSCRIBE)) {
         // Process pending subscribe now that unsubscribe has completed.
@@ -1875,7 +2066,7 @@ bool BgpXmppChannel::MembershipResponseHandler(string table_name) {
     routingtable_membership_request_map_.erase(loc);
 
     string vrf_name = table->routing_instance()->name();
-    VrfTableName vrf_n_table = make_pair(vrf_name, table_name);
+    VrfTableName vrf_n_table = make_pair(vrf_name, table->name());
 
     if (state.pending_req == UNSUBSCRIBE) {
         if (vrf_membership_request_map_.find(vrf_name) ==
@@ -1884,16 +2075,13 @@ bool BgpXmppChannel::MembershipResponseHandler(string table_name) {
         }
         return true;
     } else if (state.pending_req == SUBSCRIBE) {
-        IPeerRib *rib = mgr->IPeerRibFind(peer_.get(), table);
-        if (rib) {
-            rib->set_instance_id(state.instance_id);
-            rib->set_subscription_gen_id(manager_->get_subscription_gen_id());
-        }
+        mgr->SetRegistrationInfo(peer_.get(), table, state.instance_id,
+            manager_->get_subscription_gen_id());
     }
 
     for (DeferQ::iterator it = defer_q_.find(vrf_n_table);
-         it != defer_q_.end() && it->first.second == table_name; ++it) {
-        DequeueRequest(table_name, it->second);
+         it != defer_q_.end() && it->first.second == table->name(); ++it) {
+        DequeueRequest(table->name(), it->second);
     }
 
     // Erase all elements for the table
@@ -1901,7 +2089,7 @@ bool BgpXmppChannel::MembershipResponseHandler(string table_name) {
     return true;
 }
 
-void BgpXmppChannel::MembershipRequestCallback(IPeer *ipeer, BgpTable *table) {
+void BgpXmppChannel::MembershipRequestCallback(BgpTable *table) {
     membership_response_worker_.Enqueue(table->name());
 }
 
@@ -2001,24 +2189,69 @@ void BgpXmppChannel::FlushDeferQ(string vrf_name) {
     }
 }
 
-// Mark all current subscriptions as 'stale'.
+void BgpXmppChannel::UpdateRouteTargetRouteFlag(
+    const SubscriptionState *sub_state, bool llgr) {
+    RoutingInstanceMgr *instance_mgr = bgp_server_->routing_instance_mgr();
+    RoutingInstance *master = instance_mgr->GetDefaultRoutingInstance();
+    assert(master);
+    BgpTable *rtarget_table = master->GetTable(Address::RTARGET);
+    BOOST_FOREACH(RouteTarget rtarget, sub_state->targets) {
+        RTargetPrefix rt_prefix(bgp_server_->local_autonomous_system(),
+                                rtarget);
+        const RTargetTable::RequestKey key(rt_prefix, Peer());
+        RTargetRoute *rt = static_cast<RTargetRoute *>(
+                               rtarget_table->Find(&key));
+        assert(rt);
+        BgpPath *path = rt->FindPath(BgpPath::BGP_XMPP, Peer(),
+                                     bgp_server_->bgp_identifier());
+        assert(path);
+
+        // Set Stale or LlgrStale state as requested.
+        if (!llgr) {
+            path->SetStale();
+        } else {
+            assert(path->IsStale());
+            path->SetLlgrStale();
+        }
+    }
+}
+
+// Mark all current subscriptions as 'stale'. This is called when peer close
+// process is initiated by BgpXmppChannel via PeerCloseManager.
 void BgpXmppChannel::StaleCurrentSubscriptions() {
+    CHECK_CONCURRENCY("xmpp::StateMachine");
     BOOST_FOREACH(SubscribedRoutingInstanceList::value_type &entry,
                   routing_instances_) {
         entry.second.SetStale();
+        UpdateRouteTargetRouteFlag(&entry.second, false);
+    }
+}
+
+// Mark all current subscriptions as 'llgr_stale'.
+void BgpXmppChannel::LlgrStaleCurrentSubscriptions() {
+    CHECK_CONCURRENCY("xmpp::StateMachine");
+    BOOST_FOREACH(SubscribedRoutingInstanceList::value_type &entry,
+                  routing_instances_) {
+        assert(entry.second.IsStale());
+        UpdateRouteTargetRouteFlag(&entry.second, true);
     }
 }
 
 // Sweep all current subscriptions which are still marked as 'stale'.
 void BgpXmppChannel::SweepCurrentSubscriptions() {
+    CHECK_CONCURRENCY("xmpp::StateMachine");
     for (SubscribedRoutingInstanceList::iterator i = routing_instances_.begin();
             i != routing_instances_.end();) {
         if (i->second.IsStale()) {
             string name = i->first->name();
 
-            // Incrementor the iterator first as we expect the entry to be
+            // Increment the iterator first as we expect the entry to be
             // soon removed.
             i++;
+            BGP_LOG_PEER(Membership, Peer(), SandeshLevel::SYS_DEBUG,
+                         BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
+                         "Instance subscription " << name <<
+                         " is still stale and hence unsubscribed");
             ProcessSubscriptionRequest(name, NULL, false);
         } else {
             i++;
@@ -2027,16 +2260,35 @@ void BgpXmppChannel::SweepCurrentSubscriptions() {
 }
 
 // Clear staled subscription state as new subscription has been received.
-void BgpXmppChannel::ClearStaledSubscription(SubscriptionState &sub_state) {
-    sub_state.ClearStale();
+void BgpXmppChannel::ClearStaledSubscription(BgpTable *rtarget_table,
+        RoutingInstance *rt_instance, BgpAttrPtr attr,
+        SubscriptionState *sub_state) {
+    if (!sub_state->IsStale())
+        return;
+
+    BGP_LOG_PEER(Membership, Peer(), SandeshLevel::SYS_DEBUG,
+                 BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
+                 "Instance subscription " << rt_instance->name() <<
+                 " stale flag is cleared");
+    sub_state->ClearStale();
+
+    // Update route targets to clear STALE flag.
+    BOOST_FOREACH(RouteTarget rtarget, sub_state->targets) {
+        PublishedRTargetRoutes::iterator rt_loc = rtarget_routes_.find(rtarget);
+        assert(rt_loc != rtarget_routes_.end());
+
+        // Send rtarget route ADD
+        RTargetRouteOp(rtarget_table,
+                       bgp_server_->local_autonomous_system(),
+                       rtarget, attr, true);
+    }
 }
 
 void BgpXmppChannel::PublishRTargetRoute(RoutingInstance *rt_instance,
     bool add_change, int index) {
     // Add rtarget route for import route target of the routing instance.
     RoutingInstanceMgr *instance_mgr = bgp_server_->routing_instance_mgr();
-    RoutingInstance *master =
-        instance_mgr->GetRoutingInstance(BgpConfigManager::kMasterInstance);
+    RoutingInstance *master = instance_mgr->GetDefaultRoutingInstance();
     assert(master);
     BgpTable *rtarget_table = master->GetTable(Address::RTARGET);
     assert(rtarget_table);
@@ -2058,10 +2310,11 @@ void BgpXmppChannel::PublishRTargetRoute(RoutingInstance *rt_instance,
                   (rt_instance, state));
         it = ret.first;
 
-        // During GR, we expect duplicate subscriptionr requests. Clear the
-        // stale state, as agent did re-subscribe after restart.
+        // During GR, we expect duplicate subscription requests. Clear stale
+        // state, as agent did re-subscribe after restart.
         if (!ret.second) {
-            ClearStaledSubscription((*(ret.first)).second);
+            ClearStaledSubscription(rtarget_table, rt_instance, attr,
+                                    &it->second);
             return;
         }
     } else {
@@ -2092,10 +2345,10 @@ void BgpXmppChannel::ProcessDeferredSubscribeRequest(RoutingInstance *instance,
         if (table->IsVpnTable() || table->family() == Address::RTARGET)
             continue;
 
-        RegisterTable(table, instance_id);
         MembershipRequestState state(SUBSCRIBE, instance_id);
         routingtable_membership_request_map_.insert(
             make_pair(table->name(), state));
+        RegisterTable(table, instance_id);
     }
 }
 
@@ -2272,6 +2525,37 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
     }
 }
 
+void BgpXmppChannel::ReceiveEndOfRIB(Address::Family family) {
+    BGP_LOG_PEER(Message, Peer(), SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
+                 BGP_PEER_DIR_IN, "EndOfRib marker family " <<
+                                  Address::FamilyToString(family));
+    end_of_rib_timer_->Cancel();
+    peer_close_->close_manager()->ProcessEORMarkerReceived(family);
+}
+
+void BgpXmppChannel::EndOfRibTimerErrorHandler(string error_name,
+                                               string error_message) {
+    BGP_LOG_PEER(Timer, Peer(), SandeshLevel::SYS_CRIT, BGP_LOG_FLAG_ALL,
+                 BGP_PEER_DIR_NA,
+                 "Timer error: " << error_name << " " << error_message);
+}
+
+bool BgpXmppChannel::EndOfRibTimerExpired() {
+    ReceiveEndOfRIB(Address::UNSPEC);
+    return false;
+}
+
+void BgpXmppChannel::StartEndOfRibTimer() {
+    uint32_t timeout = manager() && manager()->xmpp_server() ?
+                           manager()->xmpp_server()->GetEndOfRibReceiveTime() :
+                           kEndOfRibTime;
+
+    end_of_rib_timer_->Cancel();
+    end_of_rib_timer_->Start(timeout * 1000,
+        boost::bind(&BgpXmppChannel::EndOfRibTimerExpired, this),
+        boost::bind(&BgpXmppChannel::EndOfRibTimerErrorHandler, this, _1, _2));
+}
+
 void BgpXmppChannel::ReceiveUpdate(const XmppStanza::XmppMessage *msg) {
     CHECK_CONCURRENCY("xmpp::StateMachine");
 
@@ -2300,8 +2584,7 @@ void BgpXmppChannel::ReceiveUpdate(const XmppStanza::XmppMessage *msg) {
 
                 // Empty items-list can be considered as EOR Marker for all afis
                 if (item == 0) {
-                    peer_close_->close_manager()->ProcessEORMarkerReceived(
-                            Address::UNSPEC);
+                    ReceiveEndOfRIB(Address::UNSPEC);
                     return;
                 }
                 for (; item; item = item.next_sibling()) {
@@ -2340,9 +2623,7 @@ bool BgpXmppChannelManager::DeleteExecutor(BgpXmppChannel *channel) {
     return true;
 }
 
-
 // BgpXmppChannelManager routines.
-
 BgpXmppChannelManager::BgpXmppChannelManager(XmppServer *xmpp_server,
                                              BgpServer *server)
     : xmpp_server_(xmpp_server),
@@ -2351,10 +2632,13 @@ BgpXmppChannelManager::BgpXmppChannelManager(XmppServer *xmpp_server,
           boost::bind(&BgpXmppChannelManager::DeleteExecutor, this, _1)),
       id_(-1),
       asn_listener_id_(-1),
-      identifier_listener_id_(-1),
-      deleting_count_(0) {
+      identifier_listener_id_(-1) {
     // Initialize the gen id counter
     subscription_gen_id_ = 1;
+    deleting_count_ = 0;
+
+    if (xmpp_server)
+        xmpp_server->CreateConfigUpdater(server->config_manager());
     queue_.SetEntryCallback(
             boost::bind(&BgpXmppChannelManager::IsReadyForDeletion, this));
     if (xmpp_server) {
@@ -2409,6 +2693,7 @@ void BgpXmppChannelManager::AdminDownCallback() {
 
 void BgpXmppChannelManager::ASNUpdateCallback(as_t old_asn,
     as_t old_local_asn) {
+    CHECK_CONCURRENCY("bgp::Config");
     BOOST_FOREACH(XmppChannelMap::value_type &i, channel_map_) {
         i.second->ASNUpdateCallback(old_asn, old_local_asn);
     }
@@ -2419,19 +2704,30 @@ void BgpXmppChannelManager::ASNUpdateCallback(as_t old_asn,
 
 void BgpXmppChannelManager::IdentifierUpdateCallback(
     Ip4Address old_identifier) {
+    CHECK_CONCURRENCY("bgp::Config");
     BOOST_FOREACH(XmppChannelMap::value_type &i, channel_map_) {
         i.second->IdentifierUpdateCallback(old_identifier);
     }
 }
 
 void BgpXmppChannelManager::RoutingInstanceCallback(string vrf_name, int op) {
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper");
     BOOST_FOREACH(XmppChannelMap::value_type &i, channel_map_) {
         i.second->RoutingInstanceCallback(vrf_name, op);
     }
 }
 
 void BgpXmppChannelManager::VisitChannels(BgpXmppChannelManager::VisitorFn fn) {
+    tbb::mutex::scoped_lock lock(mutex_);
     BOOST_FOREACH(XmppChannelMap::value_type &i, channel_map_) {
+        fn(i.second);
+    }
+}
+
+void BgpXmppChannelManager::VisitChannels(BgpXmppChannelManager::VisitorFn fn)
+        const {
+    tbb::mutex::scoped_lock lock(mutex_);
+    BOOST_FOREACH(const XmppChannelMap::value_type &i, channel_map_) {
         fn(i.second);
     }
 }
@@ -2454,11 +2750,15 @@ BgpXmppChannel *BgpXmppChannelManager::FindChannel(
 }
 
 void BgpXmppChannelManager::RemoveChannel(XmppChannel *channel) {
+    if (channel->connection() && !channel->connection()->IsActiveChannel()) {
+        CHECK_CONCURRENCY("bgp::Config");
+    }
     channel_map_.erase(channel);
     channel_name_map_.erase(channel->ToString());
 }
 
 BgpXmppChannel *BgpXmppChannelManager::CreateChannel(XmppChannel *channel) {
+    CHECK_CONCURRENCY("xmpp::StateMachine");
     BgpXmppChannel *ch = new BgpXmppChannel(channel, bgp_server_, this);
 
     return ch;
@@ -2466,8 +2766,10 @@ BgpXmppChannel *BgpXmppChannelManager::CreateChannel(XmppChannel *channel) {
 
 void BgpXmppChannelManager::XmppHandleChannelEvent(XmppChannel *channel,
                                                    xmps::PeerState state) {
-    XmppChannelMap::iterator it = channel_map_.find(channel);
+    tbb::mutex::scoped_lock lock(mutex_);
 
+    bool created = false;
+    XmppChannelMap::iterator it = channel_map_.find(channel);
     BgpXmppChannel *bgp_xmpp_channel = NULL;
     if (state == xmps::READY) {
         if (it == channel_map_.end()) {
@@ -2493,11 +2795,13 @@ void BgpXmppChannelManager::XmppHandleChannelEvent(XmppChannel *channel,
                              "BGP is administratively down - closing channel");
                 channel->Close();
             }
+            created = true;
         } else {
             bgp_xmpp_channel = (*it).second;
             if (bgp_xmpp_channel->peer_deleted())
                 return;
         }
+        bgp_xmpp_channel->StartEndOfRibTimer();
     } else if (state == xmps::NOT_READY) {
         if (it != channel_map_.end()) {
             bgp_xmpp_channel = (*it).second;
@@ -2513,12 +2817,55 @@ void BgpXmppChannelManager::XmppHandleChannelEvent(XmppChannel *channel,
                     "Peer not found on channel not ready event");
         }
     }
-    if (bgp_xmpp_channel) {
+    if (created) {
         XmppPeerInfoData peer_info;
         peer_info.set_name(bgp_xmpp_channel->Peer()->ToUVEKey());
-        peer_info.set_send_state("not advertising");
+        peer_info.set_send_state("in sync");
         bgp_xmpp_channel->XMPPPeerInfoSend(peer_info);
     }
+}
+
+void BgpXmppChannelManager::FillPeerInfo(const BgpXmppChannel *channel) const {
+    PeerStatsInfo stats;
+    PeerStats::FillPeerDebugStats(channel->Peer()->peer_stats(), &stats);
+
+    XmppPeerInfoData peer_info;
+    peer_info.set_name(channel->Peer()->ToUVEKey());
+    peer_info.set_peer_stats_info(stats);
+    XMPPPeerInfo::Send(peer_info);
+
+    PeerStatsData peer_stats_data;
+    peer_stats_data.set_name(channel->Peer()->ToUVEKey());
+    PeerStats::FillPeerUpdateStats(channel->Peer()->peer_stats(),
+                                   &peer_stats_data);
+    PeerStatsUve::Send(peer_stats_data, "ObjectXmppPeerInfo");
+}
+
+bool BgpXmppChannelManager::CollectStats(BgpRouterState *state, bool first)
+         const {
+    CHECK_CONCURRENCY("bgp::Uve");
+
+    VisitChannels(boost::bind(&BgpXmppChannelManager::FillPeerInfo, this, _1));
+    bool change = false;
+    uint32_t num_xmpp = count();
+    if (first || num_xmpp != state->get_num_xmpp_peer()) {
+        state->set_num_xmpp_peer(num_xmpp);
+        change = true;
+    }
+
+    uint32_t num_up_xmpp = NumUpPeer();
+    if (first || num_up_xmpp != state->get_num_up_xmpp_peer()) {
+        state->set_num_up_xmpp_peer(num_up_xmpp);
+        change = true;
+    }
+
+    uint32_t num_deleting_xmpp = deleting_count();
+    if (first || num_deleting_xmpp != state->get_num_deleting_xmpp_peer()) {
+        state->set_num_deleting_xmpp_peer(num_deleting_xmpp);
+        change = true;
+    }
+
+    return change;
 }
 
 void BgpXmppChannel::Close() {
@@ -2531,7 +2878,7 @@ void BgpXmppChannel::Close() {
         defer_peer_close_ = true;
         return;
     }
-    peer_->Close();
+    peer_->Close(false);
 }
 
 //

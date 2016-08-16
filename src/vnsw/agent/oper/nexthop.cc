@@ -36,6 +36,15 @@ TunnelType::Type TunnelType::ComputeType(TunnelType::TypeBmap bmap) {
         }
     }
 
+    //There is no match found in priority list of config,
+    //pick the advertised Tunnel type according to the order.
+    if (bmap & (1 <<  MPLS_GRE))
+        return MPLS_GRE;
+    else if (bmap & (1 << MPLS_UDP))
+        return MPLS_UDP;
+    else if (bmap & (1 << VXLAN))
+        return VXLAN;
+
     return DefaultType();
 }
 
@@ -205,6 +214,19 @@ void NextHop::FillObjectLogMac(const unsigned char *m,
              m[0], m[1], m[2], m[3], m[4], m[5]);
     string mac(mstr);
     info.set_mac(mac);
+}
+
+bool NextHop::NexthopToInterfacePolicy() const {
+    if (GetType() == NextHop::INTERFACE) {
+        const InterfaceNH *intf_nh =
+            static_cast<const InterfaceNH *>(this);
+        const VmInterface *intf = dynamic_cast<const VmInterface *>
+            (intf_nh->GetInterface());
+        if (intf && intf->policy_enabled()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::auto_ptr<DBEntry> NextHopTable::AllocEntry(const DBRequestKey *k) const {
@@ -403,7 +425,7 @@ NextHop *InterfaceNHKey::AllocEntry() const {
         //in DB state set on deleted interface entry
         intf = NULL;
     }
-    return new InterfaceNH(intf, policy_, flags_);
+    return new InterfaceNH(intf, policy_, flags_, dmac_);
 }
 
 bool InterfaceNH::CanAdd() const {
@@ -426,14 +448,23 @@ bool InterfaceNH::NextHopIsLess(const DBEntry &rhs) const {
         return policy_ < a.policy_;
     }
 
-    return flags_ < a.flags_;
+    if (flags_ != a.flags_) {
+        return flags_ < a.flags_;
+    }
+
+    if (flags_ == InterfaceNHFlags::INET4  ||
+        flags_ == InterfaceNHFlags::INET6) {
+        return dmac_ < a.dmac_;
+    }
+
+    return false;
 }
 
 InterfaceNH::KeyPtr InterfaceNH::GetDBRequestKey() const {
     NextHopKey *key =
         new InterfaceNHKey(static_cast<InterfaceKey *>(
                           interface_->GetDBRequestKey().release()),
-                           policy_, flags_);
+                           policy_, flags_, dmac_);
     return DBEntryBase::KeyPtr(key);
 }
 
@@ -443,6 +474,7 @@ void InterfaceNH::SetKey(const DBRequestKey *k) {
     NextHop::SetKey(k);
     interface_ = NextHopTable::GetInstance()->FindInterface(*key->intf_key_.get());
     flags_ = key->flags_;
+    dmac_ = key->dmac_;
 }
 
 bool InterfaceNH::Change(const DBRequest *req) {
@@ -456,12 +488,10 @@ bool InterfaceNH::Change(const DBRequest *req) {
         vrf_ = vrf;
         ret = true;
     }
-    if (dmac_.CompareTo(data->dmac_) != 0) {
-        dmac_ = data->dmac_;
+
+    if (relaxed_policy_ != data->relaxed_policy_) {
+        relaxed_policy_ = data->relaxed_policy_;
         ret = true;
-    }
-    if (is_multicastNH()) {
-        dmac_ = MacAddress::BroadcastMac();
     }
 
     return ret;
@@ -476,8 +506,8 @@ static void AddInterfaceNH(const uuid &intf_uuid, const MacAddress &dmac,
     DBRequest req(DBRequest::DB_ENTRY_ADD_CHANGE);
     req.key.reset(new InterfaceNHKey
                   (new VmInterfaceKey(AgentKey::ADD_DEL_CHANGE, intf_uuid, ""),
-                   policy, flags));
-    req.data.reset(new InterfaceNHData(vrf_name, dmac));
+                   policy, flags, dmac));
+    req.data.reset(new InterfaceNHData(vrf_name));
     Agent::GetInstance()->nexthop_table()->Process(req);
 }
 
@@ -490,9 +520,10 @@ void InterfaceNH::CreateL3VmInterfaceNH(const uuid &intf_uuid,
     AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::INET4, false, vrf_name);
 }
 
-void InterfaceNH::DeleteL3InterfaceNH(const uuid &intf_uuid) {
-    DeleteNH(intf_uuid, false, InterfaceNHFlags::INET4);
-    DeleteNH(intf_uuid, true, InterfaceNHFlags::INET4);
+void InterfaceNH::DeleteL3InterfaceNH(const uuid &intf_uuid,
+                                      const MacAddress &mac) {
+    DeleteNH(intf_uuid, false, InterfaceNHFlags::INET4, mac);
+    DeleteNH(intf_uuid, true, InterfaceNHFlags::INET4, mac);
 }
 
 void InterfaceNH::CreateL2VmInterfaceNH(const uuid &intf_uuid,
@@ -502,9 +533,10 @@ void InterfaceNH::CreateL2VmInterfaceNH(const uuid &intf_uuid,
     AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::BRIDGE, true, vrf_name);
 }
 
-void InterfaceNH::DeleteL2InterfaceNH(const uuid &intf_uuid) {
-    DeleteNH(intf_uuid, false, InterfaceNHFlags::BRIDGE);
-    DeleteNH(intf_uuid, true, InterfaceNHFlags::BRIDGE);
+void InterfaceNH::DeleteL2InterfaceNH(const uuid &intf_uuid,
+                                      const MacAddress &dmac) {
+    DeleteNH(intf_uuid, false, InterfaceNHFlags::BRIDGE, dmac);
+    DeleteNH(intf_uuid, true, InterfaceNHFlags::BRIDGE, dmac);
 }
 
 void InterfaceNH::CreateMulticastVmInterfaceNH(const uuid &intf_uuid,
@@ -517,94 +549,112 @@ void InterfaceNH::CreateMulticastVmInterfaceNH(const uuid &intf_uuid,
 
 void InterfaceNH::DeleteMulticastVmInterfaceNH(const uuid &intf_uuid) {
     DeleteNH(intf_uuid, false, (InterfaceNHFlags::MULTICAST |
-                                InterfaceNHFlags::INET4));
+                                InterfaceNHFlags::INET4),
+                                MacAddress::BroadcastMac());
 }
 
 void InterfaceNH::DeleteNH(const uuid &intf_uuid, bool policy,
-                          uint8_t flags) {
+                          uint8_t flags, const MacAddress &mac) {
     DBRequest req(DBRequest::DB_ENTRY_DELETE);
     req.key.reset(new InterfaceNHKey
                   (new VmInterfaceKey(AgentKey::ADD_DEL_CHANGE, intf_uuid, ""),
-                   policy, flags));
+                   policy, flags, mac));
     req.data.reset(NULL);
     NextHopTable::GetInstance()->Process(req);
 }
 
 // Delete the 2 InterfaceNH. One with policy another without policy
-void InterfaceNH::DeleteVmInterfaceNHReq(const uuid &intf_uuid) {
-    DeleteNH(intf_uuid, false, InterfaceNHFlags::BRIDGE);
-    DeleteNH(intf_uuid, true, InterfaceNHFlags::BRIDGE);
-    DeleteNH(intf_uuid, false, InterfaceNHFlags::INET4);
-    DeleteNH(intf_uuid, true, InterfaceNHFlags::INET4);
-    DeleteNH(intf_uuid, false, InterfaceNHFlags::MULTICAST);
+void InterfaceNH::DeleteVmInterfaceNHReq(const uuid &intf_uuid,
+                                         const MacAddress &mac) {
+    DeleteNH(intf_uuid, false, InterfaceNHFlags::BRIDGE, mac);
+    DeleteNH(intf_uuid, true, InterfaceNHFlags::BRIDGE, mac);
+    DeleteNH(intf_uuid, false, InterfaceNHFlags::INET4, mac);
+    DeleteNH(intf_uuid, true, InterfaceNHFlags::INET4, mac);
+    DeleteNH(intf_uuid, false, InterfaceNHFlags::MULTICAST,
+             MacAddress::BroadcastMac());
 }
 
 void InterfaceNH::CreateInetInterfaceNextHop(const string &ifname,
-                                             const string &vrf_name) {
+                                             const string &vrf_name,
+                                             const MacAddress &mac) {
     DBRequest req;
     req.oper = DBRequest::DB_ENTRY_ADD_CHANGE;
 
     NextHopKey *key = new InterfaceNHKey(new InetInterfaceKey(ifname),
-                                         false, InterfaceNHFlags::INET4);
+                                         false, InterfaceNHFlags::INET4,
+                                         mac);
     req.key.reset(key);
 
-    MacAddress mac;
-    mac.last_octet() = 1;
-    InterfaceNHData *data = new InterfaceNHData(vrf_name, mac);
+    InterfaceNHData *data = new InterfaceNHData(vrf_name);
     req.data.reset(data);
     NextHopTable::GetInstance()->Process(req);
 }
 
-void InterfaceNH::DeleteInetInterfaceNextHop(const string &ifname) {
+void InterfaceNH::DeleteInetInterfaceNextHop(const string &ifname,
+                                             const MacAddress &mac) {
     DBRequest req;
     req.oper = DBRequest::DB_ENTRY_DELETE;
 
     NextHopKey *key = new InterfaceNHKey
         (new InetInterfaceKey(ifname), false,
-         InterfaceNHFlags::INET4);
+         InterfaceNHFlags::INET4, mac);
     req.key.reset(key);
 
     req.data.reset(NULL);
     NextHopTable::GetInstance()->Process(req);
 }
 
-void InterfaceNH::CreatePacketInterfaceNh(const string &ifname) {
+void InterfaceNH::CreatePacketInterfaceNh(Agent *agent, const string &ifname) {
     DBRequest req(DBRequest::DB_ENTRY_ADD_CHANGE);
-    MacAddress mac;
-    mac.last_octet() = 1;
+
+    // create nexthop without policy
     req.key.reset(new InterfaceNHKey(new PacketInterfaceKey(nil_uuid(), ifname),
-                                     false, InterfaceNHFlags::INET4));
-    req.data.reset(new InterfaceNHData(Agent::GetInstance()->fabric_vrf_name(),
-                                       mac));
-    NextHopTable::GetInstance()->Process(req);
+                                     false, InterfaceNHFlags::INET4,
+                                     agent->pkt_interface_mac()));
+    req.data.reset(new InterfaceNHData(""));
+    agent->nexthop_table()->Process(req);
+
+    // create nexthop with relaxed policy
+    req.key.reset(new InterfaceNHKey(new PacketInterfaceKey(nil_uuid(), ifname),
+                                     true, InterfaceNHFlags::INET4,
+                                     agent->pkt_interface_mac()));
+    req.data.reset(new InterfaceNHData("", true));
+    agent->nexthop_table()->Process(req);
 }
 
-void InterfaceNH::DeleteHostPortReq(const string &ifname) {
+void InterfaceNH::DeleteHostPortReq(Agent *agent, const string &ifname) {
     DBRequest req;
     req.oper = DBRequest::DB_ENTRY_DELETE;
 
-    NextHopKey *key = new InterfaceNHKey(new PacketInterfaceKey(nil_uuid(), ifname),
-                                         false, InterfaceNHFlags::INET4);
-    req.key.reset(key);
-
+    // delete NH without policy
+    req.key.reset(new InterfaceNHKey(new PacketInterfaceKey(nil_uuid(), ifname),
+                                     false, InterfaceNHFlags::INET4,
+                                     agent->pkt_interface_mac()));
     req.data.reset(NULL);
-    NextHopTable::GetInstance()->Enqueue(&req);
+    agent->nexthop_table()->Enqueue(&req);
+
+    // delete NH with policy
+    req.key.reset(new InterfaceNHKey(new PacketInterfaceKey(nil_uuid(), ifname),
+                                     true, InterfaceNHFlags::INET4,
+                                     agent->pkt_interface_mac()));
+    req.data.reset(NULL);
+    agent->nexthop_table()->Enqueue(&req);
 }
 
 void InterfaceNH::CreatePhysicalInterfaceNh(const string &ifname,
                                             const MacAddress &mac) {
     DBRequest req(DBRequest::DB_ENTRY_ADD_CHANGE);
     req.key.reset(new InterfaceNHKey(new PhysicalInterfaceKey(ifname),
-                                     false, InterfaceNHFlags::INET4));
-    req.data.reset(new InterfaceNHData(Agent::GetInstance()->fabric_vrf_name(),
-                                       mac));
+                                     false, InterfaceNHFlags::INET4, mac));
+    req.data.reset(new InterfaceNHData(Agent::GetInstance()->fabric_vrf_name()));
     NextHopTable::GetInstance()->Process(req);
 }
  
-void InterfaceNH::DeletePhysicalInterfaceNh(const string &ifname) {
+void InterfaceNH::DeletePhysicalInterfaceNh(const string &ifname,
+                                            const MacAddress &mac) {
     DBRequest req(DBRequest::DB_ENTRY_DELETE);
     req.key.reset(new InterfaceNHKey(new PhysicalInterfaceKey(ifname),
-                                     false, InterfaceNHFlags::INET4));
+                                     false, InterfaceNHFlags::INET4, mac));
     req.data.reset(NULL);
     NextHopTable::GetInstance()->Process(req);
 }
@@ -1810,29 +1860,90 @@ void CompositeNHKey::erase(ComponentNHKeyPtr nh_key) {
     }
 }
 
-ComponentNHKeyList CompositeNH::AddComponentNHKey(ComponentNHKeyPtr cnh) const {
+bool CompositeNH::UpdateComponentNHKey(uint32_t label, NextHopKey *nh_key,
+    ComponentNHKeyList &component_nh_key_list, bool &comp_nh_policy) const {
+    bool ret = false;
+    comp_nh_policy = false;
+    BOOST_FOREACH(ComponentNHPtr it, component_nh_list_) {
+        if (it.get() == NULL) {
+            ComponentNHKeyPtr dummy_ptr;
+            dummy_ptr.reset();
+            component_nh_key_list.push_back(dummy_ptr);
+            continue;
+        }
+        const ComponentNH *component_nh = it.get();
+        uint32_t new_label = component_nh->label();
+        DBEntryBase::KeyPtr key = component_nh->nh()->GetDBRequestKey();
+        NextHopKey *lhs = static_cast<NextHopKey *>(key.release());
+
+        if (new_label != label && lhs->IsEqual(*nh_key)) {
+            new_label = label;
+            ret = true;
+        }
+        std::auto_ptr<const NextHopKey> nh_key_ptr(lhs);
+        ComponentNHKeyPtr component_nh_key(
+            new ComponentNHKey(new_label, nh_key_ptr));
+        component_nh_key_list.push_back(component_nh_key);
+        if (!comp_nh_policy) {
+            comp_nh_policy = component_nh->nh()->NexthopToInterfacePolicy();
+        }
+    }
+    return ret;
+}
+
+ComponentNHKeyList CompositeNH::AddComponentNHKey(ComponentNHKeyPtr cnh,
+                                                  bool &comp_nh_policy) const {
     Agent *agent = static_cast<NextHopTable *>(get_table())->agent();
     const NextHop *nh = static_cast<const NextHop *>(agent->nexthop_table()->
                                        FindActiveEntry(cnh->nh_key()));
     assert(nh);
 
     ComponentNHKeyList component_nh_key_list = component_nh_key_list_;
-    ComponentNHList::const_iterator it = begin();
-    //Make sure new entry is not already present
-    for (;it != end(); it++) {
-        if((*it) && (*it)->label() == cnh->label() && (*it)->nh() == nh) {
-            //Entry already present, return old component nh key list
-            return component_nh_key_list;
+    int index = 0;
+
+    comp_nh_policy = false;
+    bool made_cnh_list = false;
+    BOOST_FOREACH(ComponentNHPtr it, component_nh_list_) {
+        const ComponentNH *component_nh = it.get();
+        if (component_nh == NULL) {
+            index++;
+            continue;
         }
+        if (component_nh->nh() == nh) {
+            if (component_nh->label() == cnh->label()) {
+                //Entry already present, return old component nh key list
+                comp_nh_policy = PolicyEnabled();
+                return component_nh_key_list;
+            } else {
+                if (nh->GetType() == NextHop::INTERFACE) {
+                    component_nh_key_list[index] = cnh;
+                    made_cnh_list = true;
+                }
+                if (!comp_nh_policy) {
+                    comp_nh_policy = nh->NexthopToInterfacePolicy();
+                }
+            }
+        } else if (!comp_nh_policy) {
+            comp_nh_policy = component_nh->nh()->NexthopToInterfacePolicy();
+        }
+        if (comp_nh_policy && made_cnh_list) {
+            break;
+        }
+        index++;
+    }
+
+    if (made_cnh_list) {
+        return component_nh_key_list;
     }
 
     bool inserted = false;
+    index = 0;
     ComponentNHKeyList::const_iterator key_it = component_nh_key_list.begin();
-    for (;key_it != component_nh_key_list.end(); key_it++) {
+    for (;key_it != component_nh_key_list.end(); key_it++, index++) {
         //If there is a empty slot, in
         //component key list insert the element there.
         if ((*key_it) == NULL) {
-            component_nh_key_list.push_back(cnh);
+            component_nh_key_list[index] = cnh;
             inserted = true;
             break;
         }
@@ -1842,11 +1953,16 @@ ComponentNHKeyList CompositeNH::AddComponentNHKey(ComponentNHKeyPtr cnh) const {
     if (inserted == false) {
         component_nh_key_list.push_back(cnh);
     }
+    comp_nh_policy = PolicyEnabled();
+    if (!comp_nh_policy && (nh->GetType() == NextHop::INTERFACE)) {
+        comp_nh_policy = nh->NexthopToInterfacePolicy();
+    }
     return component_nh_key_list;
 }
 
 ComponentNHKeyList
-CompositeNH::DeleteComponentNHKey(ComponentNHKeyPtr cnh) const {
+CompositeNH::DeleteComponentNHKey(ComponentNHKeyPtr cnh,
+                                  bool &comp_nh_new_policy) const {
     Agent *agent = static_cast<NextHopTable *>(get_table())->agent();
     const NextHop *nh = static_cast<const NextHop *>(agent->nexthop_table()->
                                        FindActiveEntry(cnh->nh_key()));
@@ -1855,12 +1971,31 @@ CompositeNH::DeleteComponentNHKey(ComponentNHKeyPtr cnh) const {
     ComponentNHKeyList component_nh_key_list = component_nh_key_list_;
     ComponentNHKeyPtr component_nh_key;
     ComponentNHList::const_iterator it = begin();
+    comp_nh_new_policy = false;
+    bool removed = false;
     int index = 0;
     for (;it != end(); it++, index++) {
         ComponentNHKeyPtr dummy_ptr;
         dummy_ptr.reset();
         if ((*it) && ((*it)->label() == cnh->label() && (*it)->nh() == nh)) {
             component_nh_key_list[index] = dummy_ptr;
+            removed = true;
+        } else {
+            /* Go through all the component Interface Nexthops of this
+             * CompositeNH to figure out the new policy status of this
+             * CompositeNH. Ignore the component NH being deleted while
+             * iterating. */
+            if ((*it) && (*it)->nh() && !comp_nh_new_policy) {
+                /* If any one of component NH's interface has policy enabled,
+                 * the policy-status of compositeNH is true. So we need to
+                 * look only until we find the first Interface which has
+                 * policy enabled */
+                comp_nh_new_policy = (*it)->nh()->NexthopToInterfacePolicy();
+            }
+        }
+        if (removed && comp_nh_new_policy) {
+            /* No need to iterate further if we done with both deleting key and
+             * figuring out policy-status */
             break;
         }
     }
@@ -1918,7 +2053,7 @@ bool CompositeNHKey::NextHopKeyIsLess(const NextHopKey &rhs) const {
     return false;
 }
 
-void CompositeNHKey::ExpandLocalCompositeNH(Agent *agent) {
+bool CompositeNHKey::ExpandLocalCompositeNH(Agent *agent) {
     uint32_t label = MplsTable::kInvalidLabel;
     //Find local composite ecmp label
     BOOST_FOREACH(ComponentNHKeyPtr component_nh_key,
@@ -1935,32 +2070,46 @@ void CompositeNHKey::ExpandLocalCompositeNH(Agent *agent) {
 
      //No Local composite NH found
     if (label ==  MplsTable::kInvalidLabel) {
-        return;
+        return false;
     }
 
     MplsLabel *mpls = agent->mpls_table()->FindMplsLabel(label);
     if (mpls == NULL) {
-        return;
+        return false;
     }
 
-    DBEntryBase::KeyPtr key = mpls->nexthop()->GetDBRequestKey();
-    NextHopKey *nh_key = static_cast<NextHopKey *>(key.get());
-    assert(nh_key->GetType() == NextHop::COMPOSITE);
-    CompositeNHKey *local_composite_nh_key =
-        static_cast<CompositeNHKey *>(nh_key);
-    //Insert individual entries
-    BOOST_FOREACH(ComponentNHKeyPtr component_nh_key,
-                  local_composite_nh_key->component_nh_key_list()) {
+    const NextHop *mpls_nh = mpls->nexthop();
+    assert(mpls_nh->GetType() == NextHop::COMPOSITE);
+    const CompositeNH *cnh = static_cast<const CompositeNH *>(mpls_nh);
+
+    bool comp_nh_new_policy = false;
+    BOOST_FOREACH(ComponentNHPtr it, cnh->component_nh_list()) {
+        if (it.get() == NULL) {
+            ComponentNHKeyPtr dummy_ptr;
+            dummy_ptr.reset();
+            insert(dummy_ptr);
+            continue;
+        }
+        const ComponentNH *component_nh = it.get();
+        DBEntryBase::KeyPtr key = component_nh->nh()->GetDBRequestKey();
+        NextHopKey *nh_key = static_cast<NextHopKey *>(key.release());
+        std::auto_ptr<const NextHopKey> nh_key_ptr(nh_key);
+        ComponentNHKeyPtr component_nh_key(
+            new ComponentNHKey(component_nh->label(), nh_key_ptr));
         insert(component_nh_key);
+        if (!comp_nh_new_policy) {
+            comp_nh_new_policy = component_nh->nh()->NexthopToInterfacePolicy();
+        }
     }
+    return comp_nh_new_policy;
 }
 
-void CompositeNHKey::Reorder(Agent *agent,
+bool CompositeNHKey::Reorder(Agent *agent,
                              uint32_t label, const NextHop *nh) {
     //Enqueue request to create Tunnel NH
     CreateTunnelNH(agent);
     //First expand local composite NH, if any
-    ExpandLocalCompositeNH(agent);
+    bool policy = ExpandLocalCompositeNH(agent);
     //Order the component NH entries, so that previous position of
     //component NH are maintained.
     //For example, if previous composite NH consisted of A, B and C
@@ -1976,7 +2125,7 @@ void CompositeNHKey::Reorder(Agent *agent,
     //Then new composite NH has to be A, B, C, D in that order, such that
     //A, B, C nexthop retain there position
     if (!nh) {
-        return;
+        return policy;
     }
 
     if (nh->GetType() != NextHop::COMPOSITE) {
@@ -1997,7 +2146,7 @@ void CompositeNHKey::Reorder(Agent *agent,
             insert(component_nh_key);
             insert(first_entry);
         }
-        return;
+        return policy;
     }
 
     CompositeNHKey *composite_nh_key;
@@ -2021,6 +2170,7 @@ void CompositeNHKey::Reorder(Agent *agent,
     }
     //Copy over the list
     component_nh_key_list_ = composite_nh_key->component_nh_key_list();
+    return policy;
 }
 
 ComponentNHKey::ComponentNHKey(int label, Composite::Type type, bool policy,

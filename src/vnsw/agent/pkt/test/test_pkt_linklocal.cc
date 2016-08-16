@@ -24,6 +24,9 @@ struct PortInfo input[] = {
         {"vmi0", 1, vm1_ip, "00:00:00:01:01:01", 1, 1},
         {"vmi1", 2, vm2_ip, "00:00:00:01:01:02", 1, 2},
 };
+IpamInfo ipam_info[] = {
+    {"11.1.1.0", 24, "11.1.1.10"},
+};
 
 typedef enum {
     INGRESS = 0,
@@ -74,7 +77,7 @@ public:
                                intf->GetUuid(), vn_list, label,
                                SecurityGroupList(), CommunityList(), false,
                                PathPreference(), Ip4Address(0),
-                               EcmpLoadBalance());
+                               EcmpLoadBalance(), false);
         client->WaitForIdle();
         EXPECT_TRUE(RouteFind(vrf, addr, 32));
     }
@@ -89,6 +92,7 @@ public:
 
 protected:
     virtual void SetUp() {
+        agent_->flow_stats_manager()->set_delete_short_flow(false);
         Ip4Address rid = Ip4Address::from_string(vhost_ip_addr);
         agent_->set_router_id(rid);
         agent_->set_compute_node_ip(rid);
@@ -96,6 +100,8 @@ protected:
 
         EXPECT_EQ(0U, get_flow_proto()->FlowCount());
         client->Reset();
+        AddIPAM("vn1", ipam_info, 1);
+        client->WaitForIdle();
         CreateVmportEnv(input, 2, 1);
         client->WaitForIdle(5);
 
@@ -137,6 +143,8 @@ protected:
         client->WaitForIdle(3);
         EXPECT_FALSE(VmPortFind(input, 0));
         EXPECT_FALSE(VmPortFind(input, 1));
+        DelIPAM("vn1");
+        client->WaitForIdle();
 
         EXPECT_EQ(3U, agent()->interface_table()->Size());
         EXPECT_EQ(0U, agent()->interface_config_table()->Size());

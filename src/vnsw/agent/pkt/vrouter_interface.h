@@ -46,6 +46,7 @@ public:
         vr_cmd_list_[AGENT_TRAP_FLOW_ACTION_HOLD] = AgentHdr::TRAP_HOLD_ACTION;
         vr_cmd_list_[AGENT_TRAP_TOR_CONTROL_PKT] = AgentHdr::TRAP_TOR_CONTROL_PKT;
         vr_cmd_list_[AGENT_TRAP_FLOW_ACTION_HOLD] = AgentHdr::TRAP_FLOW_ACTION_HOLD;
+        vr_cmd_list_[AGENT_TRAP_ROUTER_ALERT] = AgentHdr::TRAP_ROUTER_ALERT;
         // Init and populate vector for translating command params from vrouter
         // to agent
         vr_cmd_params_list_.insert(vr_cmd_params_list_.begin(), MAX_CMD_PARAMS,
@@ -88,6 +89,7 @@ public:
         hdr->cmd_param_2 = ntohl(vr_agent_hdr->hdr_cmd_param_2);
         hdr->cmd_param_3 = ntohl(vr_agent_hdr->hdr_cmd_param_3);
         hdr->cmd_param_4 = ntohl(vr_agent_hdr->hdr_cmd_param_4);
+        hdr->cmd_param_5 = vr_agent_hdr->hdr_cmd_param_5;
         if (hdr->cmd == AGENT_TRAP_HANDLE_DF) {
             hdr->mtu = ntohl(vr_agent_hdr->hdr_cmd_param);
             hdr->flow_index = ntohl(vr_agent_hdr->hdr_cmd_param_1);

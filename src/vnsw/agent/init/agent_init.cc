@@ -20,6 +20,7 @@
 #include <oper/vm.h>
 #include <oper/interface.h>
 #include <oper/route_common.h>
+#include <oper/agent_profile.h>
 #include <filter/acl.h>
 #include <controller/controller_init.h>
 
@@ -156,6 +157,7 @@ bool AgentInit::InitBase() {
     bool ret = Init();
     agent_->set_init_done(true);
     ConnectToControllerBase();
+
     return ret;
 }
 
@@ -309,17 +311,31 @@ void AgentInit::ConnectToControllerBase() {
 }
 
 void AgentInit::InitDoneBase() {
+    TaskScheduler *scheduler = agent_->task_scheduler();
     // Enable task latency measurements once init is done
-    agent_->task_scheduler()->EnableLatencyThresholds
-        (agent_param_->tbb_exec_delay(), agent_param_->tbb_schedule_delay());
+    scheduler->EnableLatencyThresholds(agent_param_->tbb_exec_delay(),
+                                       agent_param_->tbb_schedule_delay());
     agent_param_->vgw_config_table()->InitDone(agent_.get());
     if (cfg_.get()) {
         cfg_->InitDone();
     }
     // Enable task latency measurements once init is done
-    agent_->task_scheduler()->EnableLatencyThresholds
+    scheduler->EnableLatencyThresholds
         (agent_param_->tbb_exec_delay() * 1000,
          agent_param_->tbb_schedule_delay() * 1000);
+
+    // Flow related tasks are known have greater latency. Add exception
+    // for them
+    uint32_t execute_delay = (20 * 1000);
+    uint32_t schedule_delay = (20 * 1000);
+    scheduler->SetLatencyThreshold(kTaskFlowEvent, execute_delay,
+                                   schedule_delay);
+    scheduler->SetLatencyThreshold(kTaskFlowKSync, execute_delay,
+                                   schedule_delay);
+    scheduler->SetLatencyThreshold(kTaskFlowUpdate, execute_delay,
+                                   schedule_delay);
+    scheduler->SetLatencyThreshold(kTaskFlowStatsCollector, (execute_delay * 2),
+                                   (schedule_delay * 2));
     agent_->InitDone();
     InitDone();
 }
@@ -460,6 +476,17 @@ static bool PktShutdownInternal(AgentInit *init) {
     return true;
 }
 
+void AgentInit::ProfileShutdownBase() {
+    if (agent_->oper_db() && agent_->oper_db()->agent_profile()) {
+        agent_->oper_db()->agent_profile()->Shutdown();
+    }
+}
+
+static bool ProfileShutdownInternal(AgentInit *init) {
+    init->ProfileShutdownBase();
+    return true;
+}
+
 void AgentInit::ModulesShutdownBase() {
     ModulesShutdown();
     if (agent_->oper_db()) {
@@ -522,6 +549,7 @@ void AgentInit::Shutdown() {
     int task_id = agent_->task_scheduler()->GetTaskId(AGENT_SHUTDOWN_TASKNAME);
 
     RunInTaskContext(this, task_id, boost::bind(&IoShutdownInternal, this));
+    RunInTaskContext(this, task_id, boost::bind(&ProfileShutdownInternal, this));
     RunInTaskContext(this, task_id, boost::bind(&FlushFlowsInternal, this));
     RunInTaskContext(this, task_id, boost::bind(&VgwShutdownInternal, this));
     DeleteDBEntriesBase();

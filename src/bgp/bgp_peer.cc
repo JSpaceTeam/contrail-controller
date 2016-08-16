@@ -14,7 +14,7 @@
 #include "base/task_annotations.h"
 #include "bgp/bgp_factory.h"
 #include "bgp/bgp_log.h"
-#include "bgp/bgp_peer_membership.h"
+#include "bgp/bgp_membership.h"
 #include "bgp/bgp_sandesh.h"
 #include "bgp/bgp_server.h"
 #include "bgp/bgp_session.h"
@@ -34,6 +34,7 @@ using boost::assign::list_of;
 using boost::assign::map_list_of;
 using boost::system::error_code;
 using boost::tie;
+using std::copy;
 using std::dec;
 using std::map;
 using std::ostringstream;
@@ -43,18 +44,56 @@ using std::vector;
 class BgpPeer::PeerClose : public IPeerClose {
   public:
     explicit PeerClose(BgpPeer *peer)
-        : peer_(peer),
-          manager_(BgpObjectFactory::Create<PeerCloseManager>(peer_)) { }
+        : peer_(peer), flap_count_(0),
+          manager_(BgpObjectFactory::Create<PeerCloseManager>(this)) {
+    }
 
     virtual ~PeerClose() { }
     virtual string ToString() const { return peer_->ToString(); }
     virtual void CustomClose() { return peer_->CustomClose(); }
-    virtual void GracefulRestartStale() { }
-    virtual void GracefulRestartSweep() { }
+    virtual void GracefulRestartStale() {
+        negotiated_families_ = peer_->negotiated_families();
+    }
+    virtual void LongLivedGracefulRestartStale() { }
+    virtual void GracefulRestartSweep() {
+        negotiated_families_.clear();
+    }
     virtual PeerCloseManager *close_manager() { return manager_.get(); }
-    void Close() { manager_->Close(); }
+    virtual bool IsReady() const { return peer_->IsReady(); }
+    virtual IPeer *peer() const { return peer_; }
+
+    virtual void Close(bool non_graceful) {
+        // Abort GR-Closuree if this request is for non-graceful closure.
+        // Reset GR-Closure if previous closure is still in progress or if
+        // this is a flip (from established state).
+        if (non_graceful || flap_count_ != peer_->total_flap_count()) {
+            if (flap_count_ != peer_->total_flap_count()) {
+                flap_count_++;
+                assert(peer_->total_flap_count() == flap_count_);
+            }
+            manager_->Close(non_graceful);
+            return;
+        }
+
+        // Ignore if close is already in progress.
+        if (close_manager()->IsCloseInProgress() &&
+                !close_manager()->IsInGracefulRestartTimerWait())
+            return;
+
+        if (peer_->IsDeleted()) {
+            peer_->RetryDelete();
+        } else {
+            CustomClose();
+            CloseComplete();
+        }
+    }
 
     virtual void Delete() {
+        peer_->gr_params().Initialize();
+        peer_->llgr_params().Initialize();
+        peer_->graceful_restart_families().clear();
+        peer_->long_lived_graceful_restart_families().clear();
+        negotiated_families_.clear();
         if (peer_->IsDeleted()) {
             peer_->RetryDelete();
         } else {
@@ -62,14 +101,96 @@ class BgpPeer::PeerClose : public IPeerClose {
         }
     }
 
+    // Return the time to wait for, in seconds to exit GR_TIMER state.
+    virtual const int GetGracefulRestartTime() const {
+        return  peer_->gr_params_.time;
+    }
+
+    // Return the time to wait for, in seconds to exit LLGR_TIMER state.
+    virtual const int GetLongLivedGracefulRestartTime() const {
+        return peer_->llgr_params_.time;
+    }
+
+    virtual void ReceiveEndOfRIB(Address::Family family) {
+        peer_->ReceiveEndOfRIB(family, 0);
+    }
+
+
+    virtual const char *GetTaskName() const { return "bgp::StateMachine"; }
+    virtual int GetTaskInstance() const { return peer_->GetTaskInstance(); }
+
+    virtual void MembershipRequestCallbackComplete() {
+        CHECK_CONCURRENCY("bgp::StateMachine");
+    }
+
+    bool IsGRReady() const {
+        // Check if GR helper mode is disabled.
+        if (!peer_->server()->gr_helper_enable())
+            return false;
+
+        // Check if GR is supported by the peer.
+        if (peer_->gr_params().families.empty())
+            return false;
+
+        // Restart time must be non-zero in order to enable GR helper mode.
+        if (!GetGracefulRestartTime())
+            return false;
+
+        // Abort GR if currently negotiated families differ from already
+        // staled address families.
+        if (!negotiated_families_.empty() &&
+                peer_->negotiated_families() != negotiated_families_)
+            return false;
+
+        // If GR is not supported for any of the negotiated address family,
+        // then consider GR as not supported
+        if (!equal(peer_->negotiated_families().begin(),
+                   peer_->negotiated_families().end(),
+                   peer_->graceful_restart_families().begin())) {
+            return false;
+        }
+
+        // Make sure that forwarding state is preserved for all families in
+        // the restarting speaker.
+        BOOST_FOREACH(BgpProto::OpenMessage::Capability::GR::Family family,
+                      peer_->gr_params().families) {
+            if (!family.forwarding_state_preserved())
+                return false;
+        }
+
+        // If LLGR is supported, make sure that it is identical to GR afis
+        if (!peer_->llgr_params().families.empty()) {
+            if (peer_->graceful_restart_families() !=
+                    peer_->long_lived_graceful_restart_families()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // If the peer is deleted or administratively held down, do not attempt
     // graceful restart
-    virtual bool IsCloseGraceful() {
+    virtual bool IsCloseGraceful() const {
         if (peer_->IsDeleted() || peer_->IsAdminDown())
             return false;
-        if (peer_->server()->IsDeleted())
+        if (peer_->server()->IsDeleted() || peer_->server()->admin_down())
             return false;
-        return peer_->server()->IsPeerCloseGraceful();
+        if (!IsGRReady())
+            return false;
+        return true;
+    }
+
+    // Check if we need to trigger Long Lived Graceful Restart. In addition to
+    // normal GR checks, we also need to check LLGR capability was negotiated
+    // and non-zero restart time was inferred.
+    virtual bool IsCloseLongLivedGraceful() const {
+        if (!IsCloseGraceful())
+            return false;
+        if (peer_->llgr_params().families.empty())
+            return false;
+        if (!GetLongLivedGracefulRestartTime())
+            return false;
+        return true;
     }
 
     // Close process for this peer is complete. Restart the state machine and
@@ -79,15 +200,18 @@ class BgpPeer::PeerClose : public IPeerClose {
             peer_->state_machine_->Initialize();
     }
 
-    virtual void GetNegotiatedFamilies(Families *families) const {
-        BOOST_FOREACH(const string family, peer_->negotiated_families()) {
+    virtual void GetGracefulRestartFamilies(Families *families) const {
+        families->clear();
+        BOOST_FOREACH(const string family, peer_->graceful_restart_families()) {
             families->insert(Address::FamilyFromString(family));
         }
     }
 
 private:
     BgpPeer *peer_;
+    uint64_t flap_count_;
     boost::scoped_ptr<PeerCloseManager> manager_;
+    std::vector<std::string> negotiated_families_;
 };
 
 class BgpPeer::PeerStats : public IPeerDebugStats {
@@ -184,6 +308,11 @@ public:
     virtual void GetRxErrorStats(RxErrorStats *stats) const {
     }
 
+    virtual void GetRxRouteStats(RxRouteStats *stats) const {
+        stats->total_path_count = peer_->GetTotalPathCount();
+        stats->primary_path_count = peer_->GetPrimaryPathCount();
+    }
+
 private:
     friend class BgpPeer;
 
@@ -202,6 +331,8 @@ public:
 
     virtual bool MayDelete() const {
         CHECK_CONCURRENCY("bgp::Config");
+        if (!peer_->peer_close_->close_manager()->IsQueueEmpty())
+            return false;
         if (peer_->IsCloseInProgress())
             return false;
         if (!peer_->state_machine_->IsQueueEmpty())
@@ -217,7 +348,13 @@ public:
     virtual void Destroy() {
         CHECK_CONCURRENCY("bgp::Config");
         peer_->PostCloseRelease();
-        peer_->server()->decrement_deleting_count();
+        if (peer_->router_type() == "bgpaas-client") {
+            peer_->server()->decrement_deleting_bgpaas_count();
+        } else {
+            peer_->server()->decrement_deleting_count();
+        }
+        assert(!peer_->membership_req_pending());
+        assert(!peer_->peer_close_->close_manager()->IsMembershipInUse());
         peer_->rtinstance_->peer_manager()->DestroyIPeer(peer_);
     }
 
@@ -253,11 +390,12 @@ RibExportPolicy BgpPeer::BuildRibExportPolicy(Address::Family family) const {
     if (!family_attributes ||
         family_attributes->gateway_address.is_unspecified()) {
         return RibExportPolicy(peer_type_, RibExportPolicy::BGP, peer_as_,
-            as_override_, -1, 0);
+            as_override_, peer_close_->IsCloseLongLivedGraceful(), -1, 0);
     } else {
         IpAddress nexthop = family_attributes->gateway_address;
         return RibExportPolicy(peer_type_, RibExportPolicy::BGP, peer_as_,
-            as_override_, nexthop, -1, 0);
+            as_override_, peer_close_->IsCloseLongLivedGraceful(), nexthop,
+            -1, 0);
     }
 }
 
@@ -275,7 +413,7 @@ void BgpPeer::ReceiveEndOfRIB(Address::Family family, size_t msgsize) {
     RegisterToVpnTables();
 }
 
-void BgpPeer::SendEndOfRIB(Address::Family family) {
+void BgpPeer::SendEndOfRIBActual(Address::Family family) {
     tbb::spin_mutex::scoped_lock lock(spin_mutex_);
 
     // Bail if there's no session for the peer anymore.
@@ -300,18 +438,80 @@ void BgpPeer::SendEndOfRIB(Address::Family family) {
         " size " << msgsize);
 }
 
+uint32_t BgpPeer::GetOutputQueueDepth(Address::Family family) const {
+    BgpTable *table = GetRoutingInstance()->GetTable(family);
+    return server_->membership_mgr()->GetRibOutQueueDepth(this, table);
+}
+
+uint64_t BgpPeer::GetElapsedTimeSinceLastStateChange() const {
+    return UTCTimestampUsec() - state_machine_->last_state_change_usecs_at();
+}
+
+bool BgpPeer::EndOfRibSendTimerExpired(Address::Family family) {
+    if (!IsReady())
+        return false;
+
+    uint64_t elapsed = GetElapsedTimeSinceLastStateChange();
+
+    // Wait for atleast kMinEndOfRibSendTimeUsecs duration.
+    if (elapsed < kMinEndOfRibSendTimeUsecs)
+        return true;
+
+    // Retry if wait time has not exceeded kMaxEndOfRibSendTimeUsecs and output
+    // queue has not been fully drained yet.
+    if (elapsed < kMaxEndOfRibSendTimeUsecs && GetOutputQueueDepth(family))
+        return true;
+
+    SendEndOfRIBActual(family);
+    return false;
+}
+
+void BgpPeer::SendEndOfRIB(Address::Family family) {
+    end_of_rib_send_timer_[family]->Start(kEndOfRibSendRetryTimeMsecs,
+        boost::bind(&BgpPeer::EndOfRibSendTimerExpired, this, family),
+        boost::bind(&BgpPeer::EndOfRibTimerErrorHandler, this, _1, _2));
+}
+
 void BgpPeer::BGPPeerInfoSend(const BgpPeerInfoData &peer_info) const {
     BGPPeerInfo::Send(peer_info);
 }
 
+bool BgpPeer::CanUseMembershipManager() const {
+    if (membership_req_pending_)
+        return false;
+
+#if 0
+    // Make sure that registration is complete for all negotiated families.
+    RoutingInstance *instance = GetRoutingInstance();
+    BgpMembershipManager *membership_mgr = server_->membership_mgr();
+    BOOST_FOREACH(string family, negotiated_families_) {
+        BgpTable *table = instance->GetTable(Address::FamilyFromString(family));
+        if (!membership_mgr->IsRegistered(this, table))
+            return false;
+    }
+#endif
+    return true;
+}
+
 //
-// Callback from PeerRibMembershipManager.
+// Callback from BgpMembershipManager.
 // Update pending membership request count and send EndOfRib for the family
 // in question.
 //
-void BgpPeer::MembershipRequestCallback(IPeer *ipeer, BgpTable *table) {
-    assert(membership_req_pending_);
+void BgpPeer::MembershipRequestCallback(BgpTable *table) {
+    if (peer_close_->close_manager()->IsMembershipInUse()) {
+        peer_close_->close_manager()->MembershipRequestCallback();
+        return;
+    }
+
+    assert(membership_req_pending_ > 0);
     membership_req_pending_--;
+
+    // Resume if CloseManager is waiting to use membership manager.
+    if (!membership_req_pending_ &&
+        peer_close_->close_manager()->IsMembershipInWait()) {
+        peer_close_->close_manager()->MembershipRequest();
+    }
 
     // Resume close if it was deferred and this is the last pending callback.
     // Don't bother sending EndOfRib if close is deferred.
@@ -331,8 +531,17 @@ void BgpPeer::MembershipRequestCallback(IPeer *ipeer, BgpTable *table) {
     SendEndOfRIB(table->family());
 }
 
+bool BgpPeer::MembershipPathCallback(DBTablePartBase *tpart, BgpRoute *route,
+                                     BgpPath *path) {
+    return peer_close_->close_manager()->MembershipPathCallback(tpart, route,
+                                                                path);
+}
+
 bool BgpPeer::ResumeClose() {
-    peer_close_->Close();
+    peer_close_->Close(non_graceful_close_);
+
+    // No need to track graceful_closure once the close process is resumed.
+    non_graceful_close_ = false;
     BgpPeerInfoData peer_info;
     peer_info.set_name(ToUVEKey());
     peer_info.set_send_state("not advertising");
@@ -352,21 +561,24 @@ BgpPeer::BgpPeer(BgpServer *server, RoutingInstance *instance,
           index_(server->RegisterPeer(this)),
           trigger_(boost::bind(&BgpPeer::ResumeClose, this),
                    TaskScheduler::GetInstance()->GetTaskId("bgp::StateMachine"),
-                   GetIndex()),
+                   GetTaskInstance()),
+          buffer_len_(0),
           session_(NULL),
           keepalive_timer_(TimerManager::CreateTimer(*server->ioservice(),
-                     "BGP keepalive timer")),
+                     "BGP keepalive timer",
+                   TaskScheduler::GetInstance()->GetTaskId("bgp::StateMachine"),
+                   GetTaskInstance())),
           end_of_rib_timer_(TimerManager::CreateTimer(*server->ioservice(),
                    "BGP RTarget EndOfRib timer",
                    TaskScheduler::GetInstance()->GetTaskId("bgp::StateMachine"),
-                   GetIndex())),
+                   GetTaskInstance())),
           send_ready_(true),
           admin_down_(config->admin_down()),
           passive_(config->passive()),
           resolve_paths_(config->router_type() == "bgpaas-client"),
           as_override_(config->as_override()),
-          membership_req_pending_(0),
           defer_close_(false),
+          non_graceful_close_(false),
           vpn_tables_registered_(false),
           hold_time_(config->hold_time()),
           local_as_(config->local_as()),
@@ -379,20 +591,38 @@ BgpPeer::BgpPeer(BgpServer *server, RoutingInstance *instance,
           peer_close_(new PeerClose(this)),
           peer_stats_(new PeerStats(this)),
           deleter_(new DeleteActor(this)),
-          instance_delete_ref_(this, instance->deleter()),
+          instance_delete_ref_(this, instance ? instance->deleter() : NULL),
           flap_count_(0),
+          total_flap_count_(0),
           last_flap_(0),
           inuse_authkey_type_(AuthenticationData::NIL) {
+    membership_req_pending_ = 0;
     BGP_LOG_PEER(Event, this, SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
         BGP_PEER_DIR_NA, "Created");
-    if (peer_name_.find(rtinstance_->name()) == 0) {
+
+    if (rtinstance_ && peer_name_.find(rtinstance_->name()) == 0) {
         peer_basename_ = peer_name_.substr(rtinstance_->name().size() + 1);
     } else {
         peer_basename_ = peer_name_;
     }
 
-    refcount_ = 0;
+    for (Address::Family family = Address::UNSPEC;
+            family < Address::NUM_FAMILIES;
+            family = static_cast<Address::Family>(family + 1)) {
+        end_of_rib_send_timer_[family] = TimerManager::CreateTimer(
+                *server->ioservice(), "BGP EndOfRib Send timer " +
+                                      Address::FamilyToString(family),
+                   TaskScheduler::GetInstance()->GetTaskId("bgp::Config"),
+                   GetTaskInstance());
+    }
+
+    total_path_count_ = 0;
     primary_path_count_ = 0;
+
+    if (resolve_paths_) {
+        rtinstance_->GetTable(Address::INET)->LocatePathResolver();
+        rtinstance_->GetTable(Address::INET6)->LocatePathResolver();
+    }
 
     ProcessEndpointConfig(config);
     ProcessAuthKeyChainConfig(config);
@@ -417,13 +647,24 @@ BgpPeer::BgpPeer(BgpServer *server, RoutingInstance *instance,
 }
 
 BgpPeer::~BgpPeer() {
-    assert(GetRefCount() == 0);
+    assert(GetTotalPathCount() == 0);
     STLDeleteValues(&family_attributes_list_);
     ClearListenSocketAuthKey();
     BgpPeerInfoData peer_info;
     peer_info.set_name(ToUVEKey());
     peer_info.set_deleted(true);
     BGPPeerInfoSend(peer_info);
+
+    PeerStatsData peer_stats_data;
+    peer_stats_data.set_name(ToUVEKey());
+    peer_stats_data.set_deleted(true);
+    PeerStatsUve::Send(peer_stats_data, "ObjectBgpPeer");
+
+    PeerFlapData peer_flap_data;
+    peer_flap_data.set_name(ToUVEKey());
+    peer_flap_data.set_deleted(true);
+    PeerFlap::Send(peer_flap_data, "ObjectBgpPeer");
+
     BGP_LOG_PEER(Event, this, SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
         BGP_PEER_DIR_NA, "Deleted");
 }
@@ -431,6 +672,22 @@ BgpPeer::~BgpPeer() {
 void BgpPeer::Initialize() {
     if (!admin_down_)
         state_machine_->Initialize();
+}
+
+void BgpPeer::NotifyEstablished(bool established) {
+    if (established) {
+        if (router_type_ == "bgpaas-client") {
+            server_->IncrementUpBgpaasPeerCount();
+        } else {
+            server_->IncrementUpPeerCount();
+        }
+    } else {
+        if (router_type_ == "bgpaas-client") {
+            server_->DecrementUpBgpaasPeerCount();
+        } else {
+            server_->DecrementUpPeerCount();
+        }
+    }
 }
 
 void BgpPeer::BindLocalEndpoint(BgpSession *session) {
@@ -724,6 +981,12 @@ void BgpPeer::PostCloseRelease() {
     }
     TimerManager::DeleteTimer(keepalive_timer_);
     TimerManager::DeleteTimer(end_of_rib_timer_);
+
+    for (Address::Family family = Address::UNSPEC;
+            family < Address::NUM_FAMILIES;
+            family = static_cast<Address::Family>(family + 1)) {
+        TimerManager::DeleteTimer(end_of_rib_send_timer_[family]);
+    }
 }
 
 // IsReady
@@ -779,20 +1042,31 @@ void BgpPeer::CustomClose() {
     ResetCapabilities();
     keepalive_timer_->Cancel();
     end_of_rib_timer_->Cancel();
+
+    for (Address::Family family = Address::UNSPEC;
+            family < Address::NUM_FAMILIES;
+            family = static_cast<Address::Family>(family + 1)) {
+        end_of_rib_send_timer_[family]->Cancel();
+    }
 }
 
 //
 // Close this peer by closing all of it's RIBs.
 //
-void BgpPeer::Close() {
-    if (membership_req_pending_) {
+void BgpPeer::Close(bool non_graceful) {
+    if (membership_req_pending_ &&
+            !peer_close_->close_manager()->IsMembershipInUse()) {
         BGP_LOG_PEER(Event, this, SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
             BGP_PEER_DIR_NA, "Close procedure deferred");
         defer_close_ = true;
+
+        // Note down non-graceful closures. Once a close is non-graceful,
+        // it shall remain as non-graceful.
+        non_graceful_close_ |= non_graceful;
         return;
     }
 
-    peer_close_->Close();
+    peer_close_->Close(non_graceful);
     BgpPeerInfoData peer_info;
     peer_info.set_name(ToUVEKey());
     peer_info.set_send_state("not advertising");
@@ -828,8 +1102,9 @@ bool BgpPeer::IsCloseInProgress() const {
 
     // trigger is set only after defer_close is reset
     assert(!(defer_close_ && trigger_.IsSet()));
-    return (defer_close_ || trigger_.IsSet() ||
-            peer_close_->close_manager()->IsCloseInProgress());
+    return defer_close_ || trigger_.IsSet() ||
+            (peer_close_->close_manager()->IsCloseInProgress() &&
+             !peer_close_->close_manager()->IsInGracefulRestartTimerWait());
 }
 
 StateMachine::State BgpPeer::GetState() const {
@@ -875,6 +1150,23 @@ bool BgpPeer::AcceptSession(BgpSession *session) {
     return state_machine_->PassiveOpen(session);
 }
 
+void BgpPeer::Register(BgpTable *table, const RibExportPolicy &policy) {
+    assert(!peer_close_->close_manager()->IsMembershipInUse());
+    if (peer_close_->close_manager()->IsMembershipInWait())
+        assert(membership_req_pending_ > 0);
+    BgpMembershipManager *membership_mgr = server_->membership_mgr();
+    membership_req_pending_++;
+    membership_mgr->Register(this, table, policy);
+}
+
+void BgpPeer::Register(BgpTable *table) {
+    assert(!peer_close_->close_manager()->IsMembershipInUse());
+    if (peer_close_->close_manager()->IsMembershipInWait())
+        assert(membership_req_pending_ > 0);
+    BgpMembershipManager *membership_mgr = server_->membership_mgr();
+    membership_mgr->RegisterRibIn(this, table);
+}
+
 //
 // Register to tables for negotiated address families.
 //
@@ -889,7 +1181,6 @@ bool BgpPeer::AcceptSession(BgpSession *session) {
 // normally before ribout registration to VPN tables is completed.
 //
 void BgpPeer::RegisterAllTables() {
-    PeerRibMembershipManager *membership_mgr = server_->membership_mgr();
     RoutingInstance *instance = GetRoutingInstance();
 
     BGP_LOG_PEER(Event, this, SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
@@ -907,9 +1198,7 @@ void BgpPeer::RegisterAllTables() {
         BgpTable *table = instance->GetTable(family);
         BGP_LOG_PEER_TABLE(this, SandeshLevel::SYS_DEBUG, BGP_LOG_FLAG_TRACE,
                            table, "Register peer with the table");
-        membership_mgr->Register(this, table, BuildRibExportPolicy(family),
-            -1, boost::bind(&BgpPeer::MembershipRequestCallback, this, _1, _2));
-        membership_req_pending_++;
+        Register(table, BuildRibExportPolicy(family));
     }
 
     vpn_tables_registered_ = false;
@@ -922,10 +1211,8 @@ void BgpPeer::RegisterAllTables() {
     BgpTable *table = instance->GetTable(family);
     BGP_LOG_PEER_TABLE(this, SandeshLevel::SYS_DEBUG, BGP_LOG_FLAG_TRACE,
         table, "Register peer with the table");
-    membership_mgr->Register(this, table, BuildRibExportPolicy(family),
-        -1, boost::bind(&BgpPeer::MembershipRequestCallback, this, _1, _2));
-    membership_req_pending_++;
-    StartEndOfRibTimer();
+    Register(table, BuildRibExportPolicy(family));
+    StartEndOfRouteTargetRibTimer();
 
     vector<Address::Family> vpn_family_list = list_of
         (Address::INETVPN)(Address::INET6VPN)(Address::ERMVPN)(Address::EVPN);
@@ -935,8 +1222,64 @@ void BgpPeer::RegisterAllTables() {
         BgpTable *table = instance->GetTable(vpn_family);
         BGP_LOG_PEER_TABLE(this, SandeshLevel::SYS_INFO, BGP_LOG_FLAG_TRACE,
             table, "Register ribin for peer with the table");
-        membership_mgr->RegisterRibIn(this, table);
+        Register(table);
     }
+}
+
+const vector<Address::Family> BgpPeer::supported_families_ = list_of
+    (Address::INET)
+    (Address::INETVPN)
+    (Address::EVPN)
+    (Address::RTARGET)
+    (Address::ERMVPN)
+    (Address::INET6)
+    (Address::INET6VPN);
+
+void BgpPeer::AddGRCapabilities(BgpProto::OpenMessage::OptParam *opt_param) {
+    vector<Address::Family> gr_families;
+    uint16_t time = server_->GetGracefulRestartTime();
+
+    // Indicate EOR support by default.
+    if (!time) {
+        BgpProto::OpenMessage::Capability *gr_cap =
+            BgpProto::OpenMessage::Capability::GR::Encode(0, 0, 0,
+                                                          gr_families);
+        opt_param->capabilities.push_back(gr_cap);
+        return;
+    }
+
+    BOOST_FOREACH(Address::Family family, supported_families_) {
+        if (LookupFamily(family))
+            gr_families.push_back(family);
+    }
+
+    uint8_t flags = 0;
+    uint8_t afi_flags =
+        BgpProto::OpenMessage::Capability::GR::ForwardingStatePreserved;
+    BgpProto::OpenMessage::Capability *gr_cap =
+        BgpProto::OpenMessage::Capability::GR::Encode(time, flags, afi_flags,
+                                                      gr_families);
+    opt_param->capabilities.push_back(gr_cap);
+}
+
+void BgpPeer::AddLLGRCapabilities(BgpProto::OpenMessage::OptParam *opt_param) {
+    if (!server_->GetGracefulRestartTime() ||
+            !server_->GetLongLivedGracefulRestartTime())
+        return;
+
+    vector<Address::Family> llgr_families;
+    BOOST_FOREACH(Address::Family family, supported_families_) {
+        if (LookupFamily(family))
+            llgr_families.push_back(family);
+    }
+
+    uint32_t time = server_->GetLongLivedGracefulRestartTime();
+    uint8_t afi_flags =
+        BgpProto::OpenMessage::Capability::LLGR::ForwardingStatePreserved;
+    BgpProto::OpenMessage::Capability *llgr_cap =
+        BgpProto::OpenMessage::Capability::LLGR::Encode(time, afi_flags,
+                                                        llgr_families);
+    opt_param->capabilities.push_back(llgr_cap);
 }
 
 void BgpPeer::SendOpen(TcpSession *session) {
@@ -948,24 +1291,30 @@ void BgpPeer::SendOpen(TcpSession *session) {
         new BgpProto::OpenMessage::OptParam;
 
     static const uint8_t cap_mp[][4] = {
-        { 0, BgpAf::IPv4,  0, BgpAf::Unicast },
-        { 0, BgpAf::IPv4,  0, BgpAf::Vpn },
-        { 0, BgpAf::L2Vpn, 0, BgpAf::EVpn },
-        { 0, BgpAf::IPv4,  0, BgpAf::RTarget },
-        { 0, BgpAf::IPv4,  0, BgpAf::ErmVpn },
-        { 0, BgpAf::IPv6,  0, BgpAf::Unicast },
-        { 0, BgpAf::IPv6,  0, BgpAf::Vpn },
+        { 0, (uint8_t) BgpAf::FamilyToAfi(supported_families_[0]), 0,
+             BgpAf::FamilyToSafi(supported_families_[0]) },
+        { 0, (uint8_t) BgpAf::FamilyToAfi(supported_families_[1]), 0,
+             BgpAf::FamilyToSafi(supported_families_[1]) },
+        { 0, (uint8_t) BgpAf::FamilyToAfi(supported_families_[2]), 0,
+             BgpAf::FamilyToSafi(supported_families_[2]) },
+        { 0, (uint8_t) BgpAf::FamilyToAfi(supported_families_[3]), 0,
+             BgpAf::FamilyToSafi(supported_families_[3]) },
+        { 0, (uint8_t) BgpAf::FamilyToAfi(supported_families_[4]), 0,
+             BgpAf::FamilyToSafi(supported_families_[4]) },
+        { 0, (uint8_t) BgpAf::FamilyToAfi(supported_families_[5]), 0,
+             BgpAf::FamilyToSafi(supported_families_[5]) },
+        { 0, (uint8_t) BgpAf::FamilyToAfi(supported_families_[6]), 0,
+             BgpAf::FamilyToSafi(supported_families_[6]) },
     };
 
-    typedef map<Address::Family, const uint8_t *> FamilyToCapabilityMap;
     static const FamilyToCapabilityMap family_to_cap_map = map_list_of
-        (Address::INET,     cap_mp[0])
-        (Address::INETVPN,  cap_mp[1])
-        (Address::EVPN,     cap_mp[2])
-        (Address::RTARGET,  cap_mp[3])
-        (Address::ERMVPN,   cap_mp[4])
-        (Address::INET6,    cap_mp[5])
-        (Address::INET6VPN, cap_mp[6]);
+        (supported_families_[0], cap_mp[0])
+        (supported_families_[1], cap_mp[1])
+        (supported_families_[2], cap_mp[2])
+        (supported_families_[3], cap_mp[3])
+        (supported_families_[4], cap_mp[4])
+        (supported_families_[5], cap_mp[5])
+        (supported_families_[6], cap_mp[6]);
 
     // Add capabilities for configured address families.
     BOOST_FOREACH(const FamilyToCapabilityMap::value_type &val,
@@ -978,12 +1327,8 @@ void BgpPeer::SendOpen(TcpSession *session) {
         opt_param->capabilities.push_back(cap);
     }
 
-    // Add restart capability for generating end-of-rib.
-    const uint8_t restart_cap[2] = { 0x0, 0x0 };
-    BgpProto::OpenMessage::Capability *cap =
-        new BgpProto::OpenMessage::Capability(
-            BgpProto::OpenMessage::Capability::GracefulRestart, restart_cap, 2);
-    opt_param->capabilities.push_back(cap);
+    AddGRCapabilities(opt_param);
+    AddLLGRCapabilities(opt_param);
 
     if (opt_param->capabilities.size()) {
         openmsg.opt_params.push_back(opt_param);
@@ -1030,15 +1375,39 @@ static bool SkipUpdateSend() {
     return skip_;
 }
 
+//
+// Accumulate the message in the update buffer.
+// Flush the existing buffer if the message can't fit.
+// Note that FlushUpdate resets buffer_len_ to 0.
+//
 bool BgpPeer::SendUpdate(const uint8_t *msg, size_t msgsize) {
+    bool send_ready = true;
+    if (buffer_len_ + msgsize > kBufferSize) {
+        send_ready = FlushUpdate();
+        assert(buffer_len_ == 0);
+    }
+    copy(msg, msg + msgsize, buffer_ + buffer_len_);
+    buffer_len_ += msgsize;
+    inc_tx_update();
+    return send_ready;
+}
+
+bool BgpPeer::FlushUpdate() {
     tbb::spin_mutex::scoped_lock lock(spin_mutex_);
 
-    // Bail if there's no session for the peer anymore.
-    if (!session_)
+    // Bail if the update buffer is empty.
+    if (buffer_len_ == 0)
         return true;
 
+    // Bail if there's no session for the peer anymore.
+    if (!session_) {
+        buffer_len_ = 0;
+        return true;
+    }
+
     if (!SkipUpdateSend()) {
-        send_ready_ = session_->Send(msg, msgsize, NULL);
+        send_ready_ = session_->Send(buffer_, buffer_len_, NULL);
+        buffer_len_ = 0;
         if (send_ready_) {
             StartKeepaliveTimerUnlocked();
         } else {
@@ -1048,7 +1417,6 @@ bool BgpPeer::SendUpdate(const uint8_t *msg, size_t msgsize) {
         send_ready_ = true;
     }
 
-    inc_tx_update();
     if (!send_ready_) {
         BGP_LOG_PEER(Event, this, SandeshLevel::SYS_DEBUG, BGP_LOG_FLAG_ALL,
                      BGP_PEER_DIR_NA, "Send blocked");
@@ -1060,15 +1428,254 @@ bool BgpPeer::SendUpdate(const uint8_t *msg, size_t msgsize) {
     return send_ready_;
 }
 
+//
+// Check if hard close can be skipped upon notification message reception
+// based on code. Typically, when we want to avail the use of GR/LLGR, it is
+// better not to do hard close and do GR instead for as many cases as possible.
+//
+bool BgpPeer::SkipNotificationReceive(int code, int subcode) const {
+    switch (static_cast<BgpProto::Notification::Code>(code)) {
+        case BgpProto::Notification::MsgHdrErr:
+            switch (static_cast<BgpProto::Notification::MsgHdrSubCode>(
+                        subcode)) {
+            case BgpProto::Notification::ConnNotSync:
+                break;
+            case BgpProto::Notification::BadMsgLength:
+                break;
+            case BgpProto::Notification::BadMsgType:
+                break;
+            }
+            break;
+        case BgpProto::Notification::OpenMsgErr:
+            switch (static_cast<BgpProto::Notification::OpenMsgSubCode>(
+                        subcode)) {
+            case BgpProto::Notification::UnsupportedVersion:
+                break;
+            case BgpProto::Notification::BadPeerAS:
+                break;
+            case BgpProto::Notification::BadBgpId:
+                break;
+            case BgpProto::Notification::UnsupportedOptionalParam:
+                break;
+            case BgpProto::Notification::AuthenticationFailure:
+                break;
+            case BgpProto::Notification::UnacceptableHoldTime:
+                break;
+            case BgpProto::Notification::UnsupportedCapability:
+                break;
+            }
+            break;
+        case BgpProto::Notification::UpdateMsgErr:
+            switch (static_cast<BgpProto::Notification::UpdateMsgSubCode>(
+                        subcode)) {
+            case BgpProto::Notification::MalformedAttributeList:
+                break;
+            case BgpProto::Notification::UnrecognizedWellKnownAttrib:
+                break;
+            case BgpProto::Notification::MissingWellKnownAttrib:
+                break;
+            case BgpProto::Notification::AttribFlagsError:
+                break;
+            case BgpProto::Notification::AttribLengthError:
+                break;
+            case BgpProto::Notification::InvalidOrigin:
+                break;
+            case BgpProto::Notification::InvalidNH:
+                break;
+            case BgpProto::Notification::OptionalAttribError:
+                break;
+            case BgpProto::Notification::InvalidNetworkField:
+                break;
+            case BgpProto::Notification::MalformedASPath:
+                break;
+            }
+            break;
+        case BgpProto::Notification::HoldTimerExp:
+            return true;
+        case BgpProto::Notification::FSMErr:
+            switch (static_cast<BgpProto::Notification::FsmSubcode>(subcode)) {
+            case BgpProto::Notification::UnspecifiedError:
+                break;
+            case BgpProto::Notification::OpenSentError:
+                break;
+            case BgpProto::Notification::OpenConfirmError:
+                break;
+            case BgpProto::Notification::EstablishedError:
+                break;
+            }
+            break;
+        case BgpProto::Notification::Cease:
+            switch (static_cast<BgpProto::Notification::CeaseSubCode>(
+                        subcode)) {
+            case BgpProto::Notification::Unknown:
+                return true;
+            case BgpProto::Notification::MaxPrefixes:
+                return true;
+            case BgpProto::Notification::AdminShutdown:
+                break;
+            case BgpProto::Notification::PeerDeconfigured:
+                break;
+            case BgpProto::Notification::AdminReset:
+                break;
+            case BgpProto::Notification::ConnectionRejected:
+                break;
+            case BgpProto::Notification::OtherConfigChange:
+                return true;
+            case BgpProto::Notification::ConnectionCollision:
+                break;
+            case BgpProto::Notification::OutOfResources:
+                return true;
+            }
+            break;
+    }
+    return false;
+}
+
+//
+// Check if notification send can be skipped. Typically, when we want to avail
+// the use of GR/LLGR, it is better not to send a notification message so that
+// peer retains the routes (as stale) we have already sent over this session.
+//
+bool BgpPeer::SkipNotificationSend(int code, int subcode) const {
+    switch (static_cast<BgpProto::Notification::Code>(code)) {
+        case BgpProto::Notification::MsgHdrErr:
+            switch (static_cast<BgpProto::Notification::MsgHdrSubCode>(
+                        subcode)) {
+            case BgpProto::Notification::ConnNotSync:
+                break;
+            case BgpProto::Notification::BadMsgLength:
+                break;
+            case BgpProto::Notification::BadMsgType:
+                break;
+            }
+            break;
+        case BgpProto::Notification::OpenMsgErr:
+            switch (static_cast<BgpProto::Notification::OpenMsgSubCode>(
+                        subcode)) {
+            case BgpProto::Notification::UnsupportedVersion:
+                break;
+            case BgpProto::Notification::BadPeerAS:
+                break;
+            case BgpProto::Notification::BadBgpId:
+                break;
+            case BgpProto::Notification::UnsupportedOptionalParam:
+                break;
+            case BgpProto::Notification::AuthenticationFailure:
+                break;
+            case BgpProto::Notification::UnacceptableHoldTime:
+                break;
+            case BgpProto::Notification::UnsupportedCapability:
+                break;
+            }
+            break;
+        case BgpProto::Notification::UpdateMsgErr:
+            switch (static_cast<BgpProto::Notification::UpdateMsgSubCode>(
+                        subcode)) {
+            case BgpProto::Notification::MalformedAttributeList:
+                break;
+            case BgpProto::Notification::UnrecognizedWellKnownAttrib:
+                break;
+            case BgpProto::Notification::MissingWellKnownAttrib:
+                break;
+            case BgpProto::Notification::AttribFlagsError:
+                break;
+            case BgpProto::Notification::AttribLengthError:
+                break;
+            case BgpProto::Notification::InvalidOrigin:
+                break;
+            case BgpProto::Notification::InvalidNH:
+                break;
+            case BgpProto::Notification::OptionalAttribError:
+                break;
+            case BgpProto::Notification::InvalidNetworkField:
+                break;
+            case BgpProto::Notification::MalformedASPath:
+                break;
+            }
+            break;
+        case BgpProto::Notification::HoldTimerExp:
+            break;
+        case BgpProto::Notification::FSMErr:
+            switch (static_cast<BgpProto::Notification::FsmSubcode>(subcode)) {
+            case BgpProto::Notification::UnspecifiedError:
+                break;
+            case BgpProto::Notification::OpenSentError:
+                break;
+            case BgpProto::Notification::OpenConfirmError:
+                break;
+            case BgpProto::Notification::EstablishedError:
+                break;
+            }
+            break;
+        case BgpProto::Notification::Cease:
+            switch (static_cast<BgpProto::Notification::CeaseSubCode>(
+                        subcode)) {
+            case BgpProto::Notification::Unknown:
+                return true;
+            case BgpProto::Notification::MaxPrefixes:
+                return true;
+            case BgpProto::Notification::AdminShutdown:
+                break;
+            case BgpProto::Notification::PeerDeconfigured:
+                break;
+            case BgpProto::Notification::AdminReset:
+                break;
+            case BgpProto::Notification::ConnectionRejected:
+                break;
+            case BgpProto::Notification::OtherConfigChange:
+                return true;
+            case BgpProto::Notification::ConnectionCollision:
+                break;
+            case BgpProto::Notification::OutOfResources:
+                return true;
+            }
+            break;
+    }
+    return false;
+}
+
 void BgpPeer::SendNotification(BgpSession *session,
         int code, int subcode, const string &data) {
+    // Check if we can skip sending this notification message.
+    if (peer_close_->IsCloseGraceful() && SkipNotificationSend(code, subcode))
+        return;
+
     tbb::spin_mutex::scoped_lock lock(spin_mutex_);
     session->SendNotification(code, subcode, data);
     state_machine_->set_last_notification_out(code, subcode, data);
     inc_tx_notification();
 }
 
-void BgpPeer::SetCapabilities(const BgpProto::OpenMessage *msg) {
+bool BgpPeer::SetGRCapabilities(BgpPeerInfoData *peer_info) {
+    BgpProto::OpenMessage::Capability::GR::Decode(&gr_params_, capabilities_);
+    BgpProto::OpenMessage::Capability::GR::GetFamilies(gr_params_,
+            &graceful_restart_families_);
+    peer_info->set_graceful_restart_families(graceful_restart_families_);
+
+    BgpProto::OpenMessage::Capability::LLGR::Decode(&llgr_params_,
+                                                    capabilities_);
+    BgpProto::OpenMessage::Capability::LLGR::GetFamilies(llgr_params_,
+            &long_lived_graceful_restart_families_);
+    peer_info->set_long_lived_graceful_restart_families(
+            long_lived_graceful_restart_families_);
+    peer_info->set_graceful_restart_time(peer_close_->GetGracefulRestartTime());
+    peer_info->set_long_lived_graceful_restart_time(
+            peer_close_->GetLongLivedGracefulRestartTime());
+    BGPPeerInfoSend(*peer_info);
+
+    // If GR is no longer supported, terminate GR right away. This can happen
+    // due to mis-match between gr and llgr afis. For now, we expect an
+    // identical set.
+    if (peer_close_->close_manager()->IsInGracefulRestartTimerWait() &&
+        (!peer_close_->IsCloseGraceful() ||
+            !peer_close_->IsCloseLongLivedGraceful())) {
+        Close(true);
+        return false;
+    }
+    return true;
+}
+
+bool BgpPeer::SetCapabilities(const BgpProto::OpenMessage *msg) {
     peer_bgp_id_ = htonl(msg->identifier);
     capabilities_.clear();
     vector<BgpProto::OpenMessage::OptParam *>::const_iterator it;
@@ -1114,8 +1721,7 @@ void BgpPeer::SetCapabilities(const BgpProto::OpenMessage *msg) {
     }
     sort(negotiated_families_.begin(), negotiated_families_.end());
     peer_info.set_negotiated_families(negotiated_families_);
-
-    BGPPeerInfoSend(peer_info);
+    return SetGRCapabilities(&peer_info);
 }
 
 // Reset capabilities stored inside peer structure.
@@ -1131,6 +1737,7 @@ void BgpPeer::ResetCapabilities() {
     peer_info.set_families(families);
     vector<string> negotiated_families = vector<string>();
     peer_info.set_negotiated_families(negotiated_families);
+    peer_info.set_graceful_restart_families(vector<string>());
     BGPPeerInfoSend(peer_info);
 }
 
@@ -1364,7 +1971,6 @@ void BgpPeer::RegisterToVpnTables() {
         return;
     vpn_tables_registered_ = true;
 
-    PeerRibMembershipManager *membership_mgr = server_->membership_mgr();
     RoutingInstance *instance = GetRoutingInstance();
     vector<Address::Family> vpn_family_list = list_of
         (Address::INETVPN)(Address::INET6VPN)(Address::ERMVPN)(Address::EVPN);
@@ -1374,10 +1980,15 @@ void BgpPeer::RegisterToVpnTables() {
         BgpTable *table = instance->GetTable(vpn_family);
         BGP_LOG_PEER_TABLE(this, SandeshLevel::SYS_INFO, BGP_LOG_FLAG_TRACE,
             table, "Register peer with the table");
-        membership_mgr->Register(this, table, BuildRibExportPolicy(vpn_family),
-            -1, boost::bind(&BgpPeer::MembershipRequestCallback, this, _1, _2));
-        membership_req_pending_++;
+        Register(table, BuildRibExportPolicy(vpn_family));
     }
+}
+
+void BgpPeer::StartEndOfRibTimer() {
+    uint32_t timeout = server_->GetEndOfRibReceiveTime();
+    end_of_rib_timer_->Start(timeout * 1000,
+        boost::bind(&BgpPeer::EndOfRibTimerExpired, this),
+        boost::bind(&BgpPeer::EndOfRibTimerErrorHandler, this, _1, _2));
 }
 
 void BgpPeer::KeepaliveTimerErrorHandler(string error_name,
@@ -1388,11 +1999,21 @@ void BgpPeer::KeepaliveTimerErrorHandler(string error_name,
 }
 
 bool BgpPeer::EndOfRibTimerExpired() {
+
+    // Fake reception of EoRs to exit from GR states and sweep all stale routes.
+    peer_close_->close_manager()->ProcessEORMarkerReceived(Address::UNSPEC);
+    return false;
+}
+
+bool BgpPeer::EndOfRouteTargetRibTimerExpired() {
     RegisterToVpnTables();
     return false;
 }
 
 bool BgpPeer::KeepaliveTimerExpired() {
+    if (!IsReady())
+        return false;
+
     SendKeepalive(true);
 
     //
@@ -1401,14 +2022,14 @@ bool BgpPeer::KeepaliveTimerExpired() {
     return true;
 }
 
-void BgpPeer::StartEndOfRibTimer() {
-    uint32_t timeout = 30 * 1000;
+void BgpPeer::StartEndOfRouteTargetRibTimer() {
+    uint32_t timeout = 30;
     char *time_str = getenv("BGP_RTFILTER_EOR_TIMEOUT");
     if (time_str) {
         timeout = strtoul(time_str, NULL, 0);
     }
-    end_of_rib_timer_->Start(timeout,
-        boost::bind(&BgpPeer::EndOfRibTimerExpired, this),
+    end_of_rib_timer_->Start(timeout * 1000,
+        boost::bind(&BgpPeer::EndOfRouteTargetRibTimerExpired, this),
         boost::bind(&BgpPeer::EndOfRibTimerErrorHandler, this, _1, _2));
 }
 
@@ -1430,11 +2051,6 @@ void BgpPeer::StartKeepaliveTimer() {
 
 void BgpPeer::StopKeepaliveTimerUnlocked() {
     keepalive_timer_->Cancel();
-}
-
-void BgpPeer::StopKeepaliveTimer() {
-    tbb::spin_mutex::scoped_lock lock(spin_mutex_);
-    StopKeepaliveTimerUnlocked();
 }
 
 bool BgpPeer::KeepaliveTimerRunning() {
@@ -1514,26 +2130,28 @@ bool BgpPeer::ReceiveMsg(BgpSession *session, const u_int8_t *msg,
 }
 
 string BgpPeer::ToString() const {
-    ostringstream out;
-
-    out << peer_key_.endpoint.address();
-    if (peer_key_.endpoint.port() != BgpConfigManager::kDefaultPort) {
-        out << ":" << dec << peer_key_.endpoint.port();
+    if (to_str_.empty()) {
+        ostringstream out;
+        out << peer_key_.endpoint.address();
+        if (peer_key_.endpoint.port() != BgpConfigManager::kDefaultPort) {
+            out << ":" << dec << peer_key_.endpoint.port();
+        }
+        to_str_ = out.str();
     }
-    return out.str();
+    return to_str_;
 }
 
 string BgpPeer::ToUVEKey() const {
-    ostringstream out;
-
-    // XXX Skip master instance names from the logs and uves.
-    if (true || !rtinstance_->IsMasterRoutingInstance()) {
-        out << rtinstance_->name() << ":";
+    if (uve_key_str_.empty()) {
+        ostringstream out;
+        if (rtinstance_) {
+            out << rtinstance_->name() << ":";
+        }
+        out << server_->localname() << ":";
+        out << peer_name();
+        uve_key_str_ = out.str();
     }
-    // out << peer_key_.endpoint.address();
-    out << server_->localname() << ":";
-    out << peer_name();
-    return out.str();
+    return uve_key_str_;
 }
 
 //
@@ -1620,7 +2238,11 @@ void BgpPeer::ManagedDelete() {
         return;
     BGP_LOG_PEER(Config, this, SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
                  BGP_PEER_DIR_NA, "Received request for deletion");
-    server()->increment_deleting_count();
+    if (router_type_ == "bgpaas-client") {
+        server()->increment_deleting_bgpaas_count();
+    } else {
+        server()->increment_deleting_count();
+    }
     deleter_->Delete();
 }
 
@@ -1628,6 +2250,10 @@ void BgpPeer::RetryDelete() {
     if (!deleter_->IsDeleted())
         return;
     deleter_->RetryDelete();
+}
+
+int BgpPeer::GetTaskInstance() const {
+    return index_ % TaskScheduler::GetInstance()->HardwareThreadCount();
 }
 
 void BgpPeer::SetDataCollectionKey(BgpPeerInfo *peer_info) const {
@@ -1684,42 +2310,42 @@ void BgpPeer::FillCloseInfo(BgpNeighborResp *resp) const {
 }
 
 void BgpPeer::FillBgpNeighborDebugState(BgpNeighborResp *bnr,
-                                        const IPeerDebugStats *peer_state) {
-    bnr->set_last_state(peer_state->last_state());
-    bnr->set_last_event(peer_state->last_event());
-    bnr->set_last_error(peer_state->last_error());
-    bnr->set_last_state_at(peer_state->last_state_change_at());
-    bnr->set_flap_count(peer_state->num_flaps());
-    bnr->set_flap_time(peer_state->last_flap());
+                                        const IPeerDebugStats *peer_stats) {
+    bnr->set_last_state(peer_stats->last_state());
+    bnr->set_last_event(peer_stats->last_event());
+    bnr->set_last_error(peer_stats->last_error());
+    bnr->set_last_state_at(peer_stats->last_state_change_at());
+    bnr->set_flap_count(peer_stats->num_flaps());
+    bnr->set_flap_time(peer_stats->last_flap());
 
     IPeerDebugStats::ProtoStats stats;
     PeerProtoStats proto_stats;
-    peer_state->GetRxProtoStats(&stats);
+    peer_stats->GetRxProtoStats(&stats);
     FillProtoStats(stats, &proto_stats);
     bnr->set_rx_proto_stats(proto_stats);
 
-    peer_state->GetTxProtoStats(&stats);
+    peer_stats->GetTxProtoStats(&stats);
     FillProtoStats(stats, &proto_stats);
     bnr->set_tx_proto_stats(proto_stats);
 
     IPeerDebugStats::UpdateStats update_stats;
     PeerUpdateStats rt_stats;
-    peer_state->GetRxRouteUpdateStats(&update_stats);
+    peer_stats->GetRxRouteUpdateStats(&update_stats);
     FillRouteUpdateStats(update_stats, &rt_stats);
     bnr->set_rx_update_stats(rt_stats);
 
-    peer_state->GetTxRouteUpdateStats(&update_stats);
+    peer_stats->GetTxRouteUpdateStats(&update_stats);
     FillRouteUpdateStats(update_stats, &rt_stats);
     bnr->set_tx_update_stats(rt_stats);
 
     IPeerDebugStats::SocketStats socket_stats;
     PeerSocketStats peer_socket_stats;
 
-    peer_state->GetRxSocketStats(&socket_stats);
+    peer_stats->GetRxSocketStats(&socket_stats);
     FillSocketStats(socket_stats, &peer_socket_stats);
     bnr->set_rx_socket_stats(peer_socket_stats);
 
-    peer_state->GetTxSocketStats(&socket_stats);
+    peer_stats->GetTxSocketStats(&socket_stats);
     FillSocketStats(socket_stats, &peer_socket_stats);
     bnr->set_tx_socket_stats(peer_socket_stats);
 }
@@ -1768,6 +2394,9 @@ void BgpPeer::FillNeighborInfo(const BgpSandeshContext *bsc,
     bnr->set_local_asn(local_as());
     bnr->set_negotiated_hold_time(state_machine_->hold_time());
     bnr->set_primary_path_count(GetPrimaryPathCount());
+    bnr->set_task_instance(GetTaskInstance());
+    bnr->set_flap_count(peer_stats_->num_flaps());
+    bnr->set_flap_time(peer_stats_->last_flap());
     bnr->set_auth_type(
         AuthenticationData::KeyTypeToString(inuse_authkey_type_));
     if (bsc->test_mode()) {
@@ -1779,12 +2408,20 @@ void BgpPeer::FillNeighborInfo(const BgpSandeshContext *bsc,
 
     bnr->set_configured_address_families(configured_families_);
     bnr->set_negotiated_address_families(negotiated_families_);
+    bnr->set_graceful_restart_address_families(graceful_restart_families_);
+    bnr->set_long_lived_graceful_restart_address_families(
+            long_lived_graceful_restart_families_);
+    bnr->set_graceful_restart_time(peer_close_->GetGracefulRestartTime());
+    bnr->set_long_lived_graceful_restart_time(
+            peer_close_->GetLongLivedGracefulRestartTime());
+
     bnr->set_configured_hold_time(state_machine_->GetConfiguredHoldTime());
     FillBgpNeighborFamilyAttributes(bnr);
     FillBgpNeighborDebugState(bnr, peer_stats_.get());
-    PeerRibMembershipManager *mgr = server_->membership_mgr();
+    BgpMembershipManager *mgr = server_->membership_mgr();
     mgr->FillPeerMembershipInfo(this, bnr);
     bnr->set_routing_instances(vector<BgpNeighborRoutingInstance>());
+    FillCloseInfo(bnr);
 }
 
 void BgpPeer::inc_rx_open() {
@@ -1931,6 +2568,18 @@ uint64_t BgpPeer::get_update_error() const {
     return peer_stats_->error_stats_.update_error;
 }
 
+uint64_t BgpPeer::get_socket_reads() const {
+    IPeerDebugStats::SocketStats stats;
+    peer_stats_->GetRxSocketStats(&stats);
+    return stats.calls;
+}
+
+uint64_t BgpPeer::get_socket_writes() const {
+    IPeerDebugStats::SocketStats stats;
+    peer_stats_->GetTxSocketStats(&stats);
+    return stats.calls;
+}
+
 string BgpPeer::last_flap_at() const {
     if (last_flap_) {
         return integerToString(UTCUsecToPTime(last_flap_));
@@ -1941,6 +2590,7 @@ string BgpPeer::last_flap_at() const {
 
 void BgpPeer::increment_flap_count() {
     flap_count_++;
+    total_flap_count_++;
     last_flap_ = UTCTimestampUsec();
 
     BgpPeerInfoData peer_info;
@@ -1950,6 +2600,11 @@ void BgpPeer::increment_flap_count() {
     flap_info.set_flap_time(last_flap_);
     peer_info.set_flap_info(flap_info);
     BGPPeerInfoSend(peer_info);
+
+    PeerFlapData peer_flap_data;
+    peer_flap_data.set_name(ToUVEKey());
+    peer_flap_data.set_flap_info(flap_info);
+    PeerFlap::Send(peer_flap_data, "ObjectBgpPeer");
 }
 
 void BgpPeer::reset_flap_count() {
@@ -1961,4 +2616,9 @@ void BgpPeer::reset_flap_count() {
     PeerFlapInfo flap_info;
     peer_info.set_flap_info(flap_info);
     BGPPeerInfoSend(peer_info);
+
+    PeerFlapData peer_flap_data;
+    peer_flap_data.set_name(ToUVEKey());
+    peer_flap_data.set_flap_info(flap_info);
+    PeerFlap::Send(peer_flap_data, "ObjectBgpPeer");
 }

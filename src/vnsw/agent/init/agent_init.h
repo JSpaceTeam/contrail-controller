@@ -137,6 +137,9 @@ public:
     virtual void PktShutdownBase();
     virtual void PktShutdown() { }
 
+    // Shutdown agent profiling
+    virtual void ProfileShutdownBase();
+
     // Shutdown other modules
     virtual void ModulesShutdownBase();
     virtual void ModulesShutdown() { }
@@ -165,6 +168,7 @@ private:
     std::auto_ptr<Agent> agent_;
     AgentParam *agent_param_;
 
+    tbb::mutex init_mutex_;
     std::auto_ptr<TaskTrigger> trigger_;
 
     std::auto_ptr<AgentStats> stats_;

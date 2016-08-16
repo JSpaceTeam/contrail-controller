@@ -15,8 +15,10 @@
 #include "oper/vrf.h"
 #include "oper/vm.h"
 #include "oper/physical_device.h"
-#include "oper/loadbalancer.h"
 #include "filter/acl.h"
+#include "oper/qos_queue.h"
+#include "oper/forwarding_class.h"
+#include "oper/qos_config.h"
 
 #include <boost/assign/list_of.hpp>
 #include <boost/bind.hpp>
@@ -71,20 +73,20 @@ IFMapDependencyManager::~IFMapDependencyManager() {
 void IFMapDependencyManager::Initialize(Agent *agent) {
     static const char *ifmap_types[] = {
         "access-control-list",
+        "alias-ip",
+        "alias-ip-pool",
         "bgp-as-a-service",
         "bgp-router",
         "floating-ip",
         "floating-ip-pool",
+        "forwarding-class",
         "instance-ip",
-        "loadbalancer",
-        "loadbalancer-listener",
-        "loadbalancer-healthmonitor",
-        "loadbalancer-member",
-        "loadbalancer-pool",
         "logical-interface",
         "network-ipam",
         "physical-interface",
         "physical-router",
+        "qos-config",
+        "qos-queue",
         "routing-instance",
         "security-group",
         "service-health-check",
@@ -123,8 +125,6 @@ void IFMapDependencyManager::Initialize(Agent *agent) {
     IFMapDependencyTracker::NodeEventPolicy *policy = tracker_->policy_map();
 
     ReactionMap react_si = map_list_of<string, PropagateList>
-            ("loadbalancer-pool-service-instance", list_of("self"))
-            ("loadbalancer-service-instance", list_of("self"))
             ("service-instance-service-template", list_of("self"))
             ("virtual-machine-service-instance", list_of("self"))
             ("self", list_of("self"));
@@ -164,34 +164,6 @@ void IFMapDependencyManager::Initialize(Agent *agent) {
     ReactionMap react_ipam = map_list_of<string, PropagateList>
             ("virtual-network-network-ipam", list_of("nil"));
     policy->insert(make_pair("network-ipam", react_ipam));
-
-
-    ReactionMap react_lb_pool = map_list_of<string, PropagateList>
-            ("loadbalancer-pool-loadbalancer-healthmonitor",
-             list_of("self")("loadbalancer-pool-service-instance"))
-            ("loadbalancer-pool-loadbalancer-member",
-             list_of("self")("loadbalancer-pool-service-instance"))
-            ("self", list_of("self")("loadbalancer-pool-service-instance"))
-            ("virtual-ip-loadbalancer-pool", list_of("self"));
-    policy->insert(make_pair("loadbalancer-pool", react_lb_pool));
-
-    ReactionMap react_lb = map_list_of<string, PropagateList>
-            ("loadbalancer-listener-loadbalancer",
-             list_of("self")("loadbalancer-service-instance"))
-            ("self", list_of("self")("loadbalancer-service-instance"));
-    policy->insert(make_pair("loadbalancer", react_lb));
-
-    ReactionMap react_lb_vip = map_list_of<string, PropagateList>
-            ("self", list_of("virtual-ip-loadbalancer-pool"));
-    policy->insert(make_pair("virtual-ip", react_lb_vip));
-
-    ReactionMap react_lb_member = map_list_of<string, PropagateList>
-            ("self", list_of("loadbalancer-pool-loadbalancer-member"));
-    policy->insert(make_pair("loadbalancer-member", react_lb_member));
-
-    ReactionMap react_lb_healthmon = map_list_of<string, PropagateList>
-            ("self", list_of("loadbalancer-pool-loadbalancer-healthmonitor"));
-    policy->insert(make_pair("loadbalancer-healthmonitor", react_lb_healthmon));
 
     InitializeDependencyRules(agent);
 }
@@ -418,6 +390,10 @@ bool IFMapDependencyManager::IsRegistered(const IFMapNode *node) {
     return (it != event_map_.end());
 }
 
+bool IFMapDependencyManager::IsNodeIdentifiedByUuid(const IFMapNode *node) {
+    return (strcmp(node->table()->Typename(), "routing-instance") != 0);
+}
+
 IFMapDependencyManager::Path MakePath
 (const char *link1,        const char *node1,        bool interest1,
  const char *link2 = NULL, const char *node2 = NULL, bool interest2 = false,
@@ -597,6 +573,9 @@ void IFMapDependencyManager::InitializeDependencyRules(Agent *agent) {
                                "virtual-network-network-ipam", true,
                                "virtual-network-network-ipam",
                                "network-ipam", false));
+    AddDependencyPath("virtual-network",
+                      MakePath("virtual-network-qos-config",
+                               "qos-config", true));
     RegisterConfigHandler(this, "virtual-network",
                           agent ? agent->vn_table() : NULL);
 
@@ -650,6 +629,13 @@ void IFMapDependencyManager::InitializeDependencyRules(Agent *agent) {
                       MakePath("virtual-machine-interface-security-group",
                                "security-group", true));
     AddDependencyPath("virtual-machine-interface",
+                      MakePath("alias-ip-virtual-machine-interface",
+                               "alias-ip", true,
+                               "alias-ip-pool-alias-ip",
+                               "alias-ip-pool", false,
+                               "virtual-network-alias-ip-pool",
+                               "virtual-network", true));
+    AddDependencyPath("virtual-machine-interface",
                       MakePath("floating-ip-virtual-machine-interface",
                                "floating-ip", true,
                                "floating-ip-pool-floating-ip",
@@ -679,6 +665,9 @@ void IFMapDependencyManager::InitializeDependencyRules(Agent *agent) {
                                "bgp-router", true,
                                "instance-bgp-router",
                                "routing-instance", true));
+    AddDependencyPath("virtual-machine-interface",
+                      MakePath("virtual-machine-interface-qos-config",
+                               "qos-config", true));
     RegisterConfigHandler(this, "virtual-machine-interface",
                           agent ? agent->interface_table() : NULL);
     ////////////////////////////////////////////////////////////////////////
@@ -718,34 +707,24 @@ void IFMapDependencyManager::InitializeDependencyRules(Agent *agent) {
     RegisterConfigHandler(this, "physical-router",
                           agent ? agent->physical_device_table() : NULL);
 
-    AddDependencyPath("loadbalancer",
-                      MakePath("loadbalancer-listener-loadbalancer",
-                               "loadbalancer-listener", false,
-                               "loadbalancer-pool-loadbalancer-listener",
-                               "loadbalancer-pool", true,
-                               "loadbalancer-pool-loadbalancer-member",
-                               "loadbalancer-member", false));
-    AddDependencyPath("loadbalancer",
-                      MakePath("loadbalancer-listener-loadbalancer",
-                               "loadbalancer-listener", false,
-                               "loadbalancer-pool-loadbalancer-listener",
-                               "loadbalancer-pool", true,
-                               "loadbalancer-pool-loadbalancer-healthmonitor",
-                               "loadbalancer-healthmonitor", false));
-    AddDependencyPath("loadbalancer",
-                      MakePath("loadbalancer-listener-loadbalancer",
-                               "loadbalancer-listener", false,
-                               "loadbalancer-pool-loadbalancer-listener",
-                               "loadbalancer-pool", true,
-                               "loadbalancer-pool-loadbalancer-member",
-                               "loadbalancer-member", false,
-                               "loadbalancer-pool-loadbalancer-healthmonitor",
-                               "loadbalancer-healthmonitor", false));
-    RegisterConfigHandler(this, "loadbalancer",
-                          agent ? agent->loadbalancer_table() : NULL);
-
+    ////////////////////////////////////////////////////////////////////////
+    // virtual-machine-interface <----> service-health-check
+    ////////////////////////////////////////////////////////////////////////
+    AddDependencyPath("service-health-check",
+                      MakePath("service-port-health-check",
+                               "virtual-machine-interface", true));
     RegisterConfigHandler(this, "service-health-check",
                           agent ? agent->health_check_table() : NULL);
+
+     AddDependencyPath("qos-config",
+                       MakePath("global-qos-config",
+                                "qos-config", true));
+    RegisterConfigHandler(this, "qos-config",
+                          agent ? agent->qos_config_table() : NULL);
+    RegisterConfigHandler(this, "qos-queue",
+                          agent ? agent->qos_queue_table() : NULL);
+    RegisterConfigHandler(this, "forwarding-class",
+                          agent ? agent->forwarding_class_table() : NULL);
 }
 
 void IFMapNodePolicyReq::HandleRequest() const {

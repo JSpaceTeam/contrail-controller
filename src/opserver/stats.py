@@ -11,6 +11,7 @@
 #
 
 import sys
+import os
 import argparse
 import json
 import datetime
@@ -20,9 +21,6 @@ from sandesh_common.vns.constants import ModuleNames, NodeTypeNames
 import sandesh.viz.constants as VizConstants
 from pysandesh.gen_py.sandesh.ttypes import SandeshType, SandeshLevel
 
-STAT_TABLE_LIST = [xx.stat_type + "." + xx.stat_attr for xx in VizConstants._STAT_TABLES]
-
-
 class StatQuerier(object):
 
     def __init__(self):
@@ -31,14 +29,34 @@ class StatQuerier(object):
 
     # Public functions
     def run(self):
-        if self.parse_args() != 0:
+        topdir = '/usr/share/doc/contrail-docs/html/messages/'
+        extn = '.json'
+        stat_schema_files = []
+        for dirpath, dirnames, files in os.walk(topdir):
+            for name in files:
+                if name.lower().endswith(extn):
+                    stat_schema_files.append(os.path.join(dirpath, name))
+        stat_tables = []
+        for schema_file in stat_schema_files:
+            with open(schema_file) as data_file:
+                data = json.load(data_file)
+            for _, tables in data.iteritems():
+                for table in tables:
+                    if table not in stat_tables:
+                        stat_tables.append(table)
+        stat_table_list = [xx.stat_type + "." + xx.stat_attr for xx in VizConstants._STAT_TABLES]
+        stat_table_list.extend([xx["stat_type"] + "." + xx["stat_attr"] for xx
+            in stat_tables])
+
+        if self.parse_args(stat_table_list) != 0:
             return
 
         if len(self._args.select)==0 and self._args.dtable is None: 
             tab_url = "http://" + self._args.analytics_api_ip + ":" +\
                 self._args.analytics_api_port +\
                 "/analytics/table/StatTable." + self._args.table
-            schematxt = OpServerUtils.get_url_http(tab_url + "/schema")
+            schematxt = OpServerUtils.get_url_http(tab_url + "/schema",
+                self._args.admin_user, self._args.admin_password)
             schema = json.loads(schematxt.text)['columns']
             for pp in schema:
                 if pp.has_key('suffixes') and pp['suffixes']:
@@ -46,7 +64,9 @@ class StatQuerier(object):
                 else:
                     des = "%s" % pp['name']
                 if pp['index']:
-                    valuetxt = OpServerUtils.get_url_http(tab_url + "/column-values/" + pp['name'])
+                    valuetxt = OpServerUtils.get_url_http(
+                        tab_url + "/column-values/" + pp['name'],
+                        self._args.admin_user, self._args.admin_password)
                     print "%s : %s %s" % (des,pp['datatype'], valuetxt.text)
                 else:
                     print "%s : %s" % (des,pp['datatype'])
@@ -54,10 +74,10 @@ class StatQuerier(object):
             result = self.query()
             self.display(result)
 
-    def parse_args(self):
+    def parse_args(self, stat_table_list):
         """ 
         Eg. python stats.py --analytics-api-ip 127.0.0.1
-                          --analytics-api-port 8081
+                          --analytics-api-port 8181
                           --table AnalyticsCpuState.cpu_info
                           --where name=a6s40 cpu_info.module_id=Collector
                           --select "T=60 SUM(cpu_info.cpu_share)"
@@ -68,7 +88,7 @@ class StatQuerier(object):
         """
         defaults = {
             'analytics_api_ip': '127.0.0.1',
-            'analytics_api_port': '8081',
+            'analytics_api_port': '8181',
             'start_time': 'now-10m',
             'end_time': 'now',
             'select' : [],
@@ -87,7 +107,7 @@ class StatQuerier(object):
         parser.add_argument(
             "--last", help="Logs from last time period (format 10m, 1d)")
         parser.add_argument(
-            "--table", help="StatTable to query", choices=STAT_TABLE_LIST)
+            "--table", help="StatTable to query", choices=stat_table_list)
         parser.add_argument(
             "--dtable", help="Dynamic StatTable to query")
         parser.add_argument(
@@ -96,6 +116,11 @@ class StatQuerier(object):
             "--where", help="List of Where Terms to be ANDed", nargs='+')
         parser.add_argument(
             "--sort", help="List of Sort Terms", nargs='+')
+        parser.add_argument(
+            "--admin-user", help="Name of admin user", default="admin")
+        parser.add_argument(
+            "--admin-password", help="Password of admin user",
+            default="contrail123")
         self._args = parser.parse_args()
 
         if self._args.table is None and self._args.dtable is None:
@@ -132,7 +157,8 @@ class StatQuerier(object):
         
         print json.dumps(query_dict)
         resp = OpServerUtils.post_url_http(
-            query_url, json.dumps(query_dict), sync = True)
+            query_url, json.dumps(query_dict), self._args.admin_user,
+            self._args.admin_password, sync = True)
 
         res = None
         if resp is not None:

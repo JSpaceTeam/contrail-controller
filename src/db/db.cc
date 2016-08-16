@@ -7,6 +7,7 @@
 #include "db/db_partition.h"
 #include "db/db_table.h"
 #include "db/db_table_walker.h"
+#include "db/db_table_walk_mgr.h"
 #include "tbb/task_scheduler_init.h"
 
 using namespace std;
@@ -37,9 +38,13 @@ int DB::PartitionCount() {
     return partition_count_;
 }
 
-DB::DB() : walker_(new DBTableWalker()) {
+DB::DB(int task_id) : task_id_(task_id) {
+    if (task_id == -1)
+        task_id_ = TaskScheduler::GetInstance()->GetTaskId("db::DBTable");
+    walker_.reset(new DBTableWalker(task_id_));
+    walk_mgr_.reset(new DBTableWalkMgr());
     for (int i = 0; i < PartitionCount(); i++) {
-        partitions_.push_back(new DBPartition(i));
+        partitions_.push_back(new DBPartition(this, i));
     }
 }
 
@@ -93,6 +98,7 @@ DBTableBase *DB::CreateTable(const string &name) {
         FactoryMap::iterator loc = factory_map->find(prefix);
         if (loc != factory_map->end()) {
             DBTableBase *tbl_base = (loc->second)(this, name);
+            tbb::mutex::scoped_lock lock(mutex_);
             tables_.insert(make_pair(name, tbl_base));
             return tbl_base;
         }

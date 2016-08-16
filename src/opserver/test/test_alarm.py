@@ -5,6 +5,7 @@
 #
 
 import gevent
+import time
 from gevent import monkey; monkey.patch_all()
 import json
 import signal
@@ -17,27 +18,29 @@ from utils.util import retry
 from collections import namedtuple
 from kafka.common import OffsetAndMessage,Message
 
+from vnc_api.gen.resource_client import Alarm
+from vnc_api.gen.resource_xsd import AlarmExpression, AlarmOperand2, \
+    AlarmAndList, AlarmOrList, UveKeysType
 from pysandesh.util import UTCTimestampUsec
 from pysandesh.gen_py.sandesh_alarm.ttypes import SandeshAlarmAckRequest, \
     SandeshAlarmAckResponseCode
 from opserver.sandesh.alarmgen_ctrl.sandesh_alarm_base.ttypes import \
-    AlarmTemplate, AlarmElement, Operand1, Operand2, \
-    UVEAlarmInfo, UVEAlarms, AllOf
+    UVEAlarmInfo, UVEAlarmConfig, UVEAlarms, AlarmRules, \
+    AlarmAndList as SandeshAlarmAndList, AlarmCondition, AlarmMatch, \
+    AlarmConditionMatch, AlarmOperand2 as SandeshAlarmOperand2
+from opserver.sandesh.alarmgen_ctrl.ttypes import UVEAlarmOperState, \
+    UVEAlarmStateMachineInfo, UVEAlarmState
 from opserver.uveserver import UVEServer
 from opserver.partition_handler import PartitionHandler, UveStreamProc, \
     UveStreamer, UveStreamPart, PartInfo
-from opserver.alarmgen import Controller
+from opserver.alarmgen import Controller, AlarmStateMachine, AlarmProcessor
 from opserver.alarmgen_cfg import CfgParser
+from opserver.plugins.alarm_base import AlarmBase
 
 logging.basicConfig(level=logging.DEBUG,
     format='%(asctime)s %(levelname)s %(message)s')
 logging.getLogger("stevedore.extension").setLevel(logging.WARNING)
 
-TestStage = namedtuple("TestStage",["i","o"])
-PartHandlerInput = namedtuple("PartHandlerInput",
-    ["redis_instances", "get_part", "get_messages"])
-PartHandlerOutput = namedtuple("PartHandlerOutput",
-    ["callbacks", "uvedb"])
 
 class TestChecker(object):
     @retry(delay=1, tries=3)
@@ -274,18 +277,25 @@ class TestAlarmGen(unittest.TestCase, TestChecker):
     def tearDown(self):
         self._agtask.kill()
 
-    @staticmethod
-    def create_test_alarm_info(alarm_type):
+    def create_test_alarm_info(self, table, name, alarm_type):
         or_list = []
-        or_list.append([AllOf(all_of=[AlarmElement(\
-            rule=AlarmTemplate(oper="!=",
-                operand1=Operand1(keys=["dummytoken"]),
-                operand2=Operand2(json_value=json.dumps('UP'))),
-            json_operand1_value=json.dumps('DOWN'))])])
-        alarm_info = UVEAlarmInfo(type=alarm_type, severity=1,
-                                  timestamp=UTCTimestampUsec(),
-                                  token="dummytoken",
-                                  any_of=or_list, ack=False)
+        condition_match = AlarmConditionMatch(
+            condition=AlarmCondition(operation="!=", operand1="dummytoken",
+                operand2=SandeshAlarmOperand2(json_value=json.dumps("UP"))),
+            match=[AlarmMatch(json_operand1_value=json.dumps("DOWN"))])
+        or_list.append(SandeshAlarmAndList([condition_match]))
+        uai = UVEAlarmInfo(type=alarm_type, severity=AlarmBase.ALARM_MAJOR,
+                           timestamp=UTCTimestampUsec(),
+                           token="dummytoken",
+                           alarm_rules=AlarmRules(or_list), ack=False)
+        conf = UVEAlarmConfig()
+        state = UVEAlarmOperState(state = UVEAlarmState.Active,
+                                head_timestamp = 0, alarm_timestamp = [])
+	uv = table + ':' + name
+        alarm_info = AlarmStateMachine(tab = table, uv = uv, nm = \
+		alarm_type, activeTimer = 0, idleTimer = 0, freqCheck_Times\
+		= 0, freqCheck_Seconds = 0, freqExceededCheck = False, sandesh=self._ag._sandesh)
+	alarm_info.set_uai(uai)
         return alarm_info
     # end create_test_alarm_info
 
@@ -296,13 +306,33 @@ class TestAlarmGen(unittest.TestCase, TestChecker):
         if not self._ag.tab_alarms[table].has_key(key):
             self._ag.tab_alarms[table][key] = {}
         self._ag.tab_alarms[table][key][atype] = \
-            TestAlarmGen.create_test_alarm_info(atype)
+            self.create_test_alarm_info(table, name, atype)
     # end add_test_alarm
 
     def get_test_alarm(self, table, name, atype):
         key = table+':'+name
-        return self._ag.tab_alarms[table][key][atype]
+        return self._ag.tab_alarms[table][key][atype].get_uai(forced=True)
     # end get_test_alarm
+
+    def get_alarm_config_object(self, config_dict):
+        alarm_or_list = []
+        for and_list in config_dict['alarm_rules']['or_list']:
+            alarm_and_list = []
+            for exp in and_list['and_list']:
+                alarm_and_list.append(AlarmExpression(
+                    operation=exp['operation'],
+                    operand1=exp['operand1'],
+                    operand2=AlarmOperand2(uve_attribute=exp['operand2'].get(
+                        'uve_attribute'), json_value=exp['operand2'].get(
+                        'json_value')),
+                    variables=exp.get('variables')))
+            alarm_or_list.append(AlarmAndList(alarm_and_list))
+        return Alarm(name=config_dict['name'],
+                     uve_keys=UveKeysType(config_dict['uve_keys']),
+                     alarm_severity=config_dict['alarm_severity'],
+                     alarm_rules=AlarmOrList(alarm_or_list),
+                     **config_dict['kwargs'])
+    # end get_alarm_config_object
 
     @mock.patch('opserver.alarmgen.Controller.reconnect_agg_uve')
     @mock.patch('opserver.alarmgen.Controller.clear_agg_uve')
@@ -447,7 +477,17 @@ class TestAlarmGen(unittest.TestCase, TestChecker):
         self._ag.tab_alarms = {}
         self.add_test_alarm('table1', 'name1', 'type1')
         self.add_test_alarm('table1', 'name1', 'type2')
-        tab_alarms_copy = copy.deepcopy(self._ag.tab_alarms)
+	tab_alarms_copy = {}
+	for tab in self._ag.tab_alarms.keys():
+	    for uk,uv in self._ag.tab_alarms[tab].iteritems():
+		for ak,av in uv.iteritems():
+		    uai = av.get_uai(forced=True)
+		    if uai:
+			if not tab in tab_alarms_copy.keys():
+			    tab_alarms_copy[tab] = {}
+			if not uk in tab_alarms_copy[tab].keys():
+			    tab_alarms_copy[tab][uk] = {}
+        		tab_alarms_copy[tab][uk][ak] = copy.deepcopy(uai)
 
         TestCase = namedtuple('TestCase', ['name', 'input', 'output'])
         TestInput = namedtuple('TestInput', ['alarm_ack_req'])
@@ -531,6 +571,10 @@ class TestAlarmGen(unittest.TestCase, TestChecker):
             )
         ]
 
+        self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    get_uas().state = UVEAlarmState.Active
+        self._ag.tab_alarms['table1']['table1:name1']['type2'].\
+                    get_uas().state = UVEAlarmState.Active
         for case in tests:
             logging.info('=== Test %s ===' % (case.name))
             return_code = self._ag.alarm_ack_callback(case.input.alarm_ack_req)
@@ -543,9 +587,9 @@ class TestAlarmGen(unittest.TestCase, TestChecker):
                 uvekey = table+':'+name
                 for atype, alarm in tab_alarms_copy[table][uvekey].iteritems():
                     if atype in case.output.ack_values:
-                        alarm.ack = case.output.ack_values[atype]
-                alarms = copy.deepcopy(tab_alarms_copy[table][uvekey])
-                alarm_data = UVEAlarms(name=name, alarms=alarms.values())
+			alarm.ack = case.output.ack_values[atype]
+		alarms = copy.deepcopy(tab_alarms_copy[table][uvekey])
+		alarm_data = UVEAlarms(name=name, alarms=alarms.values())
                 MockAlarmTrace.assert_called_once_with(data=alarm_data,
                     table=table, sandesh=self._ag._sandesh)
                 MockAlarmTrace().send.assert_called_once_with(
@@ -557,8 +601,1174 @@ class TestAlarmGen(unittest.TestCase, TestChecker):
             # verify that ack field is set in the alarm table upon
             # successful acknowledgement and the table is untouched in case
             # of failure.
-            self.assertEqual(tab_alarms_copy, self._ag.tab_alarms)
+            #self.assertEqual(tab_alarms_copy, self._ag.tab_alarms)
+	    for tab in self._ag.tab_alarms.keys():
+		for uk,uv in self._ag.tab_alarms[tab].iteritems():
+		    for ak,av in uv.iteritems():
+			uai = av.get_uai(forced=True)
+			if uai:
+        		    self.assertEqual(uai, tab_alarms_copy[tab][uk][ak])
     # end test_03_alarm_ack_callback
+
+    def test_04_alarm_state_machine(self):
+        self._ag.tab_alarms = {}
+        self.add_test_alarm('table1', 'name1', 'type1')
+
+        TestCase = namedtuple('TestCase', ['name', 'initial_state',
+	    'timer', 'expected_output_state'])
+        set_alarm_test1 = [
+            TestCase (
+		name = "set alarm in Idle",
+		initial_state = UVEAlarmState.Idle,
+		timer = 1,
+		expected_output_state = UVEAlarmState.Soak_Active
+            ),
+	]
+	test_count = 1
+
+        for case in set_alarm_test1:
+            logging.info('=== Test case%s %s ===' % (test_count, case.name))
+	    test_count += 1
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    get_uas().state = case.initial_state
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    get_uac().ActiveTimer = case.timer
+            self._ag.tab_alarms['table1']['table1:name1']\
+		    ['type1'].set_alarms()
+            # verify output state
+            output_state = self._ag.tab_alarms['table1']['table1:name1']\
+                    ['type1'].get_uas().state
+            self.assertEqual(case.expected_output_state, output_state)
+
+	curr_time = int(time.time())
+        logging.info('=== Test case%s checking activeTimerExpiry ===' % (test_count))
+	test_count += 1
+	delete_alarms, update_alarms = AlarmStateMachine.run_timers\
+                (curr_time, self._ag.tab_alarms)
+        self.assertEqual(update_alarms, [])
+
+	curr_time += 1
+	delete_alarms, update_alarms = AlarmStateMachine.run_timers\
+                (curr_time, self._ag.tab_alarms)
+        self.assertEqual(len(update_alarms), 1)
+
+	clear_alarm_test1 = [
+            TestCase (
+		name = "clear alarm in Active",
+		initial_state = UVEAlarmState.Active,
+		timer = 0,
+		expected_output_state = UVEAlarmState.Idle
+            ),
+            TestCase (
+		name = "case3 clear alarm in Active with Timer",
+		initial_state = UVEAlarmState.Active,
+		timer = 1,
+		expected_output_state = UVEAlarmState.Soak_Idle
+            ),
+        ]
+
+        for case in clear_alarm_test1:
+            logging.info('=== Test case%s %s ===' % (test_count, case.name))
+	    test_count += 1
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    uas.state = case.initial_state
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    uac.IdleTimer = case.timer
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    uac.FreqCheck_Seconds = case.timer
+            delete_alarm = self._ag.tab_alarms['table1']\
+		    ['table1:name1']['type1'].clear_alarms()
+            # verify output state
+            output_state = self._ag.tab_alarms['table1']['table1:name1']\
+                    ['type1'].uas.state
+            self.assertEqual(case.expected_output_state, output_state)
+	    if(case.expected_output_state == UVEAlarmState.Idle):
+	    	self.assertEqual(delete_alarm, True)
+	    elif case.expected_output_state == UVEAlarmState.Soak_Idle:
+	    	self.assertEqual(delete_alarm, False)
+
+        logging.info('=== Test case%s checking idleTimerExpiry ===' % (test_count))
+	test_count += 1
+	curr_time = int(time.time())
+	delete_alarms, update_alarms = AlarmStateMachine.run_timers\
+                (curr_time, self._ag.tab_alarms)
+        self.assertEqual(delete_alarms, [])
+        self.assertEqual(update_alarms, [])
+
+	curr_time += 1
+	delete_alarms, update_alarms = AlarmStateMachine.run_timers\
+                (curr_time, self._ag.tab_alarms)
+        self.assertEqual(len(delete_alarms), 0)
+        self.assertEqual(len(update_alarms), 1)
+
+        logging.info('=== Test case%s checking deleteTimerExpiry ===' % (test_count))
+	test_count += 1
+	delete_alarms, update_alarms = AlarmStateMachine.run_timers\
+                (curr_time, self._ag.tab_alarms)
+        self.assertEqual(delete_alarms, [])
+
+	curr_time += 1
+	delete_alarms, update_alarms = AlarmStateMachine.run_timers\
+                (curr_time, self._ag.tab_alarms)
+        self.assertEqual(len(delete_alarms), 1)
+
+	clear_alarm_test2 = [
+            TestCase (
+		name = "clear alarm in Active with Timer",
+		initial_state = UVEAlarmState.Active,
+		timer = 1,
+		expected_output_state = UVEAlarmState.Soak_Idle
+            ),
+        ]
+
+        for case in clear_alarm_test2:
+            logging.info('=== Test case%s %s ===' % (test_count, case.name))
+	    test_count += 1
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    uas.state = case.initial_state
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    uac.IdleTimer = case.timer
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    uac.FreqCheck_Seconds = case.timer
+            delete_alarm = self._ag.tab_alarms['table1']\
+		    ['table1:name1']['type1'].clear_alarms()
+            # verify output state
+            output_state = self._ag.tab_alarms['table1']['table1:name1']\
+                    ['type1'].uas.state
+            self.assertEqual(case.expected_output_state, output_state)
+	    self.assertEqual(delete_alarm, False)
+
+        set_alarm_test2 = [
+            TestCase (
+		name = "set alarm in Soak_Idle",
+		initial_state = UVEAlarmState.Soak_Idle,
+		timer = 1,
+		expected_output_state = UVEAlarmState.Active
+            ),
+	]
+
+        for case in set_alarm_test2:
+            logging.info('=== Test case%s %s ===' % (test_count, case.name))
+	    test_count += 1
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    get_uas().state = case.initial_state
+            self._ag.tab_alarms['table1']['table1:name1']['type1'].\
+                    get_uac().ActiveTimer = case.timer
+            self._ag.tab_alarms['table1']['table1:name1']\
+		    ['type1'].set_alarms()
+            # verify output state
+            output_state = self._ag.tab_alarms['table1']['table1:name1']\
+                    ['type1'].get_uas().state
+            self.assertEqual(case.expected_output_state, output_state)
+
+    # end test_04_alarm_state_machine
+
+    def test_05_evaluate_uve_for_alarms(self):
+        TestCase = namedtuple('TestCase', ['name', 'input', 'output'])
+        TestInput = namedtuple('TestInput', ['alarm_cfg', 'uve_key', 'uve'])
+        TestOutput = namedtuple('TestOutput', ['or_list'])
+
+        alarm_config1 = self.get_alarm_config_object(
+            {
+                'name': 'alarm1',
+                'uve_keys': ['key1', 'key2'],
+                'alarm_severity': AlarmBase.ALARM_MINOR,
+                'alarm_rules': {
+                    'or_list': [
+                        {
+                            'and_list': [
+                                {
+                                    'operand1': 'A',
+                                    'operation': '==',
+                                    'operand2': {
+                                        'json_value': 'null'
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                'kwargs': {
+                    'parent_type': 'global-system-config',
+                    'fq_name': ['global-syscfg-default', 'alarm1']
+                }
+            }
+        )
+
+        alarm_config2 = self.get_alarm_config_object(
+            {
+                'name': 'alarm2',
+                'uve_keys': ['key1'],
+                'alarm_severity': AlarmBase.ALARM_MAJOR,
+                'alarm_rules': {
+                    'or_list': [
+                        {
+                            'and_list': [
+                                {
+                                    'operand1': 'A.B.C',
+                                    'operation': 'not in',
+                                    'operand2': {
+                                        'uve_attribute': 'X.Y'
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                'kwargs': {
+                    'parent_type': 'global-system-config',
+                    'fq_name': ['global-syscfg-default', 'alarm2']
+                }
+            }
+        )
+
+        alarm_config3 = self.get_alarm_config_object(
+            {
+                'name': 'alarm3',
+                'uve_keys': ['key1'],
+                'alarm_severity': AlarmBase.ALARM_CRITICAL,
+                'alarm_rules': {
+                    'or_list': [
+                        {
+                            'and_list': [
+                                {
+                                    'operand1': 'A.B',
+                                    'operation': '!=',
+                                    'operand2': {
+                                        'uve_attribute': 'A.C'
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                'kwargs': {
+                    'parent_type': 'global-system-config',
+                    'fq_name': ['global-syscfg-default', 'alarm3']
+                }
+            }
+        )
+
+        alarm_config4 = self.get_alarm_config_object(
+            {
+                'name': 'alarm4',
+                'uve_keys': ['key1'],
+                'alarm_severity': AlarmBase.ALARM_MAJOR,
+                'alarm_rules': {
+                    'or_list': [
+                        {
+                            'and_list': [
+                                {
+                                    'operand1': 'A.B',
+                                    'operation': '!=',
+                                    'operand2': {
+                                        'json_value': '2'
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                'kwargs': {
+                    'parent_type': 'global-system-config',
+                    'fq_name': ['global-syscfg-default', 'alarm4']
+                }
+            }
+        )
+
+        alarm_config5 = self.get_alarm_config_object(
+            {
+                'name': 'alarm5',
+                'uve_keys': ['key5'],
+                'alarm_severity': AlarmBase.ALARM_MINOR,
+                'alarm_rules': {
+                    'or_list': [
+                        {
+                            'and_list': [
+                                {
+                                    'operand1': 'A.B',
+                                    'operation': '<=',
+                                    'operand2': {
+                                        'uve_attribute': 'A.C.D'
+                                    },
+                                    'variables': ['A.C.N']
+                                }
+                            ]
+                        }
+                    ]
+                },
+                'kwargs': {
+                    'parent_type': 'global-system-config',
+                    'fq_name': ['global-syscfg-default', 'alarm5']
+                }
+            }
+        )
+
+        alarm_config6 = self.get_alarm_config_object(
+            {
+                'name': 'alarm6',
+                'uve_keys': ['key1'],
+                'alarm_severity': AlarmBase.ALARM_MAJOR,
+                'alarm_rules': {
+                    'or_list': [
+                        {
+                            'and_list': [
+                                {
+                                    'operand1': 'A.B',
+                                    'operation': '<=',
+                                    'operand2': {
+                                        'uve_attribute': 'A.C.D'
+                                    },
+                                    'variables': ['A.C.N']
+                                },
+                                {
+                                    'operand1': 'A.B',
+                                    'operation': '>=',
+                                    'operand2': {
+                                        'uve_attribute': 'A.C.E'
+                                    },
+                                    'variables': ['A.C.N']
+                                }
+                            ]
+                        }
+                    ]
+                },
+                'kwargs': {
+                    'parent_type': 'global-system-config',
+                    'fq_name': ['global-syscfg-default', 'alarm6']
+                }
+            }
+        )
+
+        alarm_config7 = self.get_alarm_config_object(
+            {
+                'name': 'alarm7',
+                'uve_keys': ['key1'],
+                'alarm_severity': AlarmBase.ALARM_CRITICAL,
+                'alarm_rules': {
+                    'or_list': [
+                        {
+                            'and_list': [
+                                {
+                                    'operand1': 'A',
+                                    'operation': '!=',
+                                    'operand2': {
+                                        'json_value': 'null'
+                                    }
+                                },
+                                {
+                                    'operand1': 'A.B',
+                                    'operation': 'not in',
+                                    'operand2': {
+                                        'json_value': '["abc", "def"]'
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            'and_list': [
+                                {
+                                    'operand1': 'A',
+                                    'operation': '!=',
+                                    'operand2': {
+                                        'json_value': 'null'
+                                    }
+                                },
+                                {
+                                    'operand1': 'A.B',
+                                    'operation': '==',
+                                    'operand2': {
+                                        'uve_attribute': 'A.D'
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                'kwargs': {
+                    'parent_type': 'global-system-config',
+                    'fq_name': ['global-syscfg-default', 'alarm7']
+                }
+            }
+        )
+
+        tests = [
+            TestCase(name='operand1 not present/null in UVE',
+                input=TestInput(alarm_cfg=alarm_config1,
+                    uve_key='Table1:host1',
+                    uve={}),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A',
+                                    'operand2': {
+                                        'json_value': 'null'
+                                    },
+                                    'operation': '=='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': 'null'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(name='operand2 not present/null in UVE',
+                input=TestInput(alarm_cfg=alarm_config2,
+                    uve_key='Table1:host1',
+                    uve={
+                        'A': {
+                            'B': {
+                                'C': 'xyz'
+                            },
+                        },
+                        'X': {
+                            'Z': 12
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A.B.C',
+                                    'operand2': {
+                                        'uve_attribute': 'X.Y'
+                                    },
+                                    'operation': 'not in'
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '"xyz"',
+                                        'json_operand2_val': 'null'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(
+                name='Failed to get operand1 from UVE',
+                input=TestInput(alarm_cfg=alarm_config2,
+                    uve_key='Table2:host1',
+                    uve={
+                        'A': {
+                            'D': 'test' 
+                        },
+                        'X': {
+                            'Y': ['xyz', 'abc']
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='Failed to get operand2 from UVE',
+                input=TestInput(alarm_cfg=alarm_config2,
+                    uve_key='Table3:host1',
+                    uve={
+                        'A': {
+                            'B': {
+                                'C': 'abc'
+                            }
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='operand1 does not evaluate to list;'
+                    'operand2 is not a json value and does not evaluate '
+                    'to list - no rule match',
+                input=TestInput(alarm_cfg=alarm_config3,
+                    uve_key='table2:host1',
+                    uve={
+                        'A': {
+                            'B': 'val1',
+                            'C': 'val1'
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='operand1 does not evaluate to list;'
+                    'operand2 is not a json value and does not evaluate '
+                    'to list',
+                input=TestInput(alarm_cfg=alarm_config3,
+                    uve_key='table4:host1',
+                    uve={
+                        'A': {
+                            'B': 'val1',
+                            'C': 'val2'
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'uve_attribute': 'A.C'
+                                    },
+                                    'operation': '!='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '"val1"',
+                                        'json_operand2_val': '"val2"'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(
+                name='operand1 does not evaluate to a list;'
+                    'operand2 is a json value - no rule match',
+                input=TestInput(alarm_cfg=alarm_config4,
+                    uve_key='table3:host2',
+                    uve={
+                        'A': {
+                            'B': 2,
+                            'C': 1
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='operand1 does not evaluate to a list;'
+                    'operand2 is a json value',
+                input=TestInput(alarm_cfg=alarm_config4,
+                    uve_key='table6:host2',
+                    uve={
+                        'A': {
+                            'B': 3,
+                            'C': 2
+                        },
+                        'X': {
+                            'Y': 'abc'
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'json_value': '2'
+                                    },
+                                    'operation': '!='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '3'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(
+                name='operand1 evaluates to a list;'
+                    'operand2 is a json value - no rule match',
+                input=TestInput(alarm_cfg=alarm_config4,
+                    uve_key='table7:host2',
+                    uve={
+                        'A': [
+                            {
+                                'B': 2,
+                                'C': 'abc'
+                            },
+                            {
+                                'B': 2,
+                                'C': 'xyz'
+                            }
+                        ]
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='operand1 evaluates to a list;'
+                    'operand2 is a json value',
+                input=TestInput(alarm_cfg=alarm_config4,
+                    uve_key='table7:host2',
+                    uve={
+                        'A': [
+                            {
+                                'B': 1,
+                                'C': 'abc'
+                            },
+                            {
+                                'B': 2,
+                                'C': 'qst'
+                            },
+                            {
+                                'B': '3',
+                                'C': 'xyz'
+                            }
+                        ]
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'json_value': '2'
+                                    },
+                                    'operation': '!='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '1'
+                                    },
+                                    {
+                                        'json_operand1_val': '3'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(
+                name='operand1 evaluates to a list;'
+                    'operand2 is a uve attribute and is not a list'
+                    ' - no rule match',
+                input=TestInput(alarm_cfg=alarm_config2,
+                    uve_key='table2:host2',
+                    uve={
+                        'A': {
+                            'B': [
+                                {
+                                    'C': 'abc'
+                                }
+                            ]
+                        },
+                        'X': {
+                            'Y': ['def', 'abc']
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='operand1 evaluates to a list;'
+                    'operand2 is a uve attribute and is not a list',
+                input=TestInput(alarm_cfg=alarm_config2,
+                    uve_key='table2:host2',
+                    uve={
+                        'A': {
+                            'B': [
+                                {
+                                    'C': 'abc'
+                                },
+                                {
+                                    'B': 'abc',
+                                    'C': 'def'
+                                },
+                                {
+                                    'C': 'xyz'
+                                }
+                            ]
+                        },
+                        'X': {
+                            'Y': ['def', 'pqr']
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A.B.C',
+                                    'operand2': {
+                                        'uve_attribute': 'X.Y'
+                                    },
+                                    'operation': 'not in'
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '"abc"',
+                                        'json_operand2_val': '["def", "pqr"]'
+                                    },
+                                    {
+                                        'json_operand1_val': '"xyz"',
+                                        'json_operand2_val': '["def", "pqr"]'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(
+                name='operand1 evaluates to a list; operand2 evaluates '
+                    'to a list - no rule match',
+                input=TestInput(alarm_cfg=alarm_config3,
+                    uve_key='table3:host3',
+                    uve={
+                        'A': [
+                            {
+                                'B': 'abc',
+                                'C': 'abc'
+                            },
+                            {
+                                'B': 'xyz',
+                                'C': 'xyz'
+                            },
+                            {
+                                'D': 1,
+                                'E': 2
+                            },
+                        ]
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='Both operand1 and operand2 evaluates to a list',
+                input=TestInput(alarm_cfg=alarm_config3,
+                    uve_key='table3:host1',
+                    uve={
+                        'A': [
+                            {
+                                'B': 'abc',
+                                'C': 'abc'
+                            },
+                            {
+                                'B': 'xyz',
+                            },
+                            {
+                                'C': 'abc'
+                            },
+                            {
+                                'B': 'def',
+                                'C': 'def'
+                            },
+                            {
+                                'B': 'def',
+                                'C': 'qst'
+                            }
+                        ],
+                        'X': {
+                            'A': 123
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'uve_attribute': 'A.C'
+                                    },
+                                    'operation': '!='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '"xyz"',
+                                        'json_operand2_val': 'null'
+                                    },
+                                    {
+                                        'json_operand1_val': 'null',
+                                        'json_operand2_val': '"abc"'
+                                    },
+                                    {
+                                        'json_operand1_val': '"def"',
+                                        'json_operand2_val': '"qst"'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(
+                name='operand1 is not a list; operand2 evaluates to a list'
+                    ' - no rule match',
+                input=TestInput(alarm_cfg=alarm_config5,
+                    uve_key='table5:host2',
+                    uve={
+                        'A': {
+                            'B': 10,
+                            'C': [
+                                {
+                                    'D': 5
+                                },
+                                {
+                                    'D': 2
+                                }
+                            ]
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='operand1 is not a list; operand2 evaluates to a list',
+                input=TestInput(alarm_cfg=alarm_config5,
+                    uve_key='table2:host2',
+                    uve={
+                        'A': {
+                            'B': 10,
+                            'C': [
+                                {
+                                    'D': 5
+                                },
+                                {
+                                    'D': 11,
+                                    'N': 'abc',
+                                    'A': {
+                                        'B': 'abc'
+                                    }
+                                },
+                                {
+                                    'D': 25
+                                }
+                            ]
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'uve_attribute': 'A.C.D'
+                                    },
+                                    'operation': '<=',
+                                    'variables': ['A.C.N']
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '10',
+                                        'json_operand2_val': '11',
+                                        'json_variables': {
+                                            'A.C.N': '"abc"'
+                                        }
+                                    },
+                                    {
+                                        'json_operand1_val': '10',
+                                        'json_operand2_val': '25',
+                                        'json_variables': {
+                                            'A.C.N': 'null'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(
+                name='multiple conditions in and_list - '
+                    'not all conditions match',
+                input=TestInput(alarm_cfg=alarm_config6,
+                    uve_key='table6:host2',
+                    uve={
+                        'A': {
+                            'B': 10,
+                            'C': [
+                                {
+                                    'N': 'abc',
+                                    'D': 5,
+                                    'E': 5
+                                },
+                                {
+                                    'N': 'hjk',
+                                    'D': 2,
+                                    'E': 4
+                                }
+                            ]
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='multiple conditions in and_list - all conditions match',
+                input=TestInput(alarm_cfg=alarm_config6,
+                    uve_key='table6:host3',
+                    uve={
+                        'A': {
+                            'B': 5,
+                            'C': [
+                                {
+                                    'N': 'abc',
+                                    'D': 5,
+                                    'E': 5
+                                },
+                                {
+                                    'N': 'hjk',
+                                    'D': 10,
+                                    'E': 4
+                                }
+                            ]
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'uve_attribute': 'A.C.D'
+                                    },
+                                    'operation': '<=',
+                                    'variables': ['A.C.N']
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '5',
+                                        'json_operand2_val': '5',
+                                        'json_variables': {
+                                            'A.C.N': '"abc"'
+                                        }
+                                    },
+                                    {
+                                        'json_operand1_val': '5',
+                                        'json_operand2_val': '10',
+                                        'json_variables': {
+                                            'A.C.N': '"hjk"'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'uve_attribute': 'A.C.E'
+                                    },
+                                    'operation': '>=',
+                                    'variables': ['A.C.N']
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '5',
+                                        'json_operand2_val': '5',
+                                        'json_variables': {
+                                            'A.C.N': '"abc"'
+                                        }
+                                    },
+                                    {
+                                        'json_operand1_val': '5',
+                                        'json_operand2_val': '4',
+                                        'json_variables': {
+                                            'A.C.N': '"hjk"'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(
+                name='mutiple and_list in or_list - no match',
+                input=TestInput(alarm_cfg=alarm_config7,
+                    uve_key='table7:host2',
+                    uve={
+                        'A': {
+                            'B': 'abc'
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=None)
+            ),
+            TestCase(
+                name='multiple and_list in or_list - not all and_list '
+                    'results in a match',
+                input=TestInput(alarm_cfg=alarm_config7,
+                    uve_key='table7:host1',
+                    uve={
+                        'A': {
+                            'B': 'def',
+                            'D': 'def'
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A',
+                                    'operand2': {
+                                        'json_value': 'null'
+                                    },
+                                    'operation': '!='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val':
+                                            '{"B": "def", "D": "def"}',
+                                    }
+                                ]
+                            },
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'uve_attribute': 'A.D'
+                                    },
+                                    'operation': '=='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '"def"',
+                                        'json_operand2_val': '"def"'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            ),
+            TestCase(
+                name='multiple and_list in or_list - multiple and_list '
+                    'results in a match',
+                input=TestInput(alarm_cfg=alarm_config7,
+                    uve_key='table7:host1',
+                    uve={
+                        'A': {
+                            'B': 'xyz',
+                            'D': 'xyz'
+                        }
+                    }
+                ),
+                output=TestOutput(or_list=[
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A',
+                                    'operand2': {
+                                        'json_value': 'null'
+                                    },
+                                    'operation': '!='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val':
+                                            '{"B": "xyz", "D": "xyz"}',
+                                    }
+                                ]
+                            },
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'json_value': '["abc", "def"]'
+                                    },
+                                    'operation': 'not in'
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '"xyz"'
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'and_list': [
+                            {
+                                'condition': {
+                                    'operand1': 'A',
+                                    'operand2': {
+                                        'json_value': 'null'
+                                    },
+                                    'operation': '!='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val':
+                                            '{"B": "xyz", "D": "xyz"}',
+                                    }
+                                ]
+                            },
+                            {
+                                'condition': {
+                                    'operand1': 'A.B',
+                                    'operand2': {
+                                        'uve_attribute': 'A.D'
+                                    },
+                                    'operation': '=='
+                                },
+                                'match': [
+                                    {
+                                        'json_operand1_val': '"xyz"',
+                                        'json_operand2_val': '"xyz"'
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ])
+            )
+        ]
+
+        for test in tests:
+            logging.info('=== Test: %s ===' % (test.name))
+            exp_or_list = None
+            if test.output.or_list is not None:
+                exp_or_list = []
+                for elt in test.output.or_list:
+                    and_list = []
+                    for and_elt in elt['and_list']:
+                        cond = and_elt['condition']
+                        match = and_elt['match']
+                        and_list.append(AlarmConditionMatch(
+                            condition=AlarmCondition(
+                                operation=cond['operation'],
+                                operand1=cond['operand1'],
+                                operand2=SandeshAlarmOperand2(
+                                    uve_attribute=cond['operand2'].get(
+                                        'uve_attribute'),
+                                    json_value=cond['operand2'].get(
+                                        'json_value')),
+                                variables=cond.get('variables') or []),
+                            match=[AlarmMatch(
+                                json_operand1_value=m['json_operand1_val'],
+                                json_operand2_value=m.get('json_operand2_val'),
+                                json_variables=m.get('json_variables') or {}) \
+                                    for m in match]))
+                    exp_or_list.append(SandeshAlarmAndList(and_list))
+            alarm_processor = AlarmProcessor(logging)
+            or_list = alarm_processor._evaluate_uve_for_alarms(
+                test.input.alarm_cfg, test.input.uve_key, test.input.uve)
+            logging.info('exp_or_list: %s' % (str(exp_or_list)))
+            logging.info('or_list: %s' % (str(or_list)))
+            self.assertEqual(exp_or_list, or_list)
+    # end test_05_evaluate_uve_for_alarms
+
 
 # end class TestAlarmGen
 

@@ -179,8 +179,8 @@ def create_api_server_instance(test_id, config_knobs):
         config_knobs)
     block_till_port_listened(ret_server_info['ip'],
         ret_server_info['service_port'])
-    extra_env = {'HTTP_HOST':'%s%s' %(ret_server_info['ip'],
-                                      ret_server_info['service_port'])}
+    extra_env = {'HTTP_HOST': ret_server_info['ip'],
+                 'SERVER_PORT': str(ret_server_info['service_port'])}
     ret_server_info['app'] = TestApp(bottle.app(), extra_environ=extra_env)
     ret_server_info['api_conn'] = VncApi('u', 'p',
         api_server_host=ret_server_info['ip'],
@@ -200,7 +200,8 @@ def create_api_server_instance(test_id, config_knobs):
 def destroy_api_server_instance(server_info):
     server_info['greenlet'].kill()
     server_info['api_server']._db_conn._msgbus.shutdown()
-    FakeKombu.reset()
+    vhost_url = vnc_cfg_api_server.server._db_conn._msgbus._urls
+    FakeKombu.reset(vhost_url)
     FakeIfmapClient.reset()
     CassandraCFs.reset()
     FakeKazooClient.reset()
@@ -399,7 +400,7 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
 
         (pycassa.system_manager.Connection, '__init__',stub),
         (pycassa.system_manager.SystemManager, '__new__',FakeSystemManager),
-        (pycassa.ConnectionPool, '__init__',stub),
+        (pycassa.ConnectionPool, '__new__',FakeConnectionPool),
         (pycassa.ColumnFamily, '__new__',FakeCF),
         (pycassa.util, 'convert_uuid_to_time',Fake_uuid_to_time),
 
@@ -606,7 +607,8 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
         # wait for in-flight messages to be processed
         while self._api_server._db_conn._msgbus.num_pending_messages() > 0:
             gevent.sleep(0.001)
-        while not FakeKombu.is_empty('vnc_config'):
+        vhost_url = vnc_cfg_api_server.server._db_conn._msgbus._urls
+        while not FakeKombu.is_empty(vhost_url, 'vnc_config'):
             gevent.sleep(0.001)
         while self._api_server._db_conn._ifmap_db._queue.qsize() > 0:
             gevent.sleep(0.001)
@@ -692,6 +694,10 @@ class TestCase(testtools.TestCase, fixtures.TestWithFixtures):
                 port.add_virtual_network(vn_obj)
                 port.add_port_tuple(pt)
                 self._vnc_lib.virtual_machine_interface_create(port)
+                # Let a chance to the API to create iip for the vmi of the pt
+                # before creating the si and the schema allocates an iip
+                # address to the service chain
+                gevent.sleep(0.1)
 
         return service_instance.get_fq_name_str()
 

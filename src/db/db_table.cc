@@ -7,6 +7,7 @@
 #include <tbb/spin_rw_mutex.h>
 
 #include <boost/bind.hpp>
+#include <boost/foreach.hpp>
 #include <boost/dynamic_bitset.hpp>
 #include <boost/type_traits.hpp>
 
@@ -18,7 +19,7 @@
 #include "db/db_partition.h"
 #include "db/db_table.h"
 #include "db/db_table_partition.h"
-#include "db/db_table_walker.h"
+#include "db/db_table_walk_mgr.h"
 #include "db/db_types.h"
 
 class DBEntry;
@@ -168,6 +169,8 @@ DBTableBase::DBTableBase(DB *db, const string &name)
     walk_request_count_ = 0;
     walk_complete_count_ = 0;
     walk_cancel_count_ = 0;
+    walk_again_count_ = 0;
+    walk_count_ = 0;
 }
 
 DBTableBase::~DBTableBase() {
@@ -238,12 +241,141 @@ void DBTableBase::FillListeners(vector<ShowTableListener> *listeners) const {
     info_->FillListeners(listeners);
 }
 
+class DBTable::WalkWorker : public Task {
+public:
+    WalkWorker(TableWalker *walker, int db_partition_id);
+
+    virtual bool Run();
+
+    std::string Description() const { return "DBTable::WalkWorker"; }
+
+private:
+    // Store the last visited node to continue walk
+    std::auto_ptr<DBRequestKey> walk_ctx_;
+
+    // Table partition for which this worker was created
+    DBTablePartition *tbl_partition_;
+
+    TableWalker *walker_;
+};
+
+class DBTable::TableWalker {
+public:
+    TableWalker(DBTable *table) : table_(table) {
+        pending_workers_ = 0;
+    }
+
+    void StartWalk();
+
+    DBTable *table() {
+        return table_;
+    }
+
+    void ClearWalkWorks() {
+        worker_tasks_.clear();
+    }
+
+    DBTable *table_;
+    // check whether iteration is completed on all Table Partition
+    tbb::atomic<uint16_t> pending_workers_;
+    // For debugging purpose. Few of the tasks in this list could has finished
+    // executing and destroyed. List of workers are useful in debugging with
+    // gdb/gcore to see the current state of the walk and walk_context
+    std::list<Task *> worker_tasks_;
+};
+
+bool DBTable::WalkWorker::Run() {
+    int count = 0;
+    DBRequestKey *key_resume = walk_ctx_.get();
+    DBTable *table = walker_->table();
+    int max_walk_entry_count = table->GetWalkIterationToYield();
+    DBEntry *entry;
+
+    if (key_resume != NULL) {
+        std::auto_ptr<const DBEntryBase> start;
+        start = table->AllocEntry(key_resume);
+        // Find matching or next in sort order
+        entry = tbl_partition_->lower_bound(start.get());
+    } else {
+        entry = tbl_partition_->GetFirst();
+    }
+    if (entry == NULL) {
+        goto walk_done;
+    }
+
+    for (DBEntry *next = NULL; entry; entry = next) {
+        next = tbl_partition_->GetNext(entry);
+        if (count == max_walk_entry_count) {
+            // store the context
+            walk_ctx_ = entry->GetDBRequestKey();
+            return false;
+        }
+
+        // Invoke walker function
+        bool more = table->InvokeWalkCb(tbl_partition_, entry);
+        if (!more) {
+            break;
+        }
+
+        db_walker_wait();
+        count++;
+    }
+
+walk_done:
+    // Check whether all other walks on the table is completed
+    long num_walkers_on_tpart = walker_->pending_workers_.fetch_and_decrement();
+    if (num_walkers_on_tpart == 1) {
+        table->WalkDone();
+    }
+    return true;
+}
+
+DBTable::WalkWorker::WalkWorker(TableWalker *walker, int db_partition_id)
+    : Task(walker->table()->GetWalkerTaskId(), db_partition_id), walker_(walker) {
+    tbl_partition_ = static_cast<DBTablePartition *>
+        (walker_->table()->GetTablePartition(db_partition_id));
+}
+
+void DBTable::TableWalker::StartWalk() {
+    CHECK_CONCURRENCY("db::Walker");
+    assert(pending_workers_ == 0);
+    for (int i = 0; i < table_->PartitionCount(); i++) {
+        DBTablePartition *partition = static_cast<DBTablePartition *>(
+            table_->GetTablePartition(i));
+        if (!partition->size()) continue;
+        worker_tasks_.push_back(new WalkWorker(this, i));
+        pending_workers_++;
+    }
+    if (pending_workers_ == 0) {
+        table_->WalkDone();
+    } else {
+        TaskScheduler *scheduler = TaskScheduler::GetInstance();
+        BOOST_FOREACH(Task *task, worker_tasks_) scheduler->Enqueue(task);
+    }
+}
+
 ///////////////////////////////////////////////////////////
 // Implementation of DBTable methods
 ///////////////////////////////////////////////////////////
 DBTable::DBTable(DB *db, const string &name)
     : DBTableBase(db, name),
-      walk_id_(DBTableWalker::kInvalidWalkerId) {
+      walker_(new TableWalker(this)),
+      walker_task_id_(db->task_id()) {
+
+    static bool init_ = false;
+    static int iter_to_yield_env_ = 0;
+
+    if (!init_) {
+        // XXX To be used for testing purposes only.
+        char *count_str = getenv("DB_ITERATION_TO_YIELD");
+        if (count_str) {
+            iter_to_yield_env_ = strtol(count_str, NULL, 0);
+        } else {
+            iter_to_yield_env_ = kIterationToYield;
+        }
+        init_ = true;
+    }
+    max_walk_iteration_to_yield_ = iter_to_yield_env_;
 }
 
 DBTable::~DBTable() {
@@ -258,6 +390,12 @@ void DBTable::Init() {
 
 DBTablePartition *DBTable::AllocPartition(int index) {
     return new DBTablePartition(this, index);
+}
+
+void DBTable::StartWalk() {
+    CHECK_CONCURRENCY("db::Walker");
+    incr_walk_count();
+    walker_->StartWalk();
 }
 
 DBEntry *DBTable::Add(const DBRequest *req) {
@@ -333,7 +471,8 @@ DBEntry *DBTable::Find(const DBRequestKey *key) {
 }
 
 //
-// Concurrency: called from task that's mutually exclusive with db::DBTable.
+// Concurrency: called from task that's mutually exclusive with db::DBTable
+// or db::IFMapTable as applicable.
 //
 // Calculate the size across all partitions.
 //
@@ -410,24 +549,70 @@ bool DBTable::WalkCallback(DBTablePartBase *tpart, DBEntryBase *entry) {
 // Callback for completion of table walk triggered by NotifyAllEntries.
 //
 void DBTable::WalkCompleteCallback(DBTableBase *tbl_base) {
-    walk_id_ = DBTableWalker::kInvalidWalkerId;
+    walk_ref_.reset();
 }
 
 //
-// Concurrency: called from task that's mutually exclusive with db::DBTable.
+// Concurrency: called from task that's mutually exclusive with db::DBTable
+// or db::IFMapTable as applicable.
 //
 // Trigger notification of all entries to all listeners.
 // Should be used sparingly e.g. to handle significant configuration change.
 //
-// Cancel any outstanding walk and start a new one.  The walk callback just
-// turns around and puts the DBentryBase on the change list.
+// The walk callback just turns around and puts the DBentryBase on the change
+// list.
+//
+// If the walk is already running, it is allowed to complete and WalkAgain API
+// is invoked to trigger walk on current walk completion.
 //
 void DBTable::NotifyAllEntries() {
-    CHECK_CONCURRENCY("bgp::Config", "bgp::RTFilter");
+    CHECK_CONCURRENCY("bgp::Config", "bgp::ConfigHelper", "bgp::RTFilter");
 
-    DBTableWalker *walker = database()->GetWalker();
-    if (walk_id_ != DBTableWalker::kInvalidWalkerId)
-        walker->WalkCancel(walk_id_);
-    walk_id_= walker->WalkTable(this, NULL, DBTable::WalkCallback,
-        boost::bind(&DBTable::WalkCompleteCallback, this, _1));
+    if (empty())
+        return;
+
+    if (walk_ref_ == NULL) {
+        walk_ref_ =
+            AllocWalker(boost::bind(&DBTable::WalkCallback, this, _1, _2),
+                    boost::bind(&DBTable::WalkCompleteCallback, this, _2));
+        WalkTable(walk_ref_);
+    } else {
+        WalkAgain(walk_ref_);
+    }
+}
+
+DBTable::DBTableWalkRef DBTable::AllocWalker(WalkFn walk_fn,
+                                             WalkCompleteFn walk_complete) {
+    DBTableWalkMgr *walk_mgr = database()->GetWalkMgr();
+    return walk_mgr->AllocWalker(this, walk_fn, walk_complete);
+}
+
+void DBTable::ReleaseWalker(DBTable::DBTableWalkRef &walk) {
+    DBTableWalkMgr *walk_mgr = database()->GetWalkMgr();
+    walk_mgr->ReleaseWalker(walk);
+    return;
+}
+
+void DBTable::WalkTable(DBTable::DBTableWalkRef walk) {
+    DBTableWalkMgr *walk_mgr = database()->GetWalkMgr();
+    walk_mgr->WalkTable(walk);
+    return;
+}
+
+void DBTable::WalkAgain(DBTable::DBTableWalkRef walk) {
+    DBTableWalkMgr *walk_mgr = database()->GetWalkMgr();
+    walk_mgr->WalkAgain(walk);
+    return;
+}
+
+bool DBTable::InvokeWalkCb(DBTablePartBase *part, DBEntryBase *entry) {
+    DBTableWalkMgr *walk_mgr = database()->GetWalkMgr();
+    return walk_mgr->InvokeWalkCb(part, entry);
+}
+
+void DBTable::WalkDone() {
+    incr_walk_complete_count();
+    walker_->ClearWalkWorks();
+    DBTableWalkMgr *walk_mgr = database()->GetWalkMgr();
+    return walk_mgr->WalkDone();
 }

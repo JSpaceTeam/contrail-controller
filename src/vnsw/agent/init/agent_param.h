@@ -19,7 +19,6 @@ public:
     static const uint32_t kAgentStatsInterval = (30 * 1000); // time in millisecs
     static const uint32_t kFlowStatsInterval = (1000); // time in milliseconds
     static const uint32_t kVrouterStatsInterval = (30 * 1000); //time-millisecs
-    static const uint16_t kTcpFlowScanInterval = 15; // time in seconds
     typedef std::vector<Ip4Address> AddressList;
 
     // Agent mode we are running in
@@ -27,6 +26,13 @@ public:
         VROUTER_AGENT,
         TSN_AGENT,
         TOR_AGENT,
+    };
+
+    // Gateway mode that the agent is running in
+    enum GatewayMode {
+        VCPE,
+        SERVER, // also has VMs on a remote server & vrouter maps vlans to VMIs
+        NONE
     };
 
     // Hypervisor mode we are working on
@@ -125,6 +131,10 @@ public:
     uint32_t linklocal_vm_flows() const { return linklocal_vm_flows_; }
     uint32_t flow_cache_timeout() const {return flow_cache_timeout_;}
     uint16_t flow_index_sm_log_count() const {return flow_index_sm_log_count_;}
+    uint32_t flow_add_tokens() const {return flow_add_tokens_;}
+    uint32_t flow_ksync_tokens() const {return flow_ksync_tokens_;}
+    uint32_t flow_del_tokens() const {return flow_del_tokens_;}
+    uint32_t flow_update_tokens() const {return flow_update_tokens_;}
     bool headless_mode() const {return headless_mode_;}
     bool dhcp_relay_mode() const {return dhcp_relay_mode_;}
     bool xmpp_auth_enabled() const {return xmpp_auth_enable_;}
@@ -140,8 +150,8 @@ public:
     std::string si_lb_ssl_cert_path() const {
         return si_lb_ssl_cert_path_;
     }
-    std::string si_lb_keystone_auth_conf_path() const {
-        return si_lb_keystone_auth_conf_path_;
+    std::string si_lbaas_auth_conf() const {
+        return si_lbaas_auth_conf_;
     }
 
     std::string nexthop_server_endpoint() const {
@@ -164,11 +174,11 @@ public:
         return collector_server_list_;
     }
     uint16_t http_server_port() const { return http_server_port_; }
+    uint32_t discovery_server_port() const { return dss_port_; }
     const std::string &host_name() const { return host_name_; }
     int agent_stats_interval() const { return agent_stats_interval_; }
     int flow_stats_interval() const { return flow_stats_interval_; }
     int vrouter_stats_interval() const { return vrouter_stats_interval_; }
-    uint16_t tcp_flow_scan_interval() const { return tcp_flow_scan_interval_; }
     void set_agent_stats_interval(int val) { agent_stats_interval_ = val; }
     void set_flow_stats_interval(int val) { flow_stats_interval_ = val; }
     void set_vrouter_stats_interval(int val) { vrouter_stats_interval_ = val; }
@@ -181,7 +191,6 @@ public:
     const std::string &vmware_physical_port() const {
         return vmware_physical_port_;
     }
-    bool debug() const { return debug_; }
 
     HypervisorMode mode() const { return hypervisor_mode_; }
     bool isXenMode() const { return hypervisor_mode_ == MODE_XEN; }
@@ -226,6 +235,8 @@ public:
     AgentMode agent_mode() const { return agent_mode_; }
     bool isTsnAgent() const { return agent_mode_ == TSN_AGENT; }
     bool isTorAgent() const { return agent_mode_ == TOR_AGENT; }
+    bool isServerGatewayMode() const { return gateway_mode_ == SERVER; }
+    GatewayMode gateway_mode() const { return gateway_mode_; }
 
     const AddressList &compute_node_address_list() const {
         return compute_node_address_list_;
@@ -246,15 +257,32 @@ public:
     const std::string &bgp_as_a_service_port_range() const {
         return bgp_as_a_service_port_range_;
     }
+    const std::vector<uint16_t> &bgp_as_a_service_port_range_value() const {
+        return bgp_as_a_service_port_range_value_;
+    }
+    uint32_t services_queue_limit() { return services_queue_limit_; }
 
     uint16_t flow_thread_count() const { return flow_thread_count_; }
     void set_flow_thread_count(uint16_t count) { flow_thread_count_ = count; }
+
+    bool flow_trace_enable() const { return flow_trace_enable_; }
+    void set_flow_trace_enable(bool val) { flow_trace_enable_ = val; }
+
+    uint16_t flow_task_latency_limit() const { return flow_latency_limit_; }
+    void set_flow_task_latency_limit(uint16_t count) {
+        flow_latency_limit_ = count;
+    }
 
     uint32_t tbb_thread_count() const { return tbb_thread_count_; }
     uint32_t tbb_exec_delay() const { return tbb_exec_delay_; }
     uint32_t tbb_schedule_delay() const { return tbb_schedule_delay_; }
     uint32_t tbb_keepawake_timeout() const { return tbb_keepawake_timeout_; }
 
+    // pkt0 tx buffer
+    uint32_t pkt0_tx_buffer_count() const { return pkt0_tx_buffer_count_; }
+    void set_pkt0_tx_buffer_count(uint32_t val) { pkt0_tx_buffer_count_ = val; }
+    bool measure_queue_delay() const { return measure_queue_delay_; }
+    void set_measure_queue_delay(bool val) { measure_queue_delay_ = val; }
 protected:
     void set_hypervisor_mode(HypervisorMode m) { hypervisor_mode_ = m; }
     virtual void InitFromSystem();
@@ -311,6 +339,7 @@ protected:
 
 private:
     friend class AgentParamTest;
+    void UpdateBgpAsaServicePortRange();
     void ComputeFlowLimits();
     void ParseCollector();
     void ParseVirtualHost();
@@ -329,8 +358,9 @@ private:
     void ParseAgentInfo();
     void ParseNexthopServer();
     void ParsePlatform();
-    void ParseBgpAsAServicePortRange();
+    void ParseServices();
     void set_agent_mode(const std::string &mode);
+    void set_gateway_mode(const std::string &mode);
 
     void ParseCollectorArguments
         (const boost::program_options::variables_map &v);
@@ -364,7 +394,7 @@ private:
         (const boost::program_options::variables_map &v);
     void ParsePlatformArguments
         (const boost::program_options::variables_map &v);
-    void ParseBgpAsAServicePortRangeArguments
+    void ParseServicesArguments
         (const boost::program_options::variables_map &v);
 
     boost::program_options::variables_map var_map_;
@@ -374,9 +404,14 @@ private:
     bool enable_hypervisor_options_;
     bool enable_service_options_;
     AgentMode agent_mode_;
+    GatewayMode gateway_mode_;
 
     Agent *agent_;
     PortInfo vhost_;
+    // Number of tx-buffers on pkt0 device
+    uint32_t pkt0_tx_buffer_count_;
+    bool measure_queue_delay_;
+
     std::string agent_name_;
     std::string eth_port_;
     bool eth_port_no_arp_;
@@ -391,7 +426,7 @@ private:
     uint16_t dns_client_port_;
     uint16_t mirror_client_port_;
     std::string dss_server_;
-    uint16_t dss_port_;
+    uint32_t dss_port_;
     Ip4Address mgmt_ip_;
     HypervisorMode hypervisor_mode_;
     PortInfo xen_ll_;
@@ -403,6 +438,10 @@ private:
     uint16_t linklocal_vm_flows_;
     uint16_t flow_cache_timeout_;
     uint16_t flow_index_sm_log_count_;
+    uint32_t flow_add_tokens_;
+    uint32_t flow_ksync_tokens_;
+    uint32_t flow_del_tokens_;
+    uint32_t flow_update_tokens_;
 
     // Parameters configured from command line arguments only (for now)
     std::string config_file_;
@@ -424,10 +463,8 @@ private:
     int agent_stats_interval_;
     int flow_stats_interval_;
     int vrouter_stats_interval_;
-    uint16_t tcp_flow_scan_interval_;
     std::string vmware_physical_port_;
     bool test_mode_;
-    bool debug_;
     boost::property_tree::ptree tree_;
     std::auto_ptr<VirtualGatewayConfigTable> vgw_config_table_;
     bool headless_mode_;
@@ -446,7 +483,7 @@ private:
     int si_netns_workers_;
     int si_netns_timeout_;
     std::string si_lb_ssl_cert_path_;
-    std::string si_lb_keystone_auth_conf_path_;
+    std::string si_lbaas_auth_conf_;
     VmwareMode vmware_mode_;
     // List of IP addresses on the compute node.
     AddressList compute_node_address_list_;
@@ -460,8 +497,12 @@ private:
     std::string agent_base_dir_;
     uint32_t send_ratelimit_;
     uint16_t flow_thread_count_;
+    bool flow_trace_enable_;
+    uint16_t flow_latency_limit_;
     bool subnet_hosts_resolvable_;
     std::string bgp_as_a_service_port_range_;
+    std::vector<uint16_t> bgp_as_a_service_port_range_value_;
+    uint32_t services_queue_limit_;
 
     // TBB related
     uint32_t tbb_thread_count_;

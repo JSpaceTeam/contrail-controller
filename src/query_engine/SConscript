@@ -13,6 +13,7 @@ env = BuildEnv.Clone()
 env.Append(CPPPATH = [env['TOP'],
                       env['TOP'] + '/base/sandesh/',
                       env['TOP'] + '/database/',
+                      env['TOP'] + '/tools/sandesh/library/common',
                      ])
 
 env.Prepend(LIBS=[  'cpuinfo',
@@ -25,7 +26,6 @@ env.Prepend(LIBS=[  'cpuinfo',
                     'pugixml',
                     'xml',
                     'curl',
-                    'thrift',
                     'hiredis',
                     'process_info',
                     'io',
@@ -40,11 +40,7 @@ env.Prepend(LIBS=[  'cpuinfo',
 if sys.platform != 'darwin':
     env.Append(LIBS=['rt'])
 
-if env.UseCassandraCql():
-    database_libs = ['cassandra_cql', 'cassandra']
-    env.AppendUnique(CCFLAGS='-DUSE_CASSANDRA_CQL')
-else:
-    database_libs = ['cassandra_thrift', 'thrift']
+database_libs = ['cassandra_cql', 'cassandra']
 
 database_libs.append('gendb')
 env.Prepend(LIBS=database_libs)
@@ -71,7 +67,7 @@ env.Append(LIBPATH=['.', SrcBuildDir('base'), SrcBuildDir('discovery/client'),
 
 includes = MapBuildDir(['analytics', 'query_engine', 'database'])
 env.Append(CPPPATH = includes)
-env.Append(CPPPATH = ['#/src/analytics', '#/build/include/thrift'])
+env.Append(CPPPATH = ['#/src/analytics'])
 
 RedisConn_obj = env.Object('redis_connection.o', '../analytics/redis_connection.cc')
 
@@ -86,9 +82,11 @@ while env_noWerror['CCFLAGS'].count('-Werror') > 0:
 env_noWerror_excep = env_noWerror.Clone()
 env_noWerror_excep.CppEnableExceptions()
 
+env.Install('', '../base/sandesh/nodeinfo.sandesh')
 env.Install('', '../analytics/analytics.sandesh') 
 # Generate the source files
 SandeshGenFiles  = env.SandeshGenCpp('qe.sandesh')
+SandeshGenFiles += env.SandeshGenOnlyCpp('nodeinfo.sandesh')
 SandeshGenFiles += env.SandeshGenOnlyCpp('analytics.sandesh')
 SandeshGenSrcs = env.ExtractCpp(SandeshGenFiles)
 
@@ -101,10 +99,8 @@ buildinfo_dep_libs = [
     '../../lib/libhttp_parser.a',
     '../../lib/libsandesh.a', 
     '../../lib/libsandeshvns.a', 
-    '../../lib/libthrift.a', 
     '../base/libbase.a',
     '../base/libcpuinfo.a',
-    '../../lib/libcassandra_thrift.a',
     '../../lib/libgendb.a',
     '../io/libio.a',
 ]

@@ -16,9 +16,81 @@
 
 Peer::Peer(Type type, const std::string &name, bool export_to_controller) :
     type_(type), name_(name), export_to_controller_(export_to_controller) {
+    refcount_ = 0;
 }
 
 Peer::~Peer() {
+}
+
+bool Peer::DeleteOnZeroRefcount() const {
+    return false;
+}
+
+void intrusive_ptr_add_ref(const Peer *p) {
+    p->refcount_.fetch_and_increment();
+    // validate that reference is not taken while delete is in progress
+    assert(!p->IsDeleted());
+}
+
+void intrusive_ptr_release(const Peer *p) {
+    if (p->refcount_.fetch_and_decrement() == 1 && p->DeleteOnZeroRefcount()) {
+        delete p;
+    }
+}
+
+DynamicPeer::DynamicPeer(Agent *agent, Type type, const std::string &name,
+                         bool export_to_controller) :
+    Peer(type, name, export_to_controller) {
+    delete_timeout_timer_ = TimerManager::CreateTimer(
+                                *(agent->event_manager())->io_service(),
+                                "Dynamic Peer Delete Timer",
+                                agent->task_scheduler()->\
+                                GetTaskId("db::DBTable"), 0);
+    deleted_ = false;
+    skip_add_change_ = false;
+}
+
+DynamicPeer::~DynamicPeer() {
+    // Dynamic Peer should be marked deleted and will free
+    // automatically once all the references go away
+    assert(deleted_);
+    assert(refcount() == 0);
+    TimerManager::DeleteTimer(delete_timeout_timer_);
+}
+
+void DynamicPeer::ProcessDelete(DynamicPeer *p) {
+    p->StopRouteExports();
+
+    if (p->deleted_.fetch_and_store(true)) {
+        return;
+    }
+
+    if (p->refcount() != 0) {
+        // still pending references are there start delete timeout timer
+        p->delete_timeout_timer_->Start(kDeleteTimeout,
+                                     boost::bind(&DynamicPeer::DeleteTimeout,
+                                     p));
+        return;
+    }
+
+    // no pending references delete the peer inline and return
+    delete p;
+}
+
+bool DynamicPeer::DeleteTimeout() {
+    assert(0);
+    return false;
+}
+
+bool DynamicPeer::DeleteOnZeroRefcount() const {
+    if (!deleted_) {
+        return false;
+    }
+
+    // last reference has gone, cancel the timer and delete peer
+    delete_timeout_timer_->Cancel();
+
+    return true;
 }
 
 const Ip4Address *Peer::NexthopIp(Agent *agent, const AgentPath *path) const {
@@ -26,12 +98,11 @@ const Ip4Address *Peer::NexthopIp(Agent *agent, const AgentPath *path) const {
 }
 
 BgpPeer::BgpPeer(const Ip4Address &server_ip, const std::string &name,
-                 boost::shared_ptr<AgentXmppChannel> bgp_xmpp_peer,
-                 DBTableBase::ListenerId id,
-                 Peer::Type bgp_peer_type)
-    : Peer(bgp_peer_type, name, false), server_ip_(server_ip), id_(id),
-    bgp_xmpp_peer_(bgp_xmpp_peer), 
-    route_walker_(new ControllerRouteWalker(bgp_xmpp_peer_.get()->agent(), this)) {
+                 Agent *agent, DBTableBase::ListenerId id,
+                 Peer::Type bgp_peer_type) :
+    DynamicPeer(agent, bgp_peer_type, name, false),
+    server_ip_(server_ip), id_(id),
+    route_walker_(new ControllerRouteWalker(agent, this)) {
         is_disconnect_walk_ = false;
         setup_time_ = UTCTimestampUsec();
 }
@@ -89,13 +160,10 @@ void BgpPeer::DeleteVrfState(DBTablePartBase *partition,
     if (vrf_state->exported_ == true) {
         // Check if the notification is for active bgp peer or not.
         // Send unsubscribe only for active bgp peer.
-        // Note that decommisioned bgp_peer_id can have reference to parent 
-        // agentxmppchannel, however agentzmppchannel wud have moved to some
-        // other new peer.
-        if (bgp_xmpp_peer_.get() &&
-            (bgp_xmpp_peer_.get()->bgp_peer_id() == this) &&
-            AgentXmppChannel::IsBgpPeerActive(agent(), bgp_xmpp_peer_.get())) {
-            AgentXmppChannel::ControllerSendSubscribe(bgp_xmpp_peer_.get(), vrf,
+        // If skip_add_change is set for this dynamic peer, then dont export.
+        if (SkipAddChangeRequest() == false) {
+            AgentXmppChannel::ControllerSendSubscribe(GetAgentXmppChannel(),
+                                                      vrf,
                                                       false); 
         }
     }
@@ -142,4 +210,15 @@ DBState *BgpPeer::GetRouteExportState(DBTablePartBase *partition,
 
 Agent *BgpPeer::agent() const {
     return route_walker_.get()->agent();
+}
+
+AgentXmppChannel *BgpPeer::GetAgentXmppChannel() const {
+    for (uint8_t count = 0; count < MAX_XMPP_SERVERS; count++) {
+        AgentXmppChannel *channel =
+            agent()->controller_xmpp_channel(count);
+        if (channel && (channel->bgp_peer_id() == this)) {
+            return channel;
+        }
+    }
+    return NULL;
 }

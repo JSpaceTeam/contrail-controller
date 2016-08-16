@@ -14,6 +14,8 @@ do {                                                                        \
     Arp##obj::TraceMsg(ArpTraceBuf, __FILE__, __LINE__, ##__VA_ARGS__);     \
 } while (false)                                                             \
 
+struct ArpVrfState;
+
 class ArpProto : public Proto {
 public:
     static const uint16_t kGratRetries = 2;
@@ -25,7 +27,6 @@ public:
     typedef std::map<ArpKey, ArpEntry *> ArpCache;
     typedef std::pair<ArpKey, ArpEntry *> ArpCachePair;
     typedef std::map<ArpKey, ArpEntry *>::iterator ArpIterator;
-    typedef boost::function<bool(const ArpKey &, ArpEntry *)> Callback;
     typedef std::set<ArpKey> ArpKeySet;
 
     enum ArpMsgType {
@@ -155,7 +156,7 @@ public:
     void set_aging_timeout(uint32_t timeout) { aging_timeout_ = timeout; }
     void SendArpIpc(ArpProto::ArpMsgType type, in_addr_t ip,
                     const VrfEntry *vrf, const Interface* itf);
-    void ValidateAndClearVrfState(VrfEntry *vrf);
+    bool ValidateAndClearVrfState(VrfEntry *vrf, const ArpVrfState *vrf_state);
     ArpIterator FindUpperBoundArpEntry(const ArpKey &key);
     ArpIterator FindLowerBoundArpEntry(const ArpKey &key);
 
@@ -194,7 +195,8 @@ public:
     void ManagedDelete() { deleted = true;}
     void Delete();
     bool DeleteRouteState(DBTablePartBase *part, DBEntryBase *entry);
-    void WalkDone(DBTableBase *partition, ArpVrfState *state);
+    void PreWalkDone(DBTableBase *partition);
+    static void WalkDone(DBTableBase *partition, ArpVrfState *state);
 
     Agent *agent;
     ArpProto *arp_proto;
@@ -203,13 +205,14 @@ public:
     DBTableBase::ListenerId route_table_listener_id;
     LifetimeRef<ArpVrfState> table_delete_ref;
     bool deleted;
+    DBTableWalker::WalkId walk_id_;
     friend class ArpProto;
 };
 
 class ArpDBState : public DBState {
 public:
-    static const uint32_t kMaxRetry = 10;
-    static const uint32_t kTimeout = 1000;
+    static const uint32_t kMaxRetry = 30;
+    static const uint32_t kTimeout = 2000;
     typedef std::map<uint32_t, uint32_t> WaitForTrafficIntfMap;
 
     ArpDBState(ArpVrfState *vrf_state, uint32_t vrf_id,

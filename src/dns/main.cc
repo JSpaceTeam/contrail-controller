@@ -180,7 +180,7 @@ int main(int argc, char *argv[]) {
 
     // DNS::SetTestMode(options.test_mode());
 
-    DB config_db;
+    DB config_db(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable"));
     DBGraph config_graph;
     IFMapServer ifmap_server(&config_db, &config_graph,
                              Dns::GetEventManager()->io_service());
@@ -194,7 +194,9 @@ int main(int argc, char *argv[]) {
                            options.named_log_file(),
                            options.rndc_config_file(),
                            options.rndc_secret(),
-                           options.named_max_cache_size());
+                           options.named_max_cache_size(),
+                           options.named_max_retransmissions(),
+                           options.named_retransmission_interval());
     DnsConfigParser parser(&config_db);
     parser.Parse(FileRead(options.config_file()));
 
@@ -287,12 +289,12 @@ int main(int argc, char *argv[]) {
     IFMapServerParser *ifmap_parser = IFMapServerParser::GetInstance("vnc_cfg");
 
     IFMapManager *ifmapmgr = new IFMapManager(&ifmap_server,
-                options.ifmap_server_url(), options.ifmap_user(),
-                options.ifmap_password(), options.ifmap_certs_store(),
+                options.ifmap_config_options(),
                 boost::bind(&IFMapServerParser::Receive, ifmap_parser,
                             &config_db, _1, _2, _3),
                         Dns::GetEventManager()->io_service());
     ifmap_server.set_ifmap_manager(ifmapmgr);
+    dns_manager.set_ifmap_manager(ifmapmgr);
     ifmapmgr->InitializeDiscovery(ds_client, options.ifmap_server_url());
 
     Dns::GetEventManager()->Run();

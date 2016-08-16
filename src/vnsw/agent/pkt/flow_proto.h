@@ -13,6 +13,8 @@
 #include "flow_table.h"
 #include "flow_handler.h"
 #include "flow_event.h"
+#include "flow_token.h"
+#include "flow_trace_filter.h"
 
 class ProfileData;
 
@@ -21,20 +23,27 @@ struct FlowStats {
     uint64_t delete_count_;
     uint64_t flow_messages_;
     uint64_t revaluate_count_;
+    uint64_t recompute_count_;
     uint64_t audit_count_;
-    uint64_t handle_update_;
+    uint64_t vrouter_responses_;
     uint64_t vrouter_error_;
+    uint64_t evict_count_;
+
+    // Number of events actually processed
+    uint64_t delete_process_;
+    uint64_t revaluate_process_;
+    uint64_t recompute_process_;
 
     FlowStats() :
         add_count_(0), delete_count_(0), flow_messages_(0),
-        revaluate_count_(0), audit_count_(0), handle_update_(0),
-        vrouter_error_(0) {
+        revaluate_count_(0), recompute_count_(0), audit_count_(0),
+        vrouter_responses_(0), vrouter_error_(0), evict_count_(0),
+        delete_process_(0), revaluate_process_(0), recompute_process_(0) {
     }
 };
 
 class FlowProto : public Proto {
 public:
-    typedef WorkQueue<FlowEvent *> FlowEventQueue;
     static const int kMinTableCount = 1;
     static const int kMaxTableCount = 16;
 
@@ -47,14 +56,17 @@ public:
     void FlushFlows();
 
     bool Validate(PktInfo *msg);
-    FlowHandler *AllocProtoHandler(boost::shared_ptr<PktInfo> info,
+    FlowHandler *AllocProtoHandler(PktInfoPtr info,
                                    boost::asio::io_service &io);
-    bool Enqueue(boost::shared_ptr<PktInfo> msg);
+    bool Enqueue(PktInfoPtr msg);
 
-    FlowEntry *Find(const FlowKey &key) const;
-    uint16_t FlowTableIndex(uint16_t sport, uint16_t dport) const;
+    FlowEntry *Find(const FlowKey &key, uint32_t table_index) const;
+    uint16_t FlowTableIndex(const IpAddress &sip, const IpAddress &dip,
+                            uint8_t proto, uint16_t sport,
+                            uint16_t dport, uint32_t flow_handle) const;
+    uint32_t flow_table_count() const { return flow_table_list_.size(); }
     FlowTable *GetTable(uint16_t index) const;
-    FlowTable *GetFlowTable(const FlowKey &key) const;
+    FlowTable *GetFlowTable(const FlowKey &key, uint32_t flow_handle) const;
     uint32_t FlowCount() const;
     void VnFlowCounters(const VnEntry *vn, uint32_t *in_count,
                         uint32_t *out_count);
@@ -62,24 +74,30 @@ public:
     bool AddFlow(FlowEntry *flow);
     bool UpdateFlow(FlowEntry *flow);
 
-    void EnqueueEvent(FlowEvent *event, FlowTable *table);
     void EnqueueFlowEvent(FlowEvent *event);
     void ForceEnqueueFreeFlowReference(FlowEntryPtr &flow);
-    void DeleteFlowRequest(const FlowKey &flow_key, bool del_rev_flow,
-                           uint32_t table_index);
-    void EvictFlowRequest(FlowEntryPtr &flow, uint32_t flow_handle);
-    void RetryIndexAcquireRequest(FlowEntry *flow, uint32_t flow_handle);
-    void CreateAuditEntry(const FlowKey &key, uint32_t flow_handle);
+    void DeleteFlowRequest(FlowEntry *flow);
+    void EvictFlowRequest(FlowEntry *flow, uint32_t flow_handle,
+                          uint8_t gen_id, uint8_t evict_gen_id);
+    void CreateAuditEntry(const FlowKey &key, uint32_t flow_handle,
+                          uint8_t gen_id);
     bool FlowEventHandler(FlowEvent *req, FlowTable *table);
-    void GrowFreeListRequest(const FlowKey &key);
-    void KSyncEventRequest(KSyncEntry *entry, KSyncEntry::KSyncEvent event);
-    void KSyncFlowHandleRequest(KSyncEntry *entry, uint32_t flow_handle);
-    void KSyncFlowErrorRequest(KSyncEntry *ksync_entry, int error);
-    void MessageRequest(InterTaskMsg *msg);
+    bool FlowUpdateHandler(FlowEvent *req);
+    bool FlowDeleteHandler(FlowEvent *req, FlowTable *table);
+    bool FlowKSyncMsgHandler(FlowEvent *req, FlowTable *table);
+    void GrowFreeListRequest(FlowTable *table);
+    void KSyncEventRequest(KSyncEntry *ksync_entry,
+                           KSyncEntry::KSyncEvent event, uint32_t flow_handle,
+                           uint8_t gen_id, int ksync_error,
+                           uint64_t evict_flow_bytes,
+                           uint64_t evict_flow_packets,
+                           int32_t evict_flow_oflow);
+    void MessageRequest(FlowEntry *flow);
 
     void DisableFlowEventQueue(uint32_t index, bool disabled);
-    void DisableFlowMgmtQueue(bool disabled);
-    size_t FlowMgmtQueueLength();
+    void DisableFlowUpdateQueue(bool disabled);
+    void DisableFlowKSyncQueue(uint32_t index, bool disabled);
+    size_t FlowUpdateQueueLength();
 
     const FlowStats *flow_stats() const { return &stats_; }
 
@@ -90,17 +108,40 @@ public:
         if (val < 0)
             assert(tmp >= val);
     }
-    void EnqueueFreeFlowReference(FlowEntryPtr &flow);
     bool EnqueueReentrant(boost::shared_ptr<PktInfo> msg,
                           uint8_t table_index);
+    FlowTokenPtr GetToken(FlowEvent::Event event);
+    void TokenAvailable(FlowTokenPool *pool);
+    bool TokenCheck(const FlowTokenPool *pool);
+    bool ShouldTrace(const FlowEntry *flow, const FlowEntry *rflow);
+    void EnqueueUnResolvedFlowEntry(FlowEntry *flow);
 
 private:
+    friend class SandeshIPv4FlowFilterRequest;
+    friend class SandeshIPv6FlowFilterRequest;
+    friend class SandeshShowFlowFilterRequest;
+    friend class FlowTraceFilterTest;
+    friend class FlowUpdateTest;
+    friend class FlowTest;
+    FlowTraceFilter *ipv4_trace_filter() { return &ipv4_trace_filter_; }
+    FlowTraceFilter *ipv6_trace_filter() { return &ipv6_trace_filter_; }
+
     bool ProcessFlowEvent(const FlowEvent &req, FlowTable *table);
 
+    FlowTokenPool add_tokens_;
+    FlowTokenPool ksync_tokens_;
+    FlowTokenPool del_tokens_;
+    FlowTokenPool update_tokens_;
     std::vector<FlowEventQueue *> flow_event_queue_;
+    std::vector<FlowEventQueue *> flow_tokenless_queue_;
+    std::vector<DeleteFlowEventQueue *> flow_delete_queue_;
+    std::vector<KSyncFlowEventQueue *> flow_ksync_queue_;
     std::vector<FlowTable *> flow_table_list_;
-    FlowEventQueue flow_update_queue_;
+    UpdateFlowEventQueue flow_update_queue_;
     tbb::atomic<int> linklocal_flow_count_;
+    bool use_vrouter_hash_;
+    FlowTraceFilter ipv4_trace_filter_;
+    FlowTraceFilter ipv6_trace_filter_;
     FlowStats stats_;
 };
 

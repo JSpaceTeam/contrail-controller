@@ -7,10 +7,12 @@
 
 #include "bgp/message_builder.h"
 
+class RibOut;
+
 class BgpXmppMessageBuilder : public MessageBuilder {
 public:
     BgpXmppMessageBuilder();
-    virtual Message *Create(const BgpTable *table,
+    virtual Message *Create(const RibOut *ribout, bool cache_routes,
                             const RibOutAttr *roattr,
                             const BgpRoute *route) const;
 

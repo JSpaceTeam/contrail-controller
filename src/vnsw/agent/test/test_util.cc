@@ -10,6 +10,7 @@
 #include "oper/ecmp_load_balance.h"
 #include "oper/mirror_table.h"
 #include "oper/physical_device_vn.h"
+#include "ksync/ksync_sock_user.h"
 #include "uve/test/vn_uve_table_test.h"
 #include "uve/agent_uve_stats.h"
 #include <cfg/cfg_types.h>
@@ -138,6 +139,7 @@ static void BuildLinkToMetadata() {
     AddLinkToMetadata("virtual-network", "routing-instance");
     AddLinkToMetadata("virtual-network", "access-control-list");
     AddLinkToMetadata("virtual-network", "floating-ip-pool");
+    AddLinkToMetadata("virtual-network", "alias-ip-pool");
     AddLinkToMetadata("virtual-network", "virtual-network-network-ipam",
                       "virtual-network-network-ipam");
     AddLinkToMetadata("virtual-network-network-ipam", "network-ipam",
@@ -157,9 +159,18 @@ static void BuildLinkToMetadata() {
     AddLinkToMetadata("floating-ip-pool", "floating-ip");
     AddLinkToMetadata("floating-ip", "virtual-machine-interface");
 
+    AddLinkToMetadata("alias-ip-pool", "alias-ip");
+    AddLinkToMetadata("alias-ip", "virtual-machine-interface");
+
     AddLinkToMetadata("subnet", "virtual-machine-interface");
     AddLinkToMetadata("virtual-router", "virtual-machine");
-
+    AddLinkToMetadata("virtual-machine-interface", "bgp-as-a-service");
+    AddLinkToMetadata("bgp-router", "bgp-as-a-service");
+    AddLinkToMetadata("bgp-router", "routing-instance");
+    AddLinkToMetadata("virtual-network", "qos-config");
+    AddLinkToMetadata("virtual-machine-interface", "qos-config");
+    AddLinkToMetadata("qos-config", "global-qos-config");
+    AddLinkToMetadata("forwarding-class", "qos-queue");
 }
 
 string GetMetadata(const char *node1, const char *node2,
@@ -324,6 +335,7 @@ void AddNodeString(char *buff, int &len, const char *nodename, const char *name,
         str << "                   <default-gateway>" << ipam[i].gw << "</default-gateway>\n";
         str << "                   <dns-server-address>" << ipam[i].gw << "</dns-server-address>\n";
         str << "                   <enable-dhcp>" << dhcp_enable << "</enable-dhcp>\n";
+        str << "                   <alloc-unit>" << ipam[i].alloc_unit << "</alloc-unit>\n";
         if (add_subnet_tags)
             str <<                 add_subnet_tags << "\n";
         str << "               </ipam-subnets>\n";
@@ -808,6 +820,58 @@ bool VmPortFloatingIpCount(int id, unsigned int count) {
     return true;
 }
 
+bool QosConfigFind(uint32_t id) {
+    AgentQosConfigKey key(MakeUuid(id));
+
+    if (Agent::GetInstance()->qos_config_table()->FindActiveEntry(&key) == NULL) {
+        return false;
+    }
+    return true;
+}
+
+const AgentQosConfig*
+QosConfigGetByIndex(uint32_t id) {
+    return Agent::GetInstance()->qos_config_table()->FindByIndex(id);
+}
+
+const AgentQosConfig*
+QosConfigGet(uint32_t id) {
+    AgentQosConfigKey key(MakeUuid(id));
+
+    return static_cast<AgentQosConfig *>(Agent::GetInstance()->
+            qos_config_table()->FindActiveEntry(&key));
+}
+
+bool ForwardingClassFind(uint32_t id) {
+    ForwardingClassKey key(MakeUuid(id));
+    if (Agent::GetInstance()->forwarding_class_table()->
+            FindActiveEntry(&key) == NULL) {
+        return false;
+    }
+    return true;
+}
+
+ForwardingClass*
+ForwardingClassGet(uint32_t id) {
+    ForwardingClassKey key(MakeUuid(id));
+
+    return static_cast<ForwardingClass *>(Agent::GetInstance()->
+            forwarding_class_table()->FindActiveEntry(&key));
+}
+
+bool VmPortAliasIpCount(int id, unsigned int count) {
+    VmInterface *intf = static_cast<VmInterface *>(VmPortGet(id));
+    EXPECT_TRUE(intf != NULL);
+    if (intf == NULL)
+        return false;
+
+    EXPECT_EQ(intf->alias_ip_list().list_.size(), count);
+    if (intf->alias_ip_list().list_.size() != count)
+        return false;
+
+    return true;
+}
+
 bool VmPortGetStats(PortInfo *input, int id, uint32_t & bytes, uint32_t & pkts) {
     Interface *intf;
     VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(input[id].intf_id),
@@ -1098,6 +1162,11 @@ void VrfAddReq(const char *name) {
     usleep(1000);
 }
 
+void VrfAddReq(const char *name, const boost::uuids::uuid &vn_uuid) {
+    Agent::GetInstance()->vrf_table()->CreateVrfReq(name, vn_uuid);
+    usleep(1000);
+}
+
 void VrfDelReq(const char *name) {
     Agent::GetInstance()->vrf_table()->DeleteVrfReq(name);
     usleep(1000);
@@ -1214,7 +1283,7 @@ void DeleteRoute(const char *vrf, const char *ip, uint8_t plen,
                       new ControllerVmRoute(bgp_peer));
     }
     client->WaitForIdle();
-    WAIT_FOR(1000, 1, (RouteFind(vrf, addr, 32) == false));
+    WAIT_FOR(1000, 1000, (RouteFind(vrf, addr, 32) == false));
 }
 
 bool RouteFind(const string &vrf_name, const Ip4Address &addr, int plen) {
@@ -1475,7 +1544,7 @@ bool EcmpTunnelRouteAdd(const Peer *peer, const string &vrf_name, const Ip4Addre
         type = Composite::LOCAL_ECMP;
     }
     DBRequest nh_req(DBRequest::DB_ENTRY_ADD_CHANGE);
-    nh_req.key.reset(new CompositeNHKey(type, true,
+    nh_req.key.reset(new CompositeNHKey(type, false,
                                         comp_nh_list, vrf_name));
     nh_req.data.reset(new CompositeNHData());
 
@@ -1870,29 +1939,14 @@ void AddInterfaceRouteTableV6(const char *name, int id, TestIp6Prefix *rt,
     AddNode("interface-route-table", name, id, buff);
 }
 
-static string AddAclXmlString(const char *node_name, const char *name, int id,
-                              const char *src_vn, const char *dest_vn,
-                              const char *action, std::string vrf_assign,
-                              std::string mirror_ip) {
-    char buff[10240];
-    std::ostringstream mirror;
-
-    if (mirror_ip != "") {
-        mirror << "<mirror-to>";
-        mirror << "<analyzer-name>" << node_name << "</analyzer-name>";
-        mirror << "<analyzer-ip-address>" << mirror_ip << "</analyzer-ip-address>";
-        mirror << "<routing-instance>" << "" << "</routing-instance>";
-        mirror << "<udp-port>" << "8159" << "</udp-port>";
-        mirror << "</mirror-to>";
-    } else {
-        mirror << "";
-    }
+void StartAcl(string *str, const char *name, int id) {
+    char buff[1024];
 
     sprintf(buff,
             "<?xml version=\"1.0\"?>\n"
             "<config>\n"
             "   <update>\n"
-            "       <node type=\"%s\">\n"
+            "       <node type=\"access-control-list\">\n"
             "           <name>%s</name>\n"
             "           <id-perms>\n"
             "               <permissions>\n"
@@ -1907,57 +1961,90 @@ static string AddAclXmlString(const char *node_name, const char *name, int id,
             "                   <uuid-lslong>%d</uuid-lslong>\n"
             "               </uuid>\n"
             "           </id-perms>\n"
-            "           <access-control-list-entries>\n"
-            "                <acl-rule>\n"
-            "                    <match-condition>\n"
-            "                        <protocol>\n"
-            "                            any\n"
-            "                        </protocol>\n"
-            "                        <src-address>\n"
-            "                            <virtual-network>\n"
-            "                                %s\n"
-            "                            </virtual-network>\n"
-            "                        </src-address>\n"
-            "                        <src-port>\n"
-            "                            <start-port>\n"
-            "                                10\n"
-            "                            </start-port>\n"
-            "                            <end-port>\n"
-            "                                20\n"
-            "                            </end-port>\n"
-            "                        </src-port>\n"
-            "                        <dst-address>\n"
-            "                            <virtual-network>\n"
-            "                                %s\n"
-            "                            </virtual-network>\n"
-            "                        </dst-address>\n"
-            "                        <dst-port>\n"
-            "                            <start-port>\n"
-            "                                 10\n"
-            "                            </start-port>\n"
-            "                            <end-port>\n"
-            "                                 20\n"
-            "                            </end-port>\n"
-            "                        </dst-port>\n"
-            "                    </match-condition>\n"
-            "                    <action-list>\n"
-            "                        <simple-action>\n"
-            "                            %s\n"
-            "                        </simple-action>\n"
-            "                            %s\n"
-            "                        <assign-routing-instance>"
-            "                            %s\n"
-            "                        </assign-routing-instance>"
-            "                    </action-list>\n"
-            "                </acl-rule>\n"
+            "           <access-control-list-entries>\n",
+            name, id);
+    *str = string(buff);
+    return;
+}
+
+void EndAcl(string *str) {
+    char buff[512];
+    sprintf(buff,
             "           </access-control-list-entries>\n"
             "       </node>\n"
             "   </update>\n"
-            "</config>\n", node_name, name, id, src_vn, dest_vn, action,
-            mirror.str().c_str(),
-            vrf_assign.c_str());
+            "</config>\n");
     string s(buff);
-    return s;
+    *str += s;
+    return;
+}
+
+void AddAceEntry(string *str, const char *src_vn, const char *dst_vn,
+                 const char *proto, uint16_t sport_start, uint16_t sport_end,
+                 uint16_t dport_start, uint16_t dport_end,
+                 const char *action, const std::string &vrf_assign,
+                 const std::string &mirror_ip, const std::string &qos_action) {
+    char buff[2048];
+
+    std::ostringstream mirror;
+
+    if (mirror_ip != "") {
+        mirror << "<mirror-to>";
+        mirror << "<analyzer-name> mirror-1 </analyzer-name>";
+        mirror << "<analyzer-ip-address>" << mirror_ip << "</analyzer-ip-address>";
+        mirror << "<routing-instance>" << "" << "</routing-instance>";
+        mirror << "<udp-port>" << "8159" << "</udp-port>";
+        mirror << "</mirror-to>";
+    } else {
+        mirror << "";
+    }
+
+    sprintf(buff,
+            "                <acl-rule>\n"
+            "                    <match-condition>\n"
+            "                        <protocol> %s </protocol>\n"
+            "                        <src-address>\n"
+            "                            <virtual-network> %s </virtual-network>\n"
+            "                        </src-address>\n"
+            "                        <src-port>\n"
+            "                            <start-port> %d </start-port>\n"
+            "                            <end-port> %d </end-port>\n"
+            "                        </src-port>\n"
+            "                        <dst-address>\n"
+            "                            <virtual-network> %s </virtual-network>\n"
+            "                        </dst-address>\n"
+            "                        <dst-port>\n"
+            "                            <start-port> %d </start-port>\n"
+            "                            <end-port> %d </end-port>\n"
+            "                        </dst-port>\n"
+            "                    </match-condition>\n"
+            "                    <action-list>\n"
+            "                        <simple-action> %s </simple-action>\n"
+            "                        %s\n"
+            "                        <assign-routing-instance> %s </assign-routing-instance>\n"
+            "                        <qos-action> %s </qos-action>\n"
+            "                    </action-list>\n"
+            "                </acl-rule>\n",
+        proto, src_vn, sport_start, sport_end, dst_vn, dport_start, dport_end,
+        action, mirror.str().c_str(), vrf_assign.c_str(), qos_action.c_str());
+    string s(buff);
+    *str += s;
+    return;
+}
+
+static string AddAclXmlString(const char *node_name, const char *name, int id,
+                              const char *src_vn, const char *dest_vn,
+                              const char *action, const std::string &vrf_assign,
+                              const std::string &mirror_ip,
+                              const std::string &qos_action) {
+    string str;
+    StartAcl(&str, name, id);
+    AddAceEntry(&str, src_vn, dest_vn, "any", 10, 20, 10, 20, action,
+                vrf_assign, mirror_ip, qos_action);
+    AddAceEntry(&str, dest_vn, src_vn, "any", 10, 20, 10, 20, action,
+                vrf_assign, mirror_ip, qos_action);
+    EndAcl(&str);
+    return str;
 }
 
 void AddAcl(const char *name, int id) {
@@ -1971,7 +2058,7 @@ void DelAcl(const char *name) {
 void AddAcl(const char *name, int id, const char *src_vn, const char *dest_vn,
             const char *action) {
     std::string s = AddAclXmlString("access-control-list", name, id,
-                                    src_vn, dest_vn, action, "", "");
+                                    src_vn, dest_vn, action, "", "", "");
     ApplyXmlString(s.c_str());
 }
 
@@ -1979,7 +2066,15 @@ void AddVrfAssignNetworkAcl(const char *name, int id, const char *src_vn,
                             const char *dest_vn, const char *action,
                             std::string vrf_name) {
     std::string s = AddAclXmlString("access-control-list", name, id,
-                                    src_vn, dest_vn, action, vrf_name, "");
+                                    src_vn, dest_vn, action, vrf_name, "", "");
+    ApplyXmlString(s.c_str());
+}
+
+void AddQosAcl(const char *name, int id, const char *src_vn,
+               const char *dest_vn, const char *action,
+               std::string qos_config) {
+    std::string s = AddAclXmlString("access-control-list", name, id,
+                                     src_vn, dest_vn, action, "", "", qos_config);
     ApplyXmlString(s.c_str());
 }
 
@@ -1987,7 +2082,7 @@ void AddMirrorAcl(const char *name, int id, const char *src_vn,
                   const char *dest_vn, const char *action,
                   std::string mirror_ip) {
     std::string s = AddAclXmlString("access-control-list", name, id,
-            src_vn, dest_vn, action, "", mirror_ip);
+            src_vn, dest_vn, action, "", mirror_ip, "");
     ApplyXmlString(s.c_str());
 }
 
@@ -2030,6 +2125,25 @@ void DelFloatingIpPool(const char *name) {
     DelNode("floating-ip-pool", name);
 }
 
+void AddAliasIp(const char *name, int id, const char *addr) {
+    char buff[128];
+
+    sprintf(buff, "<alias-ip-address>%s</alias-ip-address>", addr);
+    AddNode("alias-ip", name, id, buff);
+}
+
+void DelAliasIp(const char *name) {
+    DelNode("alias-ip", name);
+}
+
+void AddAliasIpPool(const char *name, int id) {
+    AddNode("alias-ip-pool", name, id);
+}
+
+void DelAliasIpPool(const char *name) {
+    DelNode("alias-ip-pool", name);
+}
+
 void AddInstanceIp(const char *name, int id, const char *addr) {
     char buf[256];
 
@@ -2042,6 +2156,43 @@ void AddActiveActiveInstanceIp(const char *name, int id, const char *addr) {
     char buf[128];
     sprintf(buf, "<instance-ip-address>%s</instance-ip-address>"
                  "<instance-ip-mode>active-active</instance-ip-mode>", addr);
+    AddNode("instance-ip", name, id, buf);
+}
+
+void AddHealthCheckServiceInstanceIp(const char *name, int id,
+                                     const char *addr) {
+    char buf[256];
+
+    sprintf(buf, "<instance-ip-address>%s</instance-ip-address>"
+                 "<service-health-check-ip>true</service-health-check-ip>"
+                 "<instance-ip-mode>active-backup</instance-ip-mode>", addr);
+    AddNode("instance-ip", name, id, buf);
+}
+
+void AddServiceInstanceIp(const char *name, int id, const char *addr, bool ecmp,
+                          const char *tracking_ip) {
+    char buf[256];
+    char mode[256];
+
+    if (ecmp) {
+         sprintf(mode, "active-active");
+    } else {
+        sprintf(mode, "active-backup");
+    }
+
+    char tracking_ip_buf[256] = "0.0.0.0";
+    if (tracking_ip) {
+        sprintf(tracking_ip_buf, "%s", tracking_ip);
+    }
+
+    sprintf(buf, "<instance-ip-address>%s</instance-ip-address>"
+                 "<service-instance-ip>true</service-instance-ip>"
+                 "<instance-ip-mode>%s</instance-ip-mode>"
+                 "<secondary-ip-tracking-ip>"
+                 "    <ip-prefix>%s</ip-prefix>"
+                 "    <ip-prefix-len>32</ip-prefix-len>"
+                 "</secondary-ip-tracking-ip>", addr, mode,
+                 tracking_ip_buf);
     AddNode("instance-ip", name, id, buf);
 }
 
@@ -2321,6 +2472,29 @@ void DelEncapList(Agent *agent) {
     DelNode(agent, "global-vrouter-config", "vrouter-config");
 }
 
+void DelHealthCheckService(const char *name) {
+    DelNode("service-health-check", name);
+}
+
+void AddHealthCheckService(const char *name, int id,
+                           const char *url_path,
+                           const char *monitor_type) {
+    char buf[1024];
+
+    sprintf(buf, "<service-health-check-properties>"
+                 "    <enabled>false</enabled>"
+                 "    <health-check-type>end-to-end</health-check-type>"
+                 "    <monitor-type>%s</monitor-type>"
+                 "    <delay>5</delay>"
+                 "    <timeout>5</timeout>"
+                 "    <max-retries>3</max-retries>"
+                 "    <http-method></http-method>"
+                 "    <url-path>%s</url-path>"
+                 "    <expected-codes></expected-codes>"
+                 "</service-health-check-properties>", monitor_type, url_path);
+    AddNode("service-health-check", name, id, buf);
+}
+
 void send_icmp(int fd, uint8_t smac, uint8_t dmac, uint32_t sip, uint32_t dip) {
     uint8_t dummy_dmac[6], dummy_smac[6];
 	memset(dummy_dmac, 0, sizeof(dummy_dmac));
@@ -2369,14 +2543,14 @@ bool FlowStats(FlowIp *input, int id, uint32_t bytes, uint32_t pkts) {
     key.protocol = IPPROTO_ICMP;
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
-    FlowEntry *fe = agent->pkt()->get_flow_proto()->Find(key);
+    FlowEntry *fe = agent->pkt()->get_flow_proto()->Find(key, 0);
     if (fe == NULL) {
         LOG(DEBUG, "Flow not found");
         return false;
     }
     FlowStatsCollector *fec =
         agent->flow_stats_manager()->default_flow_stats_collector();
-    FlowExportInfo *info = fec->FindFlowExportInfo(fe->uuid());
+    FlowExportInfo *info = fec->FindFlowExportInfo(fe);
 
     if (info) {
         LOG(DEBUG, " bytes " << info->bytes() << " pkts " << info->packets());
@@ -2607,7 +2781,6 @@ void DeleteVmportEnv(struct PortInfo *input, int count, int del_vn, int acl_id,
                 sprintf(vrf_name, "%s", vrf);
             else
                 sprintf(vrf_name, "vrf%d", input[i].vn_id);
-            sprintf(vm_name, "vm%d", input[i].vm_id);
             DelLink("virtual-network", vn_name, "routing-instance", vrf_name);
             if (acl_id) {
                 DelLink("virtual-network", vn_name, "access-control-list", acl_name);
@@ -2839,7 +3012,7 @@ void FlushFlowTable() {
 
 static bool FlowDeleteTrigger(FlowKey key) {
     FlowTable *table =
-        Agent::GetInstance()->pkt()->get_flow_proto()->GetFlowTable(key);
+        Agent::GetInstance()->pkt()->get_flow_proto()->GetTable(0);
     if (table->Find(key) == NULL) {
         return true;
     }
@@ -2868,7 +3041,7 @@ bool FlowDelete(const string &vrf_name, const char *sip, const char *dip,
     key.protocol = proto;
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
-    if (Agent::GetInstance()->pkt()->get_flow_proto()->Find(key) == NULL) {
+    if (Agent::GetInstance()->pkt()->get_flow_proto()->Find(key, 0) == NULL) {
         return false;
     }
 
@@ -2890,8 +3063,10 @@ bool FlowFail(int vrf_id, const char *sip, const char *dip,
     key.dst_port = dport;
     key.protocol = proto;
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
+    FlowProto *fp = Agent::GetInstance()->pkt()->get_flow_proto();
 
-    FlowEntry *fe = Agent::GetInstance()->pkt()->get_flow_proto()->Find(key);
+    WAIT_FOR(1000, 1000, (fp->Find(key, 0) == false));
+    FlowEntry *fe = fp->Find(key, 0);
     if (fe == NULL) {
         return true;
     }
@@ -2934,7 +3109,7 @@ bool FlowGetNat(const string &vrf_name, const char *sip, const char *dip,
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
     FlowTable *table =
-        Agent::GetInstance()->pkt()->get_flow_proto()->GetFlowTable(key);
+        Agent::GetInstance()->pkt()->get_flow_proto()->GetTable(0);
     FlowEntry *entry = table->Find(key);
     EXPECT_TRUE(entry != NULL);
     if (entry == NULL) {
@@ -2995,6 +3170,27 @@ bool FlowGetNat(const string &vrf_name, const char *sip, const char *dip,
     return true;
 }
 
+FlowEntry* FlowGet(std::string sip, std::string dip, uint8_t proto,
+                   uint16_t sport, uint16_t dport, int nh_id,
+                   uint32_t flow_handle) {
+    FlowKey key;
+    key.nh = nh_id;
+    key.src_addr = IpAddress::from_string(sip);
+    key.dst_addr = IpAddress::from_string(dip);
+    key.src_port = sport;
+    key.dst_port = dport;
+    key.protocol = proto;
+    key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
+
+    FlowTable *table =
+        Agent::GetInstance()->pkt()->get_flow_proto()->GetFlowTable(key,
+                                                                    flow_handle);
+    if (table == NULL) {
+        return NULL;
+    }
+    return table->Find(key);
+}
+
 FlowEntry* FlowGet(int vrf_id, std::string sip, std::string dip, uint8_t proto,
                    uint16_t sport, uint16_t dport, int nh_id) {
     FlowKey key;
@@ -3006,7 +3202,7 @@ FlowEntry* FlowGet(int vrf_id, std::string sip, std::string dip, uint8_t proto,
     key.protocol = proto;
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
-    return Agent::GetInstance()->pkt()->get_flow_proto()->Find(key);
+    return Agent::GetInstance()->pkt()->get_flow_proto()->Find(key, 0);
 }
 
 FlowEntry* FlowGet(int nh_id, std::string sip, std::string dip, uint8_t proto,
@@ -3026,7 +3222,8 @@ bool FlowGet(int vrf_id, const char *sip, const char *dip, uint8_t proto,
     key.protocol = proto;
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
-    FlowEntry *entry = Agent::GetInstance()->pkt()->get_flow_proto()->Find(key);
+    FlowEntry *entry = Agent::GetInstance()->pkt()->get_flow_proto()->Find(key,
+                                                                           0);
     EXPECT_TRUE(entry != NULL);
     if (entry == NULL) {
         return false;
@@ -3106,7 +3303,7 @@ bool FlowGet(const string &vrf_name, const char *sip, const char *dip,
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
     FlowTable *table =
-        Agent::GetInstance()->pkt()->get_flow_proto()->GetFlowTable(key);
+        Agent::GetInstance()->pkt()->get_flow_proto()->GetFlowTable(key, 0);
     FlowEntry *entry = table->Find(key);
     EXPECT_TRUE(entry != NULL);
     if (entry == NULL) {
@@ -3203,7 +3400,8 @@ bool FlowGet(const string &vrf_name, const char *sip, const char *dip,
     key.protocol = proto;
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
-    FlowEntry *entry = Agent::GetInstance()->pkt()->get_flow_proto()->Find(key);
+    FlowEntry *entry = Agent::GetInstance()->pkt()->get_flow_proto()->Find(key,
+                                                                           0);
     EXPECT_TRUE(entry != NULL);
     if (entry == NULL) {
         return false;
@@ -3243,18 +3441,14 @@ bool FlowStatsMatch(const string &vrf_name, const char *sip,
     key.protocol = proto;
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
-    FlowEntry *fe = agent->pkt()->get_flow_proto()->Find(key);
+    FlowEntry *fe = agent->pkt()->get_flow_proto()->Find(key, 0);
     EXPECT_TRUE(fe != NULL);
     if (fe == NULL) {
         return false;
     }
-    FlowStatsCollector *fec = NULL;
-    if (proto == IPPROTO_TCP) {
-        fec = agent->flow_stats_manager()->tcp_flow_stats_collector();
-    } else {
-        fec = agent->flow_stats_manager()->default_flow_stats_collector();
-    }
-    FlowExportInfo *info = fec->FindFlowExportInfo(fe->uuid());
+    FlowStatsCollector *fec = 
+        agent->flow_stats_manager()->default_flow_stats_collector();
+    FlowExportInfo *info = fec->FindFlowExportInfo(fe);
     if (info) {
         LOG(DEBUG, " bytes " << info->bytes() << " pkts " << info->packets());
         if (info->bytes() == bytes && info->packets() == pkts) {
@@ -3286,7 +3480,7 @@ bool FindFlow(const string &vrf_name, const char *sip, const char *dip,
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
     FlowTable *table =
-        Agent::GetInstance()->pkt()->get_flow_proto()->GetFlowTable(key);
+        Agent::GetInstance()->pkt()->get_flow_proto()->GetFlowTable(key, 0);
     FlowEntry *entry = table->Find(key);
     EXPECT_TRUE(entry != NULL);
     if (entry == NULL) {
@@ -3627,7 +3821,7 @@ void DeleteBgpPeer(Peer *peer) {
     XmppChannelMock *xmpp_channel = NULL;
 
     if (bgp_peer) {
-        channel = bgp_peer->GetBgpXmppPeer();
+        channel = bgp_peer->GetAgentXmppChannel();
         AgentXmppChannel::HandleAgentXmppClientChannelEvent(channel,
                                                             xmps::NOT_READY);
     }
@@ -3871,4 +4065,389 @@ bool VnMatch(VnListType &vn_list, std::string &vn) {
             return true;
     }
     return false;
+}
+
+void AddAddressVrfAssignAcl(const char *intf_name, int intf_id,
+                            const char *sip, const char *dip, int proto,
+                            int sport_start, int sport_end, int dport_start,
+                            int dport_end, const char *vrf, const char *ignore_acl) {
+    char buf[3000];
+    sprintf(buf,
+            "    <vrf-assign-table>\n"
+            "        <vrf-assign-rule>\n"
+            "            <match-condition>\n"
+            "                 <protocol>\n"
+            "                     %d\n"
+            "                 </protocol>\n"
+            "                 <src-address>\n"
+            "                     <subnet>\n"
+            "                        <ip-prefix>\n"
+            "                         %s\n"
+            "                        </ip-prefix>\n"
+            "                        <ip-prefix-len>\n"
+            "                         24\n"
+            "                        </ip-prefix-len>\n"
+            "                     </subnet>\n"
+            "                 </src-address>\n"
+            "                 <src-port>\n"
+            "                     <start-port>\n"
+            "                         %d\n"
+            "                     </start-port>\n"
+            "                     <end-port>\n"
+            "                         %d\n"
+            "                     </end-port>\n"
+            "                 </src-port>\n"
+            "                 <dst-address>\n"
+            "                     <subnet>\n"
+            "                        <ip-prefix>\n"
+            "                         %s\n"
+            "                        </ip-prefix>\n"
+            "                        <ip-prefix-len>\n"
+            "                         24\n"
+            "                        </ip-prefix-len>\n"
+            "                     </subnet>\n"
+            "                 </dst-address>\n"
+            "                 <dst-port>\n"
+            "                     <start-port>\n"
+            "                        %d\n"
+            "                     </start-port>\n"
+            "                     <end-port>\n"
+            "                        %d\n"
+            "                     </end-port>\n"
+            "                 </dst-port>\n"
+            "             </match-condition>\n"
+            "             <vlan-tag>0</vlan-tag>\n"
+            "             <routing-instance>%s</routing-instance>\n"
+            "             <ignore-acl>%s</ignore-acl>\n"
+            "         </vrf-assign-rule>\n"
+            "    </vrf-assign-table>\n",
+        proto, sip, sport_start, sport_end, dip, dport_start, dport_end, vrf,
+        ignore_acl);
+    AddNode("virtual-machine-interface", intf_name, intf_id, buf);
+    client->WaitForIdle();
+}
+
+void SendBgpServiceConfig(const std::string &ip,
+                          uint32_t source_port,
+                          uint32_t id,
+                          const std::string &vmi_name,
+                          const std::string &vrf_name,
+                          const std::string &bgp_router_type,
+                          bool deleted) {
+    std::stringstream bgp_router_name;
+    bgp_router_name << "bgp-router-" << source_port << "-" << ip;
+
+    std::stringstream str;
+    str << "<bgp-router-parameters><identifier>" << ip << "</identifier>"
+        "<address>" << ip << "</address>"
+        "<source-port>" << source_port << "</source-port>"
+        "<router-type>" << bgp_router_type << "</router-type>"
+        "</bgp-router-parameters>" << endl;
+
+    std::stringstream str1;
+    //Agent does not pick IP from bgpaas-ip-address. So dont populate.
+    str1 << "<bgpaas-ip-address></bgpaas-ip-address>" << endl;
+
+    if (deleted) {
+        DelLink("bgp-router", bgp_router_name.str().c_str(),
+                "bgp-as-a-service", bgp_router_name.str().c_str());
+        client->WaitForIdle();
+        DelLink("bgp-router", bgp_router_name.str().c_str(),
+                "routing-instance", vrf_name.c_str());
+        client->WaitForIdle();
+        DelLink("virtual-machine-interface", vmi_name.c_str(),
+                "bgp-as-a-service", bgp_router_name.str().c_str());
+        client->WaitForIdle();
+        DelNode("bgp-router", bgp_router_name.str().c_str());
+        client->WaitForIdle();
+        DelNode("bgp-as-a-service", bgp_router_name.str().c_str());
+        client->WaitForIdle();
+        return;
+    }
+
+    AddNode("bgp-router", bgp_router_name.str().c_str(), id,
+            str.str().c_str());
+    client->WaitForIdle();
+    AddNode("bgp-as-a-service", bgp_router_name.str().c_str(), id,
+            str1.str().c_str());
+    client->WaitForIdle();
+    AddLink("bgp-router", bgp_router_name.str().c_str(),
+            "bgp-as-a-service", bgp_router_name.str().c_str());
+    client->WaitForIdle();
+    AddLink("bgp-router", bgp_router_name.str().c_str(),
+            "routing-instance", vrf_name.c_str());
+    client->WaitForIdle();
+    AddLink("virtual-machine-interface", vmi_name.c_str(),
+            "bgp-as-a-service", bgp_router_name.str().c_str());
+    client->WaitForIdle();
+}
+
+void AddQosConfig(struct TestQosConfigData &data) {
+    std::stringstream str;
+
+    str << "<qos-config-type>" << data.type_ << "</qos-config-type>";
+
+    str << "<default-forwarding-class-id>" << data.default_forwarding_class_
+        << "</default-forwarding-class-id>";
+
+    if (data.dscp_.size()) {
+        str << "<dscp-entries>";
+    }
+
+    std::map<uint32_t, uint32_t>::const_iterator it = data.dscp_.begin();
+    for (; it != data.dscp_.end(); it++) {
+        str << "<qos-id-forwarding-class-pair>";
+        str << "<key>" << it->first << "</key>";
+        str << "<forwarding-class-id>"<< it->second << "</forwarding-class-id>";
+        str << "</qos-id-forwarding-class-pair>";
+    }
+    if (data.dscp_.size()) {
+        str << "</dscp-entries>";
+    }
+
+    if (data.vlan_priority_.size()) {
+        str << "<vlan-priority-entries>";
+    }
+    it = data.vlan_priority_.begin();
+    for (; it != data.vlan_priority_.end(); it++) {
+        str << "<qos-id-forwarding-class-pair>";
+        str << "<key>" << it->first << "</key>";
+        str << "<forwarding-class-id>"<< it->second << "</forwarding-class-id>";
+        str << "</qos-id-forwarding-class-pair>";
+    }
+    if (data.vlan_priority_.size()) {
+        str << "</vlan-priority-entries>";
+    }
+
+    if (data.mpls_exp_.size()) {
+        str << "<mpls-exp-entries>";
+    }
+    it = data.mpls_exp_.begin();
+    for (; it != data.mpls_exp_.end(); it++) {
+        str << "<qos-id-forwarding-class-pair>";
+        str << "<key>" << it->first << "</key>";
+        str << "<forwarding-class-id>"<< it->second << "</forwarding-class-id>";
+        str << "</qos-id-forwarding-class-pair>";
+    }
+    if (data.mpls_exp_.size()) {
+        str << "</mpls-exp-entries>";
+    }
+
+    char buf[10000];
+    int len = 0;
+    memset(buf, 0, 10000);
+    AddXmlHdr(buf, len);
+    AddNodeString(buf, len, "qos-config",
+            data.name_.c_str(), data.id_, str.str().c_str());
+    AddXmlTail(buf, len);
+    ApplyXmlString(buf);
+}
+
+void VerifyQosConfig(Agent *agent, struct TestQosConfigData *data) {
+    AgentQosConfigKey key(MakeUuid(data->id_));
+    AgentQosConfig *qc = static_cast<AgentQosConfig *>(
+            agent->qos_config_table()->FindActiveEntry(&key));
+
+    if (data->type_ == "vhost") {
+        EXPECT_TRUE(qc->type() == AgentQosConfig::VHOST);
+    } else if (data->type_ == "fabric") {
+        EXPECT_TRUE(qc->type() == AgentQosConfig::FABRIC);
+    } else {
+        EXPECT_TRUE(qc->type() == AgentQosConfig::DEFAULT);
+    }
+
+    std::map<uint32_t, uint32_t>::const_iterator it = data->dscp_.begin();
+    AgentQosConfig::QosIdForwardingClassMap::const_iterator qc_it =
+        qc->dscp_map().begin();
+    while(it != data->dscp_.end() && qc_it != qc->dscp_map().end()) {
+        EXPECT_TRUE(it->first == qc_it->first);
+        EXPECT_TRUE(it->second == qc_it->second);
+        it++;
+        qc_it++;
+    }
+    EXPECT_TRUE(it == data->dscp_.end());
+    EXPECT_TRUE(qc_it == qc->dscp_map().end());
+
+    it = data->vlan_priority_.begin();
+    qc_it = qc->vlan_priority_map().begin();
+    while(it != data->vlan_priority_.end() &&
+            qc_it != qc->vlan_priority_map().end()) {
+        EXPECT_TRUE(it->first == qc_it->first);
+        EXPECT_TRUE(it->second == qc_it->second);
+        it++;
+        qc_it++;
+    }
+    EXPECT_TRUE(it == data->vlan_priority_.end());
+    EXPECT_TRUE(qc_it == qc->vlan_priority_map().end());
+
+    it = data->mpls_exp_.begin();
+    qc_it = qc->mpls_exp_map().begin();
+    while(it != data->mpls_exp_.end() &&
+            qc_it != qc->mpls_exp_map().end()) {
+        EXPECT_TRUE(it->first == qc_it->first);
+        EXPECT_TRUE(it->second == qc_it->second);
+        it++;
+        qc_it++;
+    }
+    EXPECT_TRUE(it == data->mpls_exp_.end());
+    EXPECT_TRUE(qc_it == qc->mpls_exp_map().end());
+    EXPECT_TRUE(qc->default_forwarding_class() ==
+                data->default_forwarding_class_);
+}
+
+void AddGlobalConfig(struct TestForwardingClassData *data,
+                     uint32_t count) {
+    std::stringstream str;
+
+    char qos_name[100];
+    char fc_name[100];
+    for (uint32_t i = 0; i < count; i++) {
+        sprintf(qos_name, "qosqueue%d", data[i].qos_queue_);
+        sprintf(fc_name, "fc%d", data[i].id_);
+
+        AddNode("qos-queue", qos_name, data[i].qos_queue_);
+        client->WaitForIdle();
+        str << "<forwarding-class-id>" << data[i].id_ << "</forwarding-class-id>";
+        str << "<forwarding-class-dscp>" << data[i].dscp_ <<
+            "</forwarding-class-dscp>";
+        str << "<forwarding-class-vlan-priority>" << data[i].vlan_priority_
+            << "</forwarding-class-vlan-priority>";
+        str << "<forwarding-class-mpls-exp>" << data[i].mpls_exp_
+            << "</forwarding-class-mpls-exp>";
+
+        char buf[10000];
+        int len = 0;
+        memset(buf, 0, 10000);
+        AddXmlHdr(buf, len);
+        AddNodeString(buf, len, "forwarding-class", fc_name,
+                      data[i].id_, str.str().c_str());
+        AddXmlTail(buf, len);
+        ApplyXmlString(buf);
+        AddLink("forwarding-class", fc_name, "qos-queue", qos_name);
+    }
+}
+
+void DelGlobalConfig(struct TestForwardingClassData *data,
+                     uint32_t count) {
+
+    char qos_name[100];
+    char fc_name[100];
+    for (uint32_t i = 0; i < count; i++) {
+        sprintf(qos_name, "qosqueue%d", data[i].qos_queue_);
+        sprintf(fc_name, "fc%d", data[i].id_);
+
+        DelLink("forwarding-class", fc_name, "qos-queue", qos_name);
+        DelNode("qos-queue", qos_name);
+        DelNode("forwarding-class", fc_name);
+    }
+    client->WaitForIdle();
+}
+
+void VerifyForwardingClass(Agent *agent, struct TestForwardingClassData *data,
+                           uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        ForwardingClassKey key(MakeUuid(data[i].id_));
+        ForwardingClass *fc = static_cast<ForwardingClass *>(
+            agent->forwarding_class_table()->FindActiveEntry(&key));
+        EXPECT_TRUE(fc->dscp() == data[i].dscp_);
+        EXPECT_TRUE(fc->vlan_priority() == data[i].vlan_priority_);
+        EXPECT_TRUE(fc->mpls_exp() == data[i].mpls_exp_);
+        EXPECT_TRUE(fc->qos_queue_ref()->uuid() == MakeUuid(data[i].qos_queue_));
+    }
+}
+
+void AddAapWithDisablePolicy(std::string intf_name, int intf_id,
+                             std::vector<Ip4Address> aap_list,
+                             bool disable_policy) {
+    std::ostringstream buf;
+    buf << "<virtual-machine-interface-allowed-address-pairs>";
+    std::vector<Ip4Address>::iterator it = aap_list.begin();
+    while (it != aap_list.end()) {
+        buf << "<allowed-address-pair>";
+        buf << "<ip>";
+        buf << "<ip-prefix>" << it->to_string()<<"</ip-prefix>";
+        buf << "<ip-prefix-len>"<< 32 << "</ip-prefix-len>";
+        buf << "</ip>";
+        buf << "<mac><mac-address>" << "00:00:00:00:00:00"
+            << "</mac-address></mac>";
+        buf << "<flag>" << "act-stby" << "</flag>";
+        buf << "</allowed-address-pair>";
+        it++;
+    }
+    buf << "</virtual-machine-interface-allowed-address-pairs>";
+    buf << "<virtual-machine-interface-disable-policy>";
+    if (disable_policy) {
+        buf << "true";
+    } else {
+        buf << "false";
+    }
+    buf << "</virtual-machine-interface-disable-policy>";
+    char cbuf[10000];
+    strcpy(cbuf, buf.str().c_str());
+    AddNode("virtual-machine-interface", intf_name.c_str(), intf_id, cbuf);
+    client->WaitForIdle();
+}
+
+void AddAap(std::string intf_name, int intf_id,
+            std::vector<Ip4Address> aap_list) {
+    std::ostringstream buf;
+    buf << "<virtual-machine-interface-allowed-address-pairs>";
+    std::vector<Ip4Address>::iterator it = aap_list.begin();
+    while (it != aap_list.end()) {
+        buf << "<allowed-address-pair>";
+        buf << "<ip>";
+        buf << "<ip-prefix>" << it->to_string()<<"</ip-prefix>";
+        buf << "<ip-prefix-len>"<< 32 << "</ip-prefix-len>";
+        buf << "</ip>";
+        buf << "<mac><mac-address>" << "00:00:00:00:00:00"
+            << "</mac-address></mac>";
+        buf << "<flag>" << "act-stby" << "</flag>";
+        buf << "</allowed-address-pair>";
+        it++;
+    }
+    buf << "</virtual-machine-interface-allowed-address-pairs>";
+    char cbuf[10000];
+    strcpy(cbuf, buf.str().c_str());
+    AddNode("virtual-machine-interface", intf_name.c_str(), intf_id, cbuf);
+    client->WaitForIdle();
+}
+
+void AddAap(std::string intf_name, int intf_id, Ip4Address ip,
+            const std::string &mac) {
+    std::ostringstream buf;
+    buf << "<virtual-machine-interface-allowed-address-pairs>";
+    buf << "<allowed-address-pair>";
+    buf << "<ip>";
+    buf << "<ip-prefix>" << ip.to_string() <<"</ip-prefix>";
+    buf << "<ip-prefix-len>"<< 32 << "</ip-prefix-len>";
+    buf << "</ip>";
+    buf << "<mac>" << mac << "</mac>";
+    buf << "<flag>" << "act-stby" << "</flag>";
+    buf << "</allowed-address-pair>";
+    buf << "</virtual-machine-interface-allowed-address-pairs>";
+    char cbuf[10000];
+    strcpy(cbuf, buf.str().c_str());
+    AddNode("virtual-machine-interface", intf_name.c_str(),
+            intf_id, cbuf);
+    client->WaitForIdle();
+}
+
+void AddEcmpAap(std::string intf_name, int intf_id, Ip4Address ip) {
+    std::ostringstream buf;
+    buf << "<virtual-machine-interface-allowed-address-pairs>";
+    buf << "<allowed-address-pair>";
+    buf << "<ip>";
+    buf << "<ip-prefix>" << ip.to_string() <<"</ip-prefix>";
+    buf << "<ip-prefix-len>"<< 32 << "</ip-prefix-len>";
+    buf << "</ip>";
+    buf << "<mac><mac-address>" << "00:00:00:00:00:00"
+        << "</mac-address></mac>";
+    buf << "<address-mode>" << "active-active" << "</address-mode>";
+    buf << "</allowed-address-pair>";
+    buf << "</virtual-machine-interface-allowed-address-pairs>";
+    char cbuf[10000];
+    strcpy(cbuf, buf.str().c_str());
+    AddNode("virtual-machine-interface", intf_name.c_str(),
+            intf_id, cbuf);
+    client->WaitForIdle();
 }

@@ -5,13 +5,19 @@
 #ifndef __BASE__TASK_TEST_UTIL_H__
 #define __BASE__TASK_TEST_UTIL_H__
 
+#include <sys/time.h>
+#include <sys/resource.h>
+
 #include <boost/function.hpp>
+#include <boost/scoped_ptr.hpp>
+#include <base/task_trigger.h>
 #include "testing/gunit.h"
 
 class EventManager;
 
 namespace task_util {
-void WaitForIdle(long wait_seconds = 30, bool running_only = false);
+void WaitForIdle(long wait_seconds = 30, bool running_only = false,
+                 bool verify = true);
 void WaitForCondition(EventManager *evm, boost::function<bool(void)> condition,
                       const int timeout);
 void BusyWork(EventManager *evm, const int timeout);
@@ -24,6 +30,42 @@ public:
     ~TaskSchedulerLock();
 };
 
+// Fire user routine through task-triger inline and return after the task is
+// complete.
+//
+// Usage example:
+// task_util::TaskFire(boost::bind(&Example::ExampleRun, this, args),
+//                     "bgp::Config");
+//
+// Note: One cannot call task_util::wait_for_idle() inside ExampleRun() as that
+// we will never reach idle state until the user callback is complete.
+class TaskFire {
+public:
+    typedef boost::function<void(void)> FunctionPtr;
+    typedef boost::function<void(const void *)> FunctionPtr1;
+    TaskFire(FunctionPtr func, const std::string task_name, int instance = 0);
+
+private:
+    bool Run();
+    FunctionPtr func_;
+    std::string task_name_;
+    boost::scoped_ptr<TaskTrigger> task_trigger_;
+};
+
+}
+
+// Fork off python shell for pause. Use portable fork and exec instead of the
+// platform specific system() call.
+static inline void TaskUtilPauseTest() {
+    static bool d_pause_ = getenv("TASK_UTIL_PAUSE_AFTER_FAILURE") != NULL;
+    if (!d_pause_)
+        return;
+    std::cout << "Test PAUSED. Exit (Ctrl-d) python shell to resume";
+    pid_t pid;
+    if (!(pid = fork()))
+        execl("/usr/bin/python", "/usr/bin/python", NULL);
+    int status;
+    waitpid(pid, &status, 0);
 }
 
 #define TASK_UTIL_WAIT_EQ_NO_MSG(expected, actual, wait, retry, msg)           \
@@ -38,6 +80,8 @@ do {                                                                           \
     }                                                                          \
     if (!_satisfied) {                                                         \
         EXPECT_TRUE((expected) == (actual));                                   \
+        if((expected) != (actual))                                             \
+            TaskUtilPauseTest();                                               \
     }                                                                          \
 } while (false)
 
@@ -53,6 +97,8 @@ do {                                                                           \
     }                                                                          \
     if (!_satisfied) {                                                         \
         EXPECT_TRUE((expected) != (actual));                                   \
+        if((expected) == (actual))                                             \
+            TaskUtilPauseTest();                                               \
     }                                                                          \
 } while (false)
 
@@ -88,6 +134,8 @@ do {                                                                           \
     }                                                                          \
     if (!_satisfied) {                                                         \
         EXPECT_EQ(expected, actual);                                           \
+        if((expected) != (actual))                                             \
+            TaskUtilPauseTest();                                               \
     }                                                                          \
 } while (false)
 
@@ -114,6 +162,8 @@ do {                                                                           \
     }                                                                          \
     if (!_satisfied) {                                                         \
         EXPECT_NE(expected, actual);                                           \
+        if((expected) == (actual))                                             \
+            TaskUtilPauseTest();                                               \
     }                                                                          \
 } while (false)
 
@@ -141,6 +191,8 @@ do {                                                                           \
     }                                                                          \
     if (!_satisfied) {                                                         \
         EXPECT_GT(object1, object2);                                           \
+        if((object1) <= (object2))                                             \
+            TaskUtilPauseTest();                                               \
     }                                                                          \
 } while (false)
 
@@ -168,6 +220,8 @@ do {                                                                           \
     }                                                                          \
     if (!_satisfied) {                                                         \
         EXPECT_GE(object1, object2);                                           \
+        if((object1) < (object2))                                              \
+            TaskUtilPauseTest();                                               \
     }                                                                          \
 } while (false)
 
@@ -195,6 +249,8 @@ do {                                                                           \
     }                                                                          \
     if (!_satisfied) {                                                         \
         EXPECT_LT(object1, object2);                                           \
+        if((object1) >= (object2))                                             \
+            TaskUtilPauseTest();                                               \
     }                                                                          \
 } while (false)
 
@@ -222,6 +278,8 @@ do {                                                                           \
     }                                                                          \
     if (!_satisfied) {                                                         \
         EXPECT_LE(object1, object2);                                           \
+        if((object1) > (object2))                                              \
+            TaskUtilPauseTest();                                               \
     }                                                                          \
 } while (false)
 
@@ -324,6 +382,19 @@ static inline unsigned long long int task_util_retry_count() {
     TASK_UTIL_WAIT_EQ_NO_MSG(false, condition, task_util_wait_time(), \
                              task_util_retry_count(), msg)
 
+#define TASK_UTIL_EXPECT_DEATH(statement, regex)                               \
+    do {                                                                       \
+        rlimit current_core_limit;                                             \
+        getrlimit(RLIMIT_CORE, &current_core_limit);                           \
+        rlimit new_core_limit;                                                 \
+        new_core_limit.rlim_cur = 0;                                           \
+        new_core_limit.rlim_max = 0;                                           \
+        setrlimit(RLIMIT_CORE, &new_core_limit);                               \
+        EXPECT_DEATH(statement, regex);                                        \
+        setrlimit(RLIMIT_CORE, &current_core_limit);                           \
+    } while (false)
+
+
 #define TASK_UTIL_ASSERT_EQ(expected, actual)                                  \
     do {                                                                       \
         TASK_UTIL_WAIT_EQ(expected, actual, task_util_wait_time(),             \
@@ -361,5 +432,20 @@ static inline unsigned long long int task_util_retry_count() {
 #define TASK_UTIL_EXPECT_EQ_TYPE_NAME(expected, actual)                        \
         EXPECT_EQ(expected, actual);
 #endif
+
+// Wrapper macro to launch a command using fork and exec safely wrt io service.
+#define TASK_UTIL_EXEC_AND_WAIT(evm, cmd)                                      \
+do {                                                                           \
+    (evm).io_service()->notify_fork(boost::asio::io_service::fork_prepare);    \
+    pid_t pid;                                                                 \
+    if (!(pid = fork())) {                                                     \
+        (evm).io_service()->notify_fork(boost::asio::io_service::fork_child);  \
+        execl(cmd, cmd, NULL);                                                 \
+    }                                                                          \
+    (evm).io_service()->notify_fork(boost::asio::io_service::fork_parent);     \
+    int status;                                                                \
+    waitpid(pid, &status, 0);                                                  \
+} while (false)
+
 
 #endif // __BASE__TASK_TEST_UTIL_H__

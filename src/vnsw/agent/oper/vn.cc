@@ -29,6 +29,7 @@
 #include <oper/config_manager.h>
 #include <oper/global_vrouter.h>
 #include <oper/agent_route_resync.h>
+#include <oper/qos_config.h>
 #include <filter/acl.h>
 #include "net/address_util.h"
 
@@ -41,10 +42,12 @@ using boost::assign::list_of;
 VnTable *VnTable::vn_table_;
 
 VnIpam::VnIpam(const std::string& ip, uint32_t len, const std::string& gw,
-               const std::string& dns, bool dhcp, std::string &name,
+               const std::string& dns, bool dhcp, const std::string &name,
                const std::vector<autogen::DhcpOptionType> &dhcp_options,
-               const std::vector<autogen::RouteType> &host_routes)
-        : plen(len), installed(false), dhcp_enable(dhcp), ipam_name(name) {
+               const std::vector<autogen::RouteType> &host_routes,
+               uint32_t alloc)
+        : plen(len), installed(false), dhcp_enable(dhcp), ipam_name(name),
+          alloc_unit(alloc) {
     boost::system::error_code ec;
     ip_prefix = IpAddress::from_string(ip, ec);
     default_gw = IpAddress::from_string(gw, ec);
@@ -93,7 +96,8 @@ VnEntry::VnEntry(Agent *agent, uuid id) :
     admin_state_(true), table_label_(0), enable_rpf_(true),
     flood_unknown_unicast_(false), old_vxlan_id_(0),
     forwarding_mode_(Agent::L2_L3),
-    route_resync_walker_(new AgentRouteResync(agent)) {
+    route_resync_walker_(new AgentRouteResync(agent)), mirror_destination_(false)
+{
     route_resync_walker_.get()->
         set_walkable_route_tables((1 << Agent::INET4_UNICAST) |
                                   (1 << Agent::INET6_UNICAST));
@@ -181,6 +185,14 @@ IpAddress VnEntry::GetDnsFromIpam(const IpAddress &ip) const {
         return ipam->dns_server;
     }
     return IpAddress();
+}
+
+uint32_t VnEntry::GetAllocUnitFromIpam(const IpAddress &ip) const {
+    const VnIpam *ipam = GetIpam(ip);
+    if (ipam) {
+        return ipam->alloc_unit;
+    }
+    return 1;//Default value
 }
 
 bool VnEntry::GetIpamVdnsData(const IpAddress &vm_addr,
@@ -332,7 +344,8 @@ bool VnTable::RebakeVxlan(VnEntry *vn, bool op_del) {
     if (vxlan) {
         vn->old_vxlan_id_ = vxlan;
         vn->vxlan_id_ref_ = table->Locate(vxlan, vn->uuid_, vn->vrf_->GetName(),
-                                          vn->flood_unknown_unicast_);
+                                          vn->flood_unknown_unicast_,
+                                          vn->mirror_destination_);
     }
 
     return (old_vxlan != vn->vxlan_id_ref_.get());
@@ -499,6 +512,14 @@ bool VnTable::ChangeHandler(DBEntry *entry, const DBRequest *req) {
         ret = true;
     }
 
+    AgentQosConfigKey qos_config_key(data->qos_config_uuid_);
+    AgentQosConfig *qos_config = static_cast<AgentQosConfig *>
+        (agent()->qos_config_table()->FindActiveEntry(&qos_config_key));
+    if (vn->qos_config_.get() != qos_config) {
+        vn->qos_config_ = qos_config;
+        ret = true;
+    }
+
     VrfKey vrf_key(data->vrf_name_);
     VrfEntry *vrf = static_cast<VrfEntry *>
         (agent()->vrf_table()->FindActiveEntry(&vrf_key));
@@ -556,6 +577,12 @@ bool VnTable::ChangeHandler(DBEntry *entry, const DBRequest *req) {
 
     if (vn->forwarding_mode_ != data->forwarding_mode_) {
         vn->forwarding_mode_ = data->forwarding_mode_;
+        ret = true;
+    }
+
+    if (vn->mirror_destination_ != data->mirror_destination_) {
+        vn->mirror_destination_ = data->mirror_destination_;
+        rebake_vxlan = true;
         ret = true;
     }
 
@@ -665,7 +692,8 @@ int VnTable::ComputeCfgVxlanId(IFMapNode *node) {
 
 void VnTable::CfgForwardingFlags(IFMapNode *node, bool *l2, bool *l3,
                                  bool *rpf, bool *flood_unknown_unicast,
-                                 Agent::ForwardingMode *forwarding_mode) {
+                                 Agent::ForwardingMode *forwarding_mode,
+                                 bool *mirror_destination) {
     *rpf = true;
 
     VirtualNetwork *cfg = static_cast <VirtualNetwork *> (node->GetObject());
@@ -676,7 +704,7 @@ void VnTable::CfgForwardingFlags(IFMapNode *node, bool *l2, bool *l3,
     }
 
     *flood_unknown_unicast = cfg->flood_unknown_unicast();
-
+    *mirror_destination = properties.mirror_destination;
     //dervived forwarding mode is resultant of configured VN forwarding and global
     //configure forwarding mode. It is then used to setup the VN forwarding
     //mode.
@@ -698,12 +726,40 @@ void VnTable::CfgForwardingFlags(IFMapNode *node, bool *l2, bool *l3,
     *l3 = GetLayer3ForwardingConfig(derived_forwarding_mode);
  }
 
+void
+VnTable::BuildVnIpamData(const std::vector<autogen::IpamSubnetType> &subnets,
+                         const std::string &ipam_name,
+                         std::vector<VnIpam> *vn_ipam) {
+    for (unsigned int i = 0; i < subnets.size(); ++i) {
+        // if the DNS server address is not specified, set this
+        // to be the same as the GW address
+        std::string dns_server_address = subnets[i].dns_server_address;
+        boost::system::error_code ec;
+        IpAddress dns_server =
+            IpAddress::from_string(dns_server_address, ec);
+        if (ec.value() || dns_server.is_unspecified()) {
+            dns_server_address = subnets[i].default_gateway;
+        }
+
+        vn_ipam->push_back
+            (VnIpam(subnets[i].subnet.ip_prefix,
+                    subnets[i].subnet.ip_prefix_len,
+                    subnets[i].default_gateway,
+                    dns_server_address,
+                    subnets[i].enable_dhcp, ipam_name,
+                    subnets[i].dhcp_option_list.dhcp_option,
+                    subnets[i].host_routes.route,
+                    subnets[i].alloc_unit));
+    }
+}
+
 VnData *VnTable::BuildData(IFMapNode *node) {
     VirtualNetwork *cfg = static_cast <VirtualNetwork *> (node->GetObject());
     assert(cfg);
 
     uuid acl_uuid = nil_uuid();
     uuid mirror_cfg_acl_uuid = nil_uuid();
+    uuid qos_config_uuid = nil_uuid();
     string vrf_name = "";
     std::vector<VnIpam> vn_ipam;
     VnData::VnIpamDataMap vn_ipam_data;
@@ -739,38 +795,37 @@ VnData *VnTable::BuildData(IFMapNode *node) {
             vrf_name = adj_node->name();
         }
 
+        if (adj_node->table() == agent()->cfg()->cfg_qos_table()) {
+            autogen::QosConfig *qc =
+                static_cast<autogen::QosConfig *>(adj_node->GetObject());
+            autogen::IdPermsType id_perms = qc->id_perms();
+            CfgUuidSet(id_perms.uuid.uuid_mslong, id_perms.uuid.uuid_lslong,
+                        qos_config_uuid);
+        }
+
         if (adj_node->table() == agent()->cfg()->cfg_vn_network_ipam_table()) {
             if (IFMapNode *ipam_node = FindTarget(table, adj_node,
                                                   "network-ipam")) {
                 ipam_name = ipam_node->name();
-
-                VirtualNetworkNetworkIpam *ipam =
+                VirtualNetworkNetworkIpam *vnni =
                     static_cast<VirtualNetworkNetworkIpam *>
                     (adj_node->GetObject());
-                assert(ipam);
-                const VnSubnetsType &subnets = ipam->data();
-                for (unsigned int i = 0; i < subnets.ipam_subnets.size(); ++i) {
-                    // if the DNS server address is not specified, set this
-                    // to be the same as the GW address
-                    std::string dns_server_address =
-                        subnets.ipam_subnets[i].dns_server_address;
-                    boost::system::error_code ec;
-                    IpAddress dns_server =
-                        IpAddress::from_string(dns_server_address, ec);
-                    if (ec.value() || dns_server.is_unspecified()) {
-                        dns_server_address =
-                            subnets.ipam_subnets[i].default_gateway;
-                    }
+                VnSubnetsType subnets;
+                if (vnni)
+                    subnets = vnni->data();
 
-                    vn_ipam.push_back
-                        (VnIpam(subnets.ipam_subnets[i].subnet.ip_prefix,
-                                subnets.ipam_subnets[i].subnet.ip_prefix_len,
-                                subnets.ipam_subnets[i].default_gateway,
-                                dns_server_address,
-                                subnets.ipam_subnets[i].enable_dhcp, ipam_name,
-                                subnets.ipam_subnets[i].dhcp_option_list.dhcp_option,
-                                subnets.ipam_subnets[i].host_routes.route));
+                autogen::NetworkIpam *network_ipam =
+                    static_cast<autogen::NetworkIpam *>(ipam_node->GetObject());
+                const std::string subnet_method =
+                    boost::to_lower_copy(network_ipam->ipam_subnet_method());
+
+                if (subnet_method == "flat-subnet") {
+                    BuildVnIpamData(network_ipam->ipam_subnets(),
+                                    ipam_name, &vn_ipam);
+                } else {
+                    BuildVnIpamData(subnets.ipam_subnets, ipam_name, &vn_ipam);
                 }
+
                 VnIpamLinkData ipam_data;
                 ipam_data.oper_dhcp_options_.set_host_routes(subnets.host_routes.route);
                 vn_ipam_data.insert(VnData::VnIpamDataPair(ipam_name, ipam_data));
@@ -786,15 +841,18 @@ VnData *VnTable::BuildData(IFMapNode *node) {
     bool layer3_forwarding;
     bool enable_rpf;
     bool flood_unknown_unicast;
+    bool mirror_destination;
     Agent::ForwardingMode forwarding_mode;
     CfgForwardingFlags(node, &bridging, &layer3_forwarding, &enable_rpf,
-                       &flood_unknown_unicast, &forwarding_mode);
+                       &flood_unknown_unicast, &forwarding_mode,
+                       &mirror_destination);
     return new VnData(agent(), node, node->name(), acl_uuid, vrf_name,
                       mirror_acl_uuid, mirror_cfg_acl_uuid, vn_ipam,
                       vn_ipam_data, cfg->properties().vxlan_network_identifier,
                       GetCfgVnId(cfg), bridging, layer3_forwarding,
                       cfg->id_perms().enable, enable_rpf,
-                      flood_unknown_unicast, forwarding_mode);
+                      flood_unknown_unicast, forwarding_mode,
+                      qos_config_uuid, mirror_destination);
 }
 
 bool VnTable::IFNodeToUuid(IFMapNode *node, boost::uuids::uuid &u) {
@@ -841,13 +899,15 @@ void VnTable::AddVn(const uuid &vn_uuid, const string &name,
                     const VnData::VnIpamDataMap &vn_ipam_data, int vn_id,
                     int vxlan_id, bool admin_state, bool enable_rpf,
                     bool flood_unknown_unicast) {
+    bool mirror_destination = false;
     DBRequest req;
     VnKey *key = new VnKey(vn_uuid);
     VnData *data = new VnData(agent(), NULL, name, acl_id, vrf_name, nil_uuid(), 
                               nil_uuid(), ipam, vn_ipam_data,
                               vn_id, vxlan_id, true, true,
                               admin_state, enable_rpf,
-                              flood_unknown_unicast, Agent::NONE);
+                              flood_unknown_unicast, Agent::NONE, nil_uuid(),
+                              mirror_destination);
  
     req.oper = DBRequest::DB_ENTRY_ADD_CHANGE;
     req.key.reset(key);
@@ -867,11 +927,11 @@ void VnTable::DelVn(const uuid &vn_uuid) {
 
 void VnTable::UpdateHostRoute(const IpAddress &old_address, 
                               const IpAddress &new_address,
-                              VnEntry *vn) {
+                              VnEntry *vn, bool relaxed_policy) {
     VrfEntry *vrf = vn->GetVrf();
 
     if (vrf && (vrf->GetName() != agent()->linklocal_vrf_name())) {
-        AddHostRoute(vn, new_address);
+        AddHostRoute(vn, new_address, relaxed_policy);
         DelHostRoute(vn, old_address);
     }
 }
@@ -911,12 +971,12 @@ bool VnTable::IpamChangeNotify(std::vector<VnIpam> &old_ipam,
                 if (gateway_changed) {
                     if (IsGwHostRouteRequired()) {
                         UpdateHostRoute((*it_old).default_gw,
-                                        (*it_new).default_gw, vn);
+                                        (*it_new).default_gw, vn, false);
                     }
                 }
                 if (service_address_changed) {
                     UpdateHostRoute((*it_old).dns_server,
-                                    (*it_new).dns_server, vn);
+                                    (*it_new).dns_server, vn, true);
                 }
             } else {
                 AddIPAMRoutes(vn, *it_new);
@@ -940,6 +1000,7 @@ bool VnTable::IpamChangeNotify(std::vector<VnIpam> &old_ipam,
 
             if ((*it_old).dhcp_enable != (*it_new).dhcp_enable) {
                 (*it_old).dhcp_enable = (*it_new).dhcp_enable;
+                change = true;
             }
 
             it_old++;
@@ -985,8 +1046,8 @@ void VnTable::AddIPAMRoutes(VnEntry *vn, VnIpam &ipam) {
             return;
         }
         if (IsGwHostRouteRequired())
-            AddHostRoute(vn, ipam.default_gw);
-        AddHostRoute(vn, ipam.dns_server);
+            AddHostRoute(vn, ipam.default_gw, false);
+        AddHostRoute(vn, ipam.dns_server, true);
         AddSubnetRoute(vn, ipam);
         ipam.installed = true;
     }
@@ -1008,16 +1069,17 @@ bool VnTable::IsGwHostRouteRequired() {
 }
 
 // Add receive route for default gw
-void VnTable::AddHostRoute(VnEntry *vn, const IpAddress &address) {
+void VnTable::AddHostRoute(VnEntry *vn, const IpAddress &address,
+                           bool relaxed_policy) {
     VrfEntry *vrf = vn->GetVrf();
     if (address.is_v4()) {
         static_cast<InetUnicastAgentRouteTable *>(vrf->
             GetInet4UnicastRouteTable())->AddHostRoute(vrf->GetName(),
-                address.to_v4(), 32, vn->GetName());
+                address.to_v4(), 32, vn->GetName(), relaxed_policy);
     } else if (address.is_v6()) {
         static_cast<InetUnicastAgentRouteTable *>(vrf->
             GetInet6UnicastRouteTable())->AddHostRoute(vrf->GetName(),
-                address.to_v6(), 128, vn->GetName());
+                address.to_v6(), 128, vn->GetName(), relaxed_policy);
     }
 }
 
@@ -1134,7 +1196,6 @@ bool VnEntry::DBEntrySandesh(Sandesh *sresp, std::string &name)  const {
     data.set_admin_state(admin_state());
     data.set_enable_rpf(enable_rpf());
     data.set_flood_unknown_unicast(flood_unknown_unicast());
-
     std::vector<VnSandeshData> &list =
         const_cast<std::vector<VnSandeshData>&>(resp->get_vn_list());
     list.push_back(data);
@@ -1340,7 +1401,35 @@ bool DomainConfig::IpamChanged(const autogen::IpamType &old,
         old.cidr_block.ip_prefix_len != cur.cidr_block.ip_prefix_len)
         return true;
 
-    //ignoring changes to dhcp_option_list and host_routes
+    if (old.dhcp_option_list.dhcp_option.size() !=
+        cur.dhcp_option_list.dhcp_option.size())
+        return true;
+
+    for (uint32_t i = 0; i < old.dhcp_option_list.dhcp_option.size(); i++) {
+        if ((old.dhcp_option_list.dhcp_option[i].dhcp_option_name !=
+             cur.dhcp_option_list.dhcp_option[i].dhcp_option_name) ||
+            (old.dhcp_option_list.dhcp_option[i].dhcp_option_value !=
+             cur.dhcp_option_list.dhcp_option[i].dhcp_option_value) ||
+            (old.dhcp_option_list.dhcp_option[i].dhcp_option_value_bytes !=
+             cur.dhcp_option_list.dhcp_option[i].dhcp_option_value_bytes))
+            return true;
+    }
+
+    if (old.host_routes.route.size() != cur.host_routes.route.size())
+        return true;
+
+    for (uint32_t i = 0; i < old.host_routes.route.size(); i++) {
+        if ((old.host_routes.route[i].prefix !=
+             cur.host_routes.route[i].prefix) ||
+            (old.host_routes.route[i].next_hop !=
+             cur.host_routes.route[i].next_hop) ||
+            (old.host_routes.route[i].next_hop_type !=
+             cur.host_routes.route[i].next_hop_type) ||
+            (old.host_routes.route[i].community_attributes.community_attribute !=
+             cur.host_routes.route[i].community_attributes.community_attribute))
+            return true;
+    }
+
     return false;
 }
 

@@ -52,6 +52,7 @@
 
 #define BGP_ROUTER_CONFIG_NAME "bgp-router"
 #define BGP_AS_SERVICE_CONFIG_NAME "bgp-as-a-service"
+#define VALID_BGP_ROUTER_TYPE "bgpaas-client"
 
 extern SandeshTraceBufferPtr BgpAsAServiceTraceBuf;
 #define BGPASASERVICETRACE(obj, ...)                                                     \
@@ -122,7 +123,7 @@ public:
     }
 
 private:
-    void BindBgpAsAServicePorts(const std::string &port_range);
+    void BindBgpAsAServicePorts(const std::vector<uint16_t> &ports);
     void BuildBgpAsAServiceInfo(IFMapNode *bgp_as_a_service_node,
                                 BgpAsAServiceEntryList &new_list,
                                 const std::string &vrf_name);

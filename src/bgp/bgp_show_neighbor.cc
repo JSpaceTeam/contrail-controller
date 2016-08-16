@@ -28,7 +28,7 @@ static bool FillBgpNeighborInfoList(const BgpSandeshContext *bsc,
     rtinstance->peer_manager()->FillBgpNeighborInfo(
         bsc, show_list, search_string, summary);
 
-    BgpPeer *peer = bsc->bgp_server->FindNextPeer();
+    const BgpPeer *peer = bsc->bgp_server->FindNextPeer();
     while (peer) {
         if (search_string.empty() ||
             (peer->peer_basename().find(search_string) != string::npos) ||
@@ -132,7 +132,7 @@ void BgpNeighborReq::HandleRequest() const {
     RequestPipeline::StageSpec s1;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s1.taskId_ = scheduler->GetTaskId("bgp::PeerMembership");
+    s1.taskId_ = scheduler->GetTaskId("bgp::ShowCommand");
     s1.cbFn_ = boost::bind(&BgpShowHandler<
         BgpNeighborReq,
         BgpNeighborReqIterate,
@@ -156,7 +156,7 @@ void BgpNeighborReqIterate::HandleRequest() const {
     RequestPipeline::StageSpec s1;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s1.taskId_ = scheduler->GetTaskId("bgp::PeerMembership");
+    s1.taskId_ = scheduler->GetTaskId("bgp::ShowCommand");
     s1.cbFn_ = boost::bind(&BgpShowHandler<
         BgpNeighborReq,
         BgpNeighborReqIterate,
@@ -180,7 +180,7 @@ void ShowBgpNeighborSummaryReq::HandleRequest() const {
     RequestPipeline::StageSpec s1;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s1.taskId_ = scheduler->GetTaskId("bgp::PeerMembership");
+    s1.taskId_ = scheduler->GetTaskId("bgp::ShowCommand");
     s1.cbFn_ = boost::bind(&BgpShowHandler<
         ShowBgpNeighborSummaryReq,
         ShowBgpNeighborSummaryReqIterate,
@@ -204,7 +204,7 @@ void ShowBgpNeighborSummaryReqIterate::HandleRequest() const {
     RequestPipeline::StageSpec s1;
     TaskScheduler *scheduler = TaskScheduler::GetInstance();
 
-    s1.taskId_ = scheduler->GetTaskId("bgp::PeerMembership");
+    s1.taskId_ = scheduler->GetTaskId("bgp::ShowCommand");
     s1.cbFn_ = boost::bind(&BgpShowHandler<
         ShowBgpNeighborSummaryReq,
         ShowBgpNeighborSummaryReqIterate,

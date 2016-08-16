@@ -7,13 +7,15 @@
 #include "vrouter/ksync/nexthop_ksync.h"
 #include "vrouter/ksync/ksync_init.h"
 #include <ksync/ksync_sock.h>
+#include "vr_mirror.h"
 
 MirrorKSyncEntry::MirrorKSyncEntry(MirrorKSyncObject *obj, 
                                    const MirrorKSyncEntry *entry,
                                    uint32_t index) : 
     KSyncNetlinkDBEntry(index), ksync_obj_(obj), vrf_id_(entry->vrf_id_), 
     sip_(entry->sip_), sport_(entry->sport_), dip_(entry->dip_), 
-    dport_(entry->dport_), analyzer_name_(entry->analyzer_name_) {
+    dport_(entry->dport_), analyzer_name_(entry->analyzer_name_),
+    mirror_flag_(entry->mirror_flag_), vni_(entry->vni_) {
 }
 
 MirrorKSyncEntry::MirrorKSyncEntry(MirrorKSyncObject *obj, 
@@ -29,7 +31,8 @@ MirrorKSyncEntry::MirrorKSyncEntry(MirrorKSyncObject *obj,
     vrf_id_(mirror_entry->vrf_id()), sip_(*mirror_entry->GetSip()), 
     sport_(mirror_entry->GetSPort()), dip_(*mirror_entry->GetDip()), 
     dport_(mirror_entry->GetDPort()), nh_(NULL),
-    analyzer_name_(mirror_entry->GetAnalyzerName()) {
+    analyzer_name_(mirror_entry->GetAnalyzerName()),
+    mirror_flag_(mirror_entry->GetMirrorFlag()), vni_(mirror_entry->GetVni()) {
 }
 
 MirrorKSyncEntry::MirrorKSyncEntry(MirrorKSyncObject *obj,
@@ -65,6 +68,16 @@ bool MirrorKSyncEntry::Sync(DBEntry *e) {
     bool ret = false;
     const MirrorEntry *mirror = static_cast<MirrorEntry *>(e);
 
+    if (vni_ != mirror->GetVni()) {
+        vni_ = mirror->GetVni();
+        ret =true;
+    }
+
+    if (mirror_flag_ != mirror->GetMirrorFlag()) {
+        mirror_flag_ = mirror->GetMirrorFlag();
+        ret = true;
+    }
+
     NHKSyncObject *nh_object = ksync_obj_->ksync()->nh_ksync_obj();
     if (mirror->GetNH() == NULL) {
         LOG(DEBUG, "nexthop in Mirror entry is null");
@@ -90,6 +103,10 @@ int MirrorKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
     encoder.set_mirr_index(GetIndex());
     encoder.set_mirr_rid(0);
     encoder.set_mirr_nhid(nh_entry->nh_id());
+    encoder.set_mirr_vni(vni_);
+    if (mirror_flag_ == MirrorEntryData::DynamicNH_With_JuniperHdr) {
+        encoder.set_mirr_flags(VR_MIRROR_FLAG_DYNAMIC);
+    }
     int error = 0;
     encode_len = encoder.WriteBinary((uint8_t *)buf, buf_len, &error);
     assert(error == 0);
@@ -147,7 +164,11 @@ KSyncEntry *MirrorKSyncObject::DBToKSyncEntry(const DBEntry *e) {
 
 uint32_t MirrorKSyncObject::GetIdx(std::string analyzer_name) {
     MirrorKSyncEntry key(this, analyzer_name);
-    return Find(&key)->GetIndex();
+    KSyncEntry *entry = Find(&key);
+    if (entry) {
+        return entry->GetIndex();
+    }
+    return MirrorTable::kInvalidIndex;
 }
 
 void vr_mirror_req::Process(SandeshContext *context) {

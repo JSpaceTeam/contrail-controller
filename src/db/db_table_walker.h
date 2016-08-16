@@ -30,26 +30,33 @@ public:
 
     typedef int WalkId;
 
+    static const int kIterationToYield = 1024;
     static const WalkId kInvalidWalkerId = -1;
 
-    DBTableWalker();
+    DBTableWalker(int task_id = -1);
 
     // Start a walk request on the specified table. If non null, 'key_start'
     // specifies the starting point for the walk. The walk is performed in
     // all table shards in parallel.
     WalkId WalkTable(DBTable *table, const DBRequestKey *key_start,
-                     WalkFn walker, WalkCompleteFn walk_complete);
+                     WalkFn walker, WalkCompleteFn walk_complete,
+                     bool postpone_walk = false);
 
     // cancel a walk that may be in progress. This cannot be called from
     // the walker function itself.
     void WalkCancel(WalkId id);
+    void WalkResume(WalkId id);
+
+    int task_id() const { return task_id_; }
+
+    static void SetIterationToYield(int count) {
+        max_iteration_to_yield_ = count;
+    }
 
 private:
-    static int walker_task_id_;
-    static const int kIterationToYield = 1024;
+    static int max_iteration_to_yield_;
 
     static int GetIterationToYield() {
-        static int iter_ = kIterationToYield;
         static bool init_ = false;
 
         if (!init_) {
@@ -57,12 +64,12 @@ private:
             // XXX To be used for testing purposes only.
             char *count_str = getenv("DB_ITERATION_TO_YIELD");
             if (count_str) {
-                iter_ = strtol(count_str, NULL, 0);
+                max_iteration_to_yield_ = strtol(count_str, NULL, 0);
             }
             init_ = true;
         }
 
-        return iter_;
+        return max_iteration_to_yield_;
     }
 
     // A Walker allocated to iterator through a DBTable
@@ -78,6 +85,7 @@ private:
     void PurgeWalker(WalkId id);
 
     // List of walkers allocated
+    int task_id_;
     tbb::mutex walkers_mutex_;
     WalkerList walkers_;
     WalkerMap walker_map_;

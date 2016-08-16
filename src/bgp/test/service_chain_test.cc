@@ -76,6 +76,7 @@ public:
     virtual BgpServer *server() {
         return NULL;
     }
+    virtual BgpServer *server() const { return NULL; }
     virtual IPeerClose *peer_close() {
         return NULL;
     }
@@ -89,8 +90,7 @@ public:
         return true;
     }
     virtual bool IsXmppPeer() const { return false; }
-    virtual void Close() {
-    }
+    virtual void Close(bool non_graceful) { }
     BgpProto::BgpPeerType PeerType() const {
         return BgpProto::IBGP;
     }
@@ -100,14 +100,15 @@ public:
     virtual const string GetStateName() const {
         return "";
     }
-    virtual void UpdateRefCount(int count) const { }
-    virtual tbb::atomic<int> GetRefCount() const {
-        tbb::atomic<int> count;
-        count = 0;
-        return count;
-    }
+    virtual void UpdateTotalPathCount(int count) const { }
+    virtual int GetTotalPathCount() const { return 0; }
     virtual void UpdatePrimaryPathCount(int count) const { }
     virtual int GetPrimaryPathCount() const { return 0; }
+    virtual bool IsRegistrationRequired() const { return true; }
+    virtual void MembershipRequestCallback(BgpTable *table) { }
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+        BgpRoute *route, BgpPath *path) { return false; }
+    virtual bool CanUseMembershipManager() const { return true; }
 
 private:
     Ip4Address address_;
@@ -151,7 +152,8 @@ protected:
     typedef typename T::VpnRouteT VpnRouteT;
 
     ServiceChainTest()
-        : bgp_server_(new BgpServer(&evm_)),
+        : config_db_(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable")),
+          bgp_server_(new BgpServer(&evm_)),
           family_(GetFamily()),
           ipv6_prefix_("::ffff:"),
           parser_(&config_db_),
@@ -283,7 +285,8 @@ protected:
                       set<string> encap = set<string>(),
                       const SiteOfOrigin &soo = SiteOfOrigin(),
                       string nexthop_str = "", uint32_t flags = 0,
-                      int label = 0, const LoadBalance &lb = LoadBalance()) {
+                      int label = 0, const LoadBalance &lb = LoadBalance(),
+                      const RouteDistinguisher &rd = RouteDistinguisher()) {
         boost::system::error_code error;
         PrefixT nlri = PrefixT::FromString(prefix, &error);
         EXPECT_FALSE(error);
@@ -295,6 +298,11 @@ protected:
         boost::scoped_ptr<BgpAttrLocalPref> local_pref(
                 new BgpAttrLocalPref(localpref));
         attr_spec.push_back(local_pref.get());
+
+        BgpAttrSourceRd source_rd(rd);
+        if (!rd.IsZero()) {
+            attr_spec.push_back(&source_rd);
+        }
 
         if (nexthop_str.empty())
             nexthop_str = this->BuildNextHopAddress("7.8.9.1");
@@ -365,7 +373,8 @@ protected:
                          set<string> encap = set<string>(),
                          string nexthop_str = "",
                          uint32_t flags = 0, int label = 0,
-                         const LoadBalance &lb = LoadBalance()) {
+                         const LoadBalance &lb = LoadBalance(),
+                         const RouteDistinguisher &rd = RouteDistinguisher()) {
         BgpTable *table = GetTable(instance_name);
         ASSERT_TRUE(table != NULL);
         const RoutingInstance *rtinstance = table->routing_instance();
@@ -373,9 +382,13 @@ protected:
         int rti_index = rtinstance->index();
 
         string vpn_prefix;
-        string peer_str = peer ? peer->ToString() :
-                                 BuildNextHopAddress("7.7.7.7");
-        vpn_prefix = peer_str + ":" + integerToString(rti_index) + ":" + prefix;
+        if (!rd.IsZero()) {
+            vpn_prefix = rd.ToString() + ":" + prefix;
+        } else {
+            string peer_str = peer ? peer->ToString() :
+                BuildNextHopAddress("7.7.7.7");
+            vpn_prefix = peer_str + ":" + integerToString(rti_index) + ":" + prefix;
+        }
 
         boost::system::error_code error;
         VpnPrefixT nlri = VpnPrefixT::FromString(vpn_prefix, &error);
@@ -443,16 +456,21 @@ protected:
                          const string &prefix, int localpref,
                          string nexthop_str = "",
                          uint32_t flags = 0, int label = 0,
-                         const LoadBalance &lb = LoadBalance()) {
+                         const LoadBalance &lb = LoadBalance(),
+                         const RouteDistinguisher &rd = RouteDistinguisher()) {
         RoutingInstance *rtinstance =
             ri_mgr_->GetRoutingInstance(instance_names[0]);
         ASSERT_TRUE(rtinstance != NULL);
         int rti_index = rtinstance->index();
 
         string vpn_prefix;
-        string peer_str = peer ? peer->ToString() :
-                                 BuildNextHopAddress("7.7.7.7");
-        vpn_prefix = peer_str + ":" + integerToString(rti_index) + ":" + prefix;
+        if (!rd.IsZero()) {
+            vpn_prefix = rd.ToString() + ":" + prefix;
+        } else {
+            string peer_str = peer ? peer->ToString() :
+                BuildNextHopAddress("7.7.7.7");
+            vpn_prefix = peer_str + ":" + integerToString(rti_index) + ":" + prefix;
+        }
 
         boost::system::error_code error;
         VpnPrefixT nlri = VpnPrefixT::FromString(vpn_prefix, &error);
@@ -496,7 +514,8 @@ protected:
     }
 
     void DeleteVpnRoute(IPeer *peer, const string &instance_name,
-                            const string &prefix) {
+                        const string &prefix,
+                        const RouteDistinguisher &rd = RouteDistinguisher()) {
         BgpTable *table = GetTable(instance_name);
         ASSERT_TRUE(table != NULL);
         const RoutingInstance *rtinstance = table->routing_instance();
@@ -504,11 +523,12 @@ protected:
         int rti_index = rtinstance->index();
 
         string vpn_prefix;
-        if (peer) {
-            vpn_prefix = peer->ToString() + ":" + integerToString(rti_index) +
-                ":" + prefix;
+        if (!rd.IsZero()) {
+            vpn_prefix = rd.ToString() + ":" + prefix;
         } else {
-            vpn_prefix = "7.7.7.7:" + integerToString(rti_index) + ":" + prefix;
+            string peer_str = peer ? peer->ToString() :
+                BuildNextHopAddress("7.7.7.7");
+            vpn_prefix = peer_str + ":" + integerToString(rti_index) + ":" + prefix;
         }
 
         boost::system::error_code error;
@@ -529,9 +549,10 @@ protected:
                    uint32_t flags = 0, int label = 0,
                    vector<uint32_t> sglist = vector<uint32_t>(),
                    set<string> encap = set<string>(),
-                   const LoadBalance &lb = LoadBalance()) {
+                   const LoadBalance &lb = LoadBalance(),
+                   const RouteDistinguisher &rd = RouteDistinguisher()) {
         AddConnectedRoute(1, peer, prefix, localpref, nexthop, flags, label,
-                sglist, encap, lb);
+                sglist, encap, lb, rd);
     }
 
     void AddConnectedRoute(int chain_idx, IPeer *peer, const string &prefix,
@@ -539,7 +560,8 @@ protected:
                    uint32_t flags = 0, int label = 0,
                    vector<uint32_t> sglist = vector<uint32_t>(),
                    set<string> encap = set<string>(),
-                   const LoadBalance &lb = LoadBalance()) {
+                   const LoadBalance &lb = LoadBalance(),
+                   const RouteDistinguisher &rd = RouteDistinguisher()) {
         assert(1 <= chain_idx && chain_idx <= 3);
         string connected_table;
         if (chain_idx == 1) {
@@ -553,27 +575,28 @@ protected:
             nexthop = BuildNextHopAddress("7.8.9.1");
         if (connected_rt_is_vpn_) {
             AddVpnRoute(peer, connected_table, prefix,
-                    localpref, sglist, encap, nexthop, flags, label, lb);
+                    localpref, sglist, encap, nexthop, flags, label, lb, rd);
         } else {
             AddRoute(peer, connected_table, prefix, localpref,
                 vector<uint32_t>(), sglist, encap, SiteOfOrigin(), nexthop,
-                flags, label, lb);
+                flags, label, lb, rd);
         }
         task_util::WaitForIdle();
     }
 
-    void DeleteConnectedRoute(IPeer *peer, const string &prefix) {
+    void DeleteConnectedRoute(IPeer *peer, const string &prefix,
+                          const RouteDistinguisher &rd = RouteDistinguisher()) {
         string connected_table = service_is_transparent_ ? "blue-i1" : "blue";
         if (connected_rt_is_vpn_) {
-            DeleteVpnRoute(peer, connected_table, prefix);
+            DeleteVpnRoute(peer, connected_table, prefix, rd);
         } else {
             DeleteRoute(peer, connected_table, prefix);
         }
         task_util::WaitForIdle();
     }
 
-    void DeleteConnectedRoute(int chain_idx, IPeer *peer,
-                              const string &prefix) {
+    void DeleteConnectedRoute(int chain_idx, IPeer *peer, const string &prefix,
+                          const RouteDistinguisher &rd = RouteDistinguisher()) {
         assert(1 <= chain_idx && chain_idx <= 3);
         string connected_table;
         if (chain_idx == 1) {
@@ -584,7 +607,7 @@ protected:
             connected_table = service_is_transparent_ ? "core-i5" : "core";
         }
         if (connected_rt_is_vpn_) {
-            DeleteVpnRoute(peer, connected_table, prefix);
+            DeleteVpnRoute(peer, connected_table, prefix, rd);
         } else {
             DeleteRoute(peer, connected_table, prefix);
         }
@@ -4224,6 +4247,50 @@ TYPED_TEST(ServiceChainTest, TransitNetworkOriginVnLoop) {
     this->DeleteRoute(NULL, "red", this->BuildPrefix("10.1.3.2", 32));
     this->DeleteConnectedRoute(1, NULL, this->BuildPrefix("192.168.1.253", 32));
     this->DeleteConnectedRoute(2, NULL, this->BuildPrefix("192.168.2.253", 32));
+}
+
+//
+// Verify that routes are not re-originated when source RD of the route matches
+// connected path's source RD
+//
+TYPED_TEST(ServiceChainTest, ExtConnectRouteSourceRDSame) {
+    vector<string> instance_names =
+        list_of("blue")("blue-i1")("red-i2")("red");
+    multimap<string, string> connections =
+        map_list_of("blue", "blue-i1") ("red-i2", "red");
+    this->NetworkConfig(instance_names, connections);
+    this->VerifyNetworkConfig(instance_names);
+
+    this->SetServiceChainInformation("blue-i1",
+        "controller/src/bgp/testdata/service_chain_1.xml");
+
+    // Add Connected
+    this->AddConnectedRoute(NULL, this->BuildPrefix("1.1.2.3", 32), 100,
+                            this->BuildNextHopAddress("3.4.5.6"),
+                            0, 0, vector<uint32_t>(), set<string>(),
+                            LoadBalance(),
+                            RouteDistinguisher::FromString("192.168.1.1:2"));
+
+    // Add Ext connect route with targets of red
+    vector<string> instances = list_of("red");
+    this->AddVpnRoute(NULL, instances, this->BuildPrefix("10.1.1.0", 24), 100,
+                      this->BuildNextHopAddress("1.2.3.4"),
+                      0, 0, LoadBalance(),
+                      RouteDistinguisher::FromString("192.168.1.1:2"));
+
+    // Verify that MX leaked route is present in red
+    this->VerifyRouteExists("red", this->BuildPrefix("10.1.1.0", 24));
+
+    // Verify that ExtConnect route is NOT present in blue
+    // Verify that re-origination skipped as original route has same source RD
+    // as connected route source RD
+    this->VerifyRouteNoExists("blue", this->BuildPrefix("10.1.1.0", 24));
+
+    // Delete ExtRoute and connected route
+    this->DeleteVpnRoute(NULL, "red", this->BuildPrefix("10.1.1.0", 24),
+                         RouteDistinguisher::FromString("192.168.1.1:2"));
+    this->DeleteConnectedRoute(NULL, this->BuildPrefix("1.1.2.3", 32),
+                         RouteDistinguisher::FromString("192.168.1.1:2"));
 }
 
 class TestEnvironment : public ::testing::Environment {

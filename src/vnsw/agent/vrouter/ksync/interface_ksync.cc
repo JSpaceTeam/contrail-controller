@@ -41,6 +41,7 @@ InterfaceKSyncEntry::InterfaceKSyncEntry(InterfaceKSyncObject *obj,
                                          const InterfaceKSyncEntry *entry,
                                          uint32_t index) :
     KSyncNetlinkDBEntry(index), analyzer_name_(entry->analyzer_name_),
+    drop_new_flows_(entry->drop_new_flows_),
     dhcp_enable_(entry->dhcp_enable_),
     fd_(kInvalidIndex),
     flow_key_nh_id_(entry->flow_key_nh_id_),
@@ -50,6 +51,7 @@ InterfaceKSyncEntry::InterfaceKSyncEntry(InterfaceKSyncObject *obj,
     ip_(entry->ip_), ipv4_active_(false),
     layer3_forwarding_(entry->layer3_forwarding_),
     ksync_obj_(obj), l2_active_(false),
+    metadata_l2_active_(entry->metadata_l2_active_),
     bridging_(entry->bridging_),
     mac_(entry->mac_),
     smac_(entry->smac_),
@@ -72,13 +74,15 @@ InterfaceKSyncEntry::InterfaceKSyncEntry(InterfaceKSyncObject *obj,
     encap_type_(entry->encap_type_),
     display_name_(entry->display_name_),
     transport_(entry->transport_),
-    flood_unknown_unicast_ (entry->flood_unknown_unicast_) {
+    flood_unknown_unicast_ (entry->flood_unknown_unicast_),
+    qos_config_(entry->qos_config_){
 }
 
 InterfaceKSyncEntry::InterfaceKSyncEntry(InterfaceKSyncObject *obj,
                                          const Interface *intf) :
     KSyncNetlinkDBEntry(kInvalidIndex),
     analyzer_name_(),
+    drop_new_flows_(false),
     dhcp_enable_(true),
     fd_(-1),
     flow_key_nh_id_(0),
@@ -90,6 +94,7 @@ InterfaceKSyncEntry::InterfaceKSyncEntry(InterfaceKSyncObject *obj,
     layer3_forwarding_(true),
     ksync_obj_(obj),
     l2_active_(false),                
+    metadata_l2_active_(false),
     bridging_(true),
     mac_(),
     smac_(),
@@ -110,7 +115,7 @@ InterfaceKSyncEntry::InterfaceKSyncEntry(InterfaceKSyncObject *obj,
     no_arp_(false),
     encap_type_(PhysicalInterface::ETHERNET),
     transport_(Interface::TRANSPORT_INVALID),
-    flood_unknown_unicast_(false) {
+    flood_unknown_unicast_(false), qos_config_(NULL) {
 
     if (intf->flow_key_nh()) {
         flow_key_nh_id_ = intf->flow_key_nh()->id();
@@ -209,6 +214,11 @@ bool InterfaceKSyncEntry::Sync(DBEntry *e) {
             ret = true;
         }
 
+        if (drop_new_flows_ != vm_port->drop_new_flows()) {
+            drop_new_flows_ = vm_port->drop_new_flows();
+            ret = true;
+        }
+
         if (dhcp_enable_ != vm_port->dhcp_enabled()) {
             dhcp_enable_ = vm_port->dhcp_enabled();
             ret = true;
@@ -260,6 +270,13 @@ bool InterfaceKSyncEntry::Sync(DBEntry *e) {
             parent_ = parent;
             ret = true;
         }
+
+        if (metadata_l2_active_ !=
+            vm_port->metadata_l2_active()) {
+            metadata_l2_active_ =
+                vm_port->metadata_l2_active();
+            ret = true;
+        }
     }
 
     uint32_t vrf_id = VIF_VRF_INVALID;
@@ -267,7 +284,7 @@ bool InterfaceKSyncEntry::Sync(DBEntry *e) {
     std::string analyzer_name;
     Interface::MirrorDirection mirror_direction = Interface::UNKNOWN;
     bool has_service_vlan = false;
-    if (l2_active_ || ipv4_active_) {
+    if (l2_active_ || ipv4_active_ || metadata_l2_active_) {
         vrf_id = intf->vrf_id();
         if (vrf_id == VrfEntry::kInvalidIndex) {
             vrf_id = VIF_VRF_INVALID;
@@ -309,6 +326,18 @@ bool InterfaceKSyncEntry::Sync(DBEntry *e) {
         }
     }
 
+    KSyncEntryPtr qos_config = NULL;
+    QosConfigKSyncObject *qos_object =
+        static_cast<InterfaceKSyncObject *>(ksync_obj_)->ksync()->
+        qos_config_ksync_obj();
+    if (intf->qos_config() != NULL) {
+        QosConfigKSyncEntry tmp(qos_object, intf->qos_config());
+        qos_config = qos_object->GetReference(&tmp);
+    }
+    if (qos_config != qos_config_) {
+        qos_config_ = qos_config;
+        ret = true;
+    }
 
     if (vrf_id != vrf_id_) {
         vrf_id_ = vrf_id;
@@ -434,6 +463,10 @@ bool InterfaceKSyncEntry::Sync(DBEntry *e) {
 }
 
 KSyncEntry *InterfaceKSyncEntry::UnresolvedReference() {
+    if (qos_config_.get() && qos_config_->IsResolved() == false) {
+        return qos_config_.get();
+    }
+
     if (type_ == Interface::INET && sub_type_ == InetInterface::VHOST) {
         if (xconnect_.get() && !xconnect_->IsResolved()) {
             return xconnect_.get();
@@ -475,7 +508,8 @@ bool IsValidOsIndex(size_t os_index, Interface::Type type, uint16_t vlan_id,
         return true;
     }
 
-    if (vmi_type == VmInterface::GATEWAY) {
+    if (vmi_type == VmInterface::GATEWAY ||
+        vmi_type == VmInterface::REMOTE_VM) {
         return true;
     }
 
@@ -511,10 +545,21 @@ int InterfaceKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
         return encode_len;
     }
 
+    if (qos_config_.get() != NULL) {
+        QosConfigKSyncEntry *qos_config =
+            static_cast<QosConfigKSyncEntry *>(qos_config_.get());
+        encoder.set_vifr_qos_map_index(qos_config->id());
+    } else {
+        encoder.set_vifr_qos_map_index(-1);
+    }
+
     switch (type_) {
     case Interface::VM_INTERFACE: {
         if (vmi_device_type_ == VmInterface::TOR)
             return 0;            
+        if (drop_new_flows_) {
+            flags |= VIF_FLAG_DROP_NEW_FLOWS;
+        }
         if (dhcp_enable_) {
             flags |= VIF_FLAG_DHCP_ENABLED;
         }
@@ -530,7 +575,8 @@ int InterfaceKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
         MacAddress mac;
         if (parent_.get() != NULL) {
             encoder.set_vifr_type(VIF_TYPE_VIRTUAL_VLAN);
-            if (vmi_type_ == VmInterface::GATEWAY &&
+            if ((vmi_type_ == VmInterface::GATEWAY ||
+                 vmi_type_ == VmInterface::REMOTE_VM) &&
                 tx_vlan_id_ == VmInterface::kInvalidVlanId) {
                 //By default in case of gateway, untagged packet
                 //would be considered as belonging to interface
@@ -579,7 +625,8 @@ int InterfaceKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
             flags |= VIF_FLAG_VHOST_PHYS;
         }
 
-        if (subtype_ == PhysicalInterface::VMWARE) {
+        if (subtype_ == PhysicalInterface::VMWARE ||
+            ksync_obj_->ksync()->agent()->server_gateway_mode()) {
             flags |= VIF_FLAG_PROMISCOUS;
         }
         if (subtype_ == PhysicalInterface::CONFIG) {
@@ -789,6 +836,40 @@ void InterfaceKSyncObject::Init() {
 
 void InterfaceKSyncObject::InitTest() {
     ksync_->agent()->set_test_mode(true);
+}
+
+KSyncDBObject::DBFilterResp
+InterfaceKSyncObject::DBEntryFilter(const DBEntry *entry,
+                                    const KSyncDBEntry *ksync) {
+
+    const Interface *intf = dynamic_cast<const Interface *>(entry);
+    const VmInterface *vm_intf = dynamic_cast<const VmInterface *>(intf);
+
+    uint32_t rx_vlan_id = VmInterface::kInvalidVlanId;
+    VmInterface::VmiType vmi_type = VmInterface::VMI_TYPE_INVALID;
+
+    if (vm_intf) {
+        rx_vlan_id = vm_intf->rx_vlan_id();
+        vmi_type = vm_intf->vmi_type();
+    }
+
+    if (IsValidOsIndex(intf->os_index(), intf->type(), rx_vlan_id,
+                       vmi_type, intf->transport()) == false) {
+        return DBFilterIgnore;
+    }
+
+    if (intf->type() == Interface::LOGICAL ||
+        intf->type() == Interface::REMOTE_PHYSICAL) {
+        return DBFilterIgnore;
+    }
+
+    // No need to add VLAN sub-interface if there is no parent
+    if (vm_intf && vm_intf->device_type() == VmInterface::VM_VLAN_ON_VMI &&
+        vm_intf->parent() == NULL) {
+        return DBFilterIgnore;
+    }
+
+    return DBFilterAccept;
 }
 
 //////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
 # Copyright (c) 2014 Juniper Networks, Inc. All rights reserved.
 #
 import re
-import amqp.exceptions
+from distutils.util import strtobool
 import kombu
 import gevent
 import gevent.monkey
@@ -20,6 +20,8 @@ from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
 from pysandesh.gen_py.process_info.ttypes import ConnectionType as ConnType
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
+from cfgm_common import vnc_greenlets
+import ssl
 
 __all__ = "VncKombuClient"
 
@@ -40,7 +42,8 @@ class VncKombuClientBase(object):
         exit()
 
     def __init__(self, rabbit_ip, rabbit_port, rabbit_user, rabbit_password,
-                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger):
+                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger,
+                 **kwargs):
         self._rabbit_ip = rabbit_ip
         self._rabbit_port = rabbit_port
         self._rabbit_user = rabbit_user
@@ -55,6 +58,7 @@ class VncKombuClientBase(object):
                                                durable=False)
         self.search_rc_exchange = kombu.Exchange('vnc_config.search_rc', 'direct', durable=True,
                                              delivery_mode='persistent')
+        self._ssl_params = self._fetch_ssl_params(**kwargs)
 
         # Register a handler for SIGTERM so that we can release the lock
         # Without it, it can take several minutes before new master is elected
@@ -192,11 +196,15 @@ class VncKombuClientBase(object):
             message.ack()
 
 
-    def _start(self):
+    def _start(self, client_name):
         self._reconnect(delete_old_q=True)
 
-        self._publisher_greenlet = gevent.spawn(self._publisher)
-        self._connection_monitor_greenlet = gevent.spawn(self._connection_watch_forever)
+        self._publisher_greenlet = vnc_greenlets.VncGreenlet(
+                                               'Kombu ' + client_name,
+                                               self._publisher)
+        self._connection_monitor_greenlet = vnc_greenlets.VncGreenlet(
+                                               'Kombu ' + client_name + '_ConnMon',
+                                               self._connection_watch_forever)
 
     def greenlets(self):
         return [self._publisher_greenlet, self._connection_monitor_greenlet]
@@ -212,14 +220,49 @@ class VncKombuClientBase(object):
     def reset(self):
         self._publish_queue = Queue()
 
+    _SSL_PROTOCOLS = {
+        "tlsv1": ssl.PROTOCOL_TLSv1,
+        "sslv23": ssl.PROTOCOL_SSLv23
+    }
+
+    @classmethod
+    def validate_ssl_version(cls, version):
+        version = version.lower()
+        try:
+            return cls._SSL_PROTOCOLS[version]
+        except KeyError:
+            raise RuntimeError('Invalid SSL version: {}'.format(version))
+
+    def _fetch_ssl_params(self, **kwargs):
+        if strtobool(str(kwargs.get('rabbit_use_ssl', False))):
+            ssl_params = dict()
+            ssl_version = kwargs.get('kombu_ssl_version', '')
+            keyfile = kwargs.get('kombu_ssl_keyfile', '')
+            certfile = kwargs.get('kombu_ssl_certfile', '')
+            ca_certs = kwargs.get('kombu_ssl_ca_certs', '')
+            if ssl_version:
+                ssl_params.update({'ssl_version':
+                    self.validate_ssl_version(ssl_version)})
+            if keyfile:
+                ssl_params.update({'keyfile': keyfile})
+            if certfile:
+                ssl_params.update({'certfile': certfile})
+            if ca_certs:
+                ssl_params.update({'ca_certs': ca_certs})
+                ssl_params.update({'cert_reqs': ssl.CERT_REQUIRED})
+            return ssl_params or True
+        return False
 
 class VncKombuClientV1(VncKombuClientBase):
     def __init__(self, rabbit_ip, rabbit_port, rabbit_user, rabbit_password,
-                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger, routing_key='#'):
+
+                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger,routing_key='#',
+                 **kwargs):
         super(VncKombuClientV1, self).__init__(rabbit_ip, rabbit_port,
                                                rabbit_user, rabbit_password,
                                                rabbit_vhost, rabbit_ha_mode,
-                                               q_name, subscribe_cb, logger)
+                                               q_name, subscribe_cb, logger,
+                                               **kwargs)
         self._server_addrs = ["%s:%s" % (self._rabbit_ip, self._rabbit_port)]
         self._routing_key = routing_key
         self._conn = kombu.Connection(hostname=self._rabbit_ip,
@@ -229,7 +272,8 @@ class VncKombuClientV1(VncKombuClientBase):
                                       virtual_host=self._rabbit_vhost)
         self._update_queue_obj = kombu.Queue(q_name, self.obj_upd_exchange, routing_key=routing_key,
                                              durable=False)
-        self._start()
+      
+        self._start(q_name)
     # end __init__
 
 
@@ -255,10 +299,12 @@ class VncKombuClientV2(VncKombuClientBase):
 
     def __init__(self, rabbit_hosts, rabbit_port, rabbit_user, rabbit_password,
                  rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger, routing_key='#'):
+                 **kwargs):
         super(VncKombuClientV2, self).__init__(rabbit_hosts, rabbit_port,
                                                rabbit_user, rabbit_password,
                                                rabbit_vhost, rabbit_ha_mode,
-                                               q_name, subscribe_cb, logger)
+                                               q_name, subscribe_cb, logger,
+                                               **kwargs)
         self._server_addrs = rabbit_hosts.split(',')
         self._routing_key = routing_key
         _hosts = self._parse_rabbit_hosts(rabbit_hosts)
@@ -272,13 +318,13 @@ class VncKombuClientV2(VncKombuClientBase):
         self._logger(msg, level=SandeshLevel.SYS_NOTICE)
         self._update_sandesh_status(ConnectionStatus.INIT)
         self._conn_state = ConnectionStatus.INIT
-        self._conn = kombu.Connection(self._urls)
+        self._conn = kombu.Connection(self._urls, ssl=self._ssl_params)
         queue_args = {"x-ha-policy": "all"} if rabbit_ha_mode else None
         self._update_queue_obj = kombu.Queue(q_name, self.obj_upd_exchange,
                                              durable=False, routing_key=routing_key,
                                              queue_arguments=queue_args)
 
-        self._start()
+        self._start(q_name)
     # end __init__
 
 

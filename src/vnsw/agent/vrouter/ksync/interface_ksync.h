@@ -67,6 +67,7 @@ public:
     virtual int DeleteMsg(char *buf, int buf_len);
     virtual KSyncEntry *UnresolvedReference();
     void FillObjectLog(sandesh_op::type op, KSyncIntfInfo &info) const;
+    bool drop_new_flows() const {return drop_new_flows_;}
     bool dhcp_enable() const {return dhcp_enable_;}
     bool layer3_forwarding() const {return layer3_forwarding_;}
     bool bridging() const {return bridging_;}
@@ -78,6 +79,7 @@ private:
     int Encode(sandesh_op::type op, char *buf, int buf_len);
 
     string analyzer_name_;
+    bool drop_new_flows_;
     bool dhcp_enable_;
     uint32_t fd_;       // FD opened for this
     uint32_t flow_key_nh_id_;
@@ -89,6 +91,7 @@ private:
     bool layer3_forwarding_;
     InterfaceKSyncObject *ksync_obj_;
     bool l2_active_;
+    bool metadata_l2_active_;
     bool bridging_;
     MacAddress mac_;
     MacAddress smac_;
@@ -113,6 +116,7 @@ private:
     Interface::Transport transport_;
     bool flood_unknown_unicast_;
     VmInterface::FatFlowList fat_flow_list_;
+    KSyncEntryPtr qos_config_;
     DISALLOW_COPY_AND_ASSIGN(InterfaceKSyncEntry);
 };
 
@@ -128,6 +132,7 @@ public:
     virtual KSyncEntry *Alloc(const KSyncEntry *entry, uint32_t index);
     virtual KSyncEntry *DBToKSyncEntry(const DBEntry *e);
     void RegisterDBClients();
+    DBFilterResp DBEntryFilter(const DBEntry *e, const KSyncDBEntry *k);
 
 private:
     KSync *ksync_;

@@ -19,7 +19,9 @@ public:
     virtual Agent::RouteTableType GetTableType() const {
         return Agent::EVPN;
     }
-    virtual void UpdateDependants(AgentRoute *entry);
+    virtual void UpdateDerivedRoutes(AgentRoute *entry,
+                                     const AgentPath *path,
+                                     bool active_path_changed);
     virtual void PreRouteDelete(AgentRoute *entry);
     virtual AgentSandeshPtr GetAgentSandesh(const AgentSandeshArguments *args,
                                             const std::string &context);
@@ -43,6 +45,12 @@ public:
                             const std::string &vn_name,
                             const PathPreference &pref);
     void AddReceiveRoute(const Peer *peer, const std::string &vrf_name,
+                         uint32_t label, const MacAddress &mac,
+                         const IpAddress &ip_addr, uint32_t ethernet_tag,
+                         const std::string &vn_name,
+                         const PathPreference &pref);
+    void AddControllerReceiveRouteReq(const Peer *peer,
+                         const std::string &vrf_name,
                          uint32_t label, const MacAddress &mac,
                          const IpAddress &ip_addr, uint32_t ethernet_tag,
                          const std::string &vn_name,
@@ -150,12 +158,16 @@ public:
         publish_to_bridge_route_table_ = publish_to_bridge_route_table;
     }
     bool publish_to_bridge_route_table() const {
+        if (is_multicast())
+            return false;
         return publish_to_bridge_route_table_;
     }
     void set_publish_to_inet_route_table(bool publish_to_inet_route_table) {
         publish_to_inet_route_table_ = publish_to_inet_route_table;
     }
     bool publish_to_inet_route_table() const {
+        if (is_multicast())
+            return false;
         return publish_to_inet_route_table_;
     }
     const AgentPath *FindOvsPath() const;

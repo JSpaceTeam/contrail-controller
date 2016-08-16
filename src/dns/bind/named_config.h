@@ -28,14 +28,15 @@ public:
 
 private:
     friend class DnsBindTest;
+    friend class DnsManagerTest;
 
     bool IsBindPid(uint32_t pid);
     bool CheckBindStatus();
 
     uint32_t named_pid_;
-    TaskTrigger trigger_;
     BindEventHandler handler_;
     Timer *status_timer_;
+    bool change_timeout_;
 
     DISALLOW_COPY_AND_ASSIGN(BindStatus);
 };
@@ -50,6 +51,7 @@ public:
     static const std::string NamedZoneNSPrefix;
     static const std::string NamedZoneMXPrefix;
     static const char pid_file_name[];
+    static const char sessionkey_file_name[];
     static const int NameWidth = 30;
     static const int NumberWidth = 10;
     static const int TypeWidth = 4;
@@ -102,8 +104,12 @@ public:
                                         const std::string &name);
     virtual std::string GetResolveFile() { return "/etc/resolv.conf"; }
     std::string GetPidFilePath();
+    std::string GetSessionKeyFilePath();
     const std::string &named_config_dir() const { return named_config_dir_; }
     const std::string &named_config_file() const { return named_config_file_; }
+    const std::string &named_sessionkey_file() const {
+        return named_sessionkey_file_;
+    }
 
 protected:
     void CreateRndcConf();
@@ -129,6 +135,7 @@ protected:
     std::ofstream file_;
     std::string named_config_file_;
     std::string named_config_dir_;
+    std::string named_sessionkey_file_;
     std::string named_log_file_;
     std::string rndc_config_file_;
     std::string rndc_secret_;

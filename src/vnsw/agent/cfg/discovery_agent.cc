@@ -19,7 +19,7 @@ using namespace boost::asio;
 
 void DiscoveryAgentClient::Init(AgentParam *param) {
     param_ = param;
-    uint32_t port = agent_cfg_->agent()->discovery_server_port();
+    uint32_t port = param_->discovery_server_port();
     if (!port) {
         port = DISCOVERY_SERVER_PORT;
     }
@@ -72,14 +72,11 @@ void DiscoveryAgentClient::DiscoverDNS() {
         agent_cfg_->agent()->discovery_service_client();
     if (ds_client) {
 
-        int dns_instances = agent_cfg_->agent()->discovery_xmpp_server_instances();
-        if (dns_instances > MAX_XMPP_SERVERS || dns_instances <= 0) {
-            dns_instances = MAX_XMPP_SERVERS;
-        }
+        int dns_instances = 0;
         ds_client->Subscribe(
             g_vns_constants.DNS_SERVER_DISCOVERY_SERVICE_NAME, dns_instances,
             boost::bind(&DiscoveryAgentClient::DiscoverySubscribeDNSHandler, 
-                        this, _1));
+                        this, _1), MAX_XMPP_SERVERS);
     }    
 }
 

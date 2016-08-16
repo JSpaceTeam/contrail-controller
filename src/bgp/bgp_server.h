@@ -25,8 +25,11 @@ class AsPathDB;
 class BgpAttrDB;
 class BgpConditionListener;
 class BgpConfigManager;
+class BgpGlobalSystemConfig;
+class BgpMembershipManager;
 class BgpOListDB;
 class BgpPeer;
+class BgpRouterState;
 class BgpSessionManager;
 class ClusterListDB;
 class CommunityDB;
@@ -39,7 +42,6 @@ class LifetimeActor;
 class LifetimeManager;
 class OriginVnPathDB;
 class PmsiTunnelDB;
-class PeerRibMembershipManager;
 class RoutePathReplicator;
 class RoutingInstanceMgr;
 class RoutingPolicyMgr;
@@ -59,7 +61,9 @@ public:
 
     virtual std::string ToString() const;
 
-    virtual bool IsPeerCloseGraceful();
+    uint16_t GetGracefulRestartTime() const;
+    uint32_t GetLongLivedGracefulRestartTime() const;
+    uint32_t GetEndOfRibReceiveTime() const;
 
     int RegisterPeer(BgpPeer *peer);
     void UnregisterPeer(BgpPeer *peer);
@@ -133,10 +137,11 @@ public:
         return NULL;
     }
 
-    PeerRibMembershipManager *membership_mgr() { return membership_mgr_.get(); }
-    const PeerRibMembershipManager *membership_mgr() const {
+    BgpMembershipManager *membership_mgr() { return membership_mgr_.get(); }
+    const BgpMembershipManager *membership_mgr() const {
         return membership_mgr_.get();
     }
+
     AsPathDB *aspath_db() { return aspath_db_.get(); }
     BgpAttrDB *attr_db() { return attr_db_.get(); }
     BgpOListDB *olist_db() { return olist_db_.get(); }
@@ -151,6 +156,8 @@ public:
     bool IsDeleted() const;
     bool IsReadyForDeletion();
     void RetryDelete();
+    bool logging_disabled() const { return logging_disabled_; }
+    void set_logging_disabled(bool flag) { logging_disabled_ = flag; }
 
     bool destroyed() const { return destroyed_; }
     void set_destroyed() { destroyed_  = true; }
@@ -170,15 +177,21 @@ public:
     // Status
     uint32_t num_routing_instance() const;
     uint32_t num_deleted_routing_instance() const;
-    uint32_t num_bgp_peer() const {
-        return (peer_bmap_.size() - peer_bmap_.count());
-    }
 
+    uint32_t num_bgp_peer() const { return bgp_count_; }
     uint32_t num_deleting_bgp_peer() const { return deleting_count_; }
     void increment_deleting_count() { deleting_count_++; }
     void decrement_deleting_count() {
         assert(deleting_count_ > 0);
         deleting_count_--;
+    }
+
+    uint32_t num_bgpaas_peer() const { return bgpaas_count_; }
+    uint32_t num_deleting_bgpaas_peer() const { return deleting_bgpaas_count_; }
+    void increment_deleting_bgpaas_count() { deleting_bgpaas_count_++; }
+    void decrement_deleting_bgpaas_count() {
+        assert(deleting_bgpaas_count_ > 0);
+        deleting_bgpaas_count_--;
     }
 
     uint32_t get_output_queue_depth() const;
@@ -188,16 +201,27 @@ public:
     uint32_t num_static_routes() const;
     uint32_t num_down_static_routes() const;
 
-    void IncUpPeerCount() {
+    void IncrementUpPeerCount() {
         num_up_peer_++;
     }
-    void DecUpPeerCount() {
+    void DecrementUpPeerCount() {
         assert(num_up_peer_);
         num_up_peer_--;
     }
     uint32_t NumUpPeer() const {
         return num_up_peer_;
     }
+    void IncrementUpBgpaasPeerCount() {
+        num_up_bgpaas_peer_++;
+    }
+    void DecrementUpBgpaasPeerCount() {
+        assert(num_up_bgpaas_peer_);
+        num_up_bgpaas_peer_--;
+    }
+    uint32_t NumUpBgpaasPeer() const {
+        return num_up_bgpaas_peer_;
+    }
+
     LifetimeActor *deleter();
     boost::asio::io_service *ioservice();
 
@@ -219,6 +243,15 @@ public:
     void NotifyAllStaticRoutes();
     uint32_t GetStaticRouteCount() const;
     uint32_t GetDownStaticRouteCount() const;
+    BgpGlobalSystemConfig *global_config() { return global_config_.get(); }
+    bool gr_helper_enable() const { return gr_helper_enable_; }
+    void set_gr_helper_enable(bool gr_helper_enable) {
+        gr_helper_enable_ = gr_helper_enable;
+    }
+    void set_end_of_rib_timeout(uint32_t end_of_rib_timeout) {
+        end_of_rib_timeout_ = end_of_rib_timeout;
+    }
+    bool CollectStats(BgpRouterState *state, bool first) const;
 
 private:
     class ConfigUpdater;
@@ -232,6 +265,8 @@ private:
     typedef std::map<TcpSession::Endpoint, BgpPeer *> EndpointToBgpPeerList;
 
     void RoutingInstanceMgrDeletionComplete(RoutingInstanceMgr *mgr);
+    uint32_t SendTableStatsUve(bool first) const;
+    void FillPeerStats(const BgpPeer *peer) const;
 
     // base config variables
     tbb::spin_rw_mutex rw_mutex_;
@@ -246,18 +281,25 @@ private:
     IdentifierUpdateListenersList id_listeners_;
     boost::dynamic_bitset<> id_bmap_;      // free list.
     uint32_t hold_time_;
+    bool gr_helper_enable_;
+    uint32_t end_of_rib_timeout_;
     StaticRouteMgrList srt_manager_list_;
 
     DB db_;
     boost::dynamic_bitset<> peer_bmap_;
+    tbb::atomic<uint32_t> bgp_count_;
     tbb::atomic<uint32_t> num_up_peer_;
     tbb::atomic<uint32_t> deleting_count_;
+    tbb::atomic<uint32_t> bgpaas_count_;
+    tbb::atomic<uint32_t> num_up_bgpaas_peer_;
+    tbb::atomic<uint32_t> deleting_bgpaas_count_;
     BgpPeerList peer_list_;
     EndpointToBgpPeerList endpoint_peer_list_;
 
     boost::scoped_ptr<LifetimeManager> lifetime_manager_;
     boost::scoped_ptr<DeleteActor> deleter_;
     bool destroyed_;
+    bool logging_disabled_;
 
     // databases
     boost::scoped_ptr<AsPathDB> aspath_db_;
@@ -277,7 +319,7 @@ private:
     boost::scoped_ptr<RoutingInstanceMgr> inst_mgr_;
     boost::scoped_ptr<RoutingPolicyMgr> policy_mgr_;
     boost::scoped_ptr<RTargetGroupMgr> rtarget_group_mgr_;
-    boost::scoped_ptr<PeerRibMembershipManager> membership_mgr_;
+    boost::scoped_ptr<BgpMembershipManager> membership_mgr_;
     boost::scoped_ptr<BgpConditionListener> inet_condition_listener_;
     boost::scoped_ptr<BgpConditionListener> inet6_condition_listener_;
     boost::scoped_ptr<RoutePathReplicator> inetvpn_replicator_;
@@ -288,6 +330,7 @@ private:
     boost::scoped_ptr<IServiceChainMgr> inet6_service_chain_mgr_;
 
     // configuration
+    boost::scoped_ptr<BgpGlobalSystemConfig> global_config_;
     boost::scoped_ptr<BgpConfigManager> config_mgr_;
     boost::scoped_ptr<ConfigUpdater> updater_;
 

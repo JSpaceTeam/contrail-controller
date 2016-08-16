@@ -100,7 +100,7 @@ void VrfOvsdbEntry::TriggerAck(UnicastMacRemoteTable *table) {
     OvsdbDBObject *object = static_cast<OvsdbDBObject*>(GetObject());
     assert(route_table_ == table);
     route_table_ = NULL;
-    object->NotifyEvent(this, KSyncEntry::DEL_ACK);
+    object->SafeNotifyEvent(this, KSyncEntry::DEL_ACK);
 }
 
 VrfOvsdbObject::VrfOvsdbObject(OvsdbClientIdl *idl) : OvsdbDBObject(idl, true) {
@@ -173,6 +173,14 @@ KSyncDBObject::DBFilterResp VrfOvsdbObject::OvsdbDBEntryFilter(
     // Delete Vrf if vn goes NULL
     if (vrf->vn() == NULL) {
         return DBFilterDelete;
+    }
+
+    if (ovsdb_entry != NULL) {
+        const VrfOvsdbEntry *o_vrf =
+            static_cast<const VrfOvsdbEntry *>(ovsdb_entry);
+        if (o_vrf->logical_switch_name_ != UuidToString(vrf->vn()->GetUuid())) {
+            return DBFilterDelAdd;
+        }
     }
 
     return DBFilterAccept;

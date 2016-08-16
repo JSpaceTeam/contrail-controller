@@ -2,8 +2,8 @@
  * Copyright (c) 2015 Juniper Networks, Inc. All rights reserved.
  */
 
-#ifndef __src_io_ssl_session_h__
-#define __src_io_ssl_session_h__
+#ifndef SRC_IO_SSL_SESSION_H_
+#define SRC_IO_SSL_SESSION_H_
 
 #include "io/tcp_session.h"
 #include "io/ssl_server.h"
@@ -64,16 +64,14 @@ private:
     // SslSession do actual ssl socket read for data in this context with
     // session mutex held, to avoid concurrent read and write operations
     // on same socket.
-    bool AsyncReadHandlerProcess(boost::asio::mutable_buffer buffer,
-                                 size_t &bytes_transferred,
-                                 boost::system::error_code &error);
-
-    void AsyncReadSome(boost::asio::mutable_buffer buffer);
+    size_t ReadSome(boost::asio::mutable_buffer buffer,
+                    boost::system::error_code *error);
     std::size_t WriteSome(const uint8_t *data, std::size_t len,
-                          boost::system::error_code &error);
+                          boost::system::error_code *error);
     void AsyncWrite(const u_int8_t *data, std::size_t size);
 
-    static void TriggerSslHandShakeInternal(SslSessionPtr, SslHandShakeCallbackHandler);
+    static void TriggerSslHandShakeInternal(SslSessionPtr ptr,
+                                            SslHandShakeCallbackHandler cb);
 
     virtual Task* CreateReaderTask(boost::asio::mutable_buffer, size_t);
 
@@ -105,4 +103,4 @@ private:
     DISALLOW_COPY_AND_ASSIGN(SslSession);
 };
 
-#endif  // __src_io_ssl_session_h__
+#endif  // SRC_IO_SSL_SESSION_H_

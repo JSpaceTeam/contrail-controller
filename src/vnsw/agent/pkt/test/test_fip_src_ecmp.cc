@@ -18,6 +18,9 @@ struct PortInfo input1[] = {
     {"vnet1", 1, "1.1.1.1", "00:00:00:01:01:01", 1, 1},
     {"vnet2", 2, "1.1.1.2", "00:00:00:01:01:02", 1, 2},
 };
+IpamInfo ipam_info[] = {
+    {"1.1.1.0", 24, "1.1.1.10"},
+};
 
 class FipEcmpTest : public ::testing::Test {
     virtual void SetUp() {
@@ -30,6 +33,9 @@ class FipEcmpTest : public ::testing::Test {
 
         flow_proto_ = agent_->pkt()->get_flow_proto();
         CreateVmportWithEcmp(input1, 2);
+        client->WaitForIdle();
+        AddIPAM("vn1", ipam_info, 1);
+        client->WaitForIdle();
         AddVn(VN2, 2);
         AddVrf(VRF2);
         AddLink("virtual-network", VN2, "routing-instance",
@@ -54,6 +60,7 @@ class FipEcmpTest : public ::testing::Test {
 
         const VmInterface *vmi = static_cast<const VmInterface *>(VmPortGet(1));
         vm1_label = vmi->label();
+        vm1_mac = vmi->vm_mac();
         eth_intf_id = EthInterfaceGet("vnet0")->id();
     }
  
@@ -69,6 +76,9 @@ class FipEcmpTest : public ::testing::Test {
         client->WaitForIdle();
 
         DeleteVmportEnv(input1, 2, true);
+        client->WaitForIdle();
+        DelIPAM("vn1");
+        client->WaitForIdle();
         DelVn(VN2);
         DelVrf(VRF2);
         client->WaitForIdle();
@@ -114,7 +124,7 @@ public:
                     Ip4Address(0x64010101),
                     false, TunnelType::AllType()));
         ComponentNHKeyPtr comp_nh1(new ComponentNHKey(vm1_label,
-                    MakeUuid(1), InterfaceNHFlags::INET4));
+                    MakeUuid(1), InterfaceNHFlags::INET4, vm1_mac));
         comp_nh_list.push_back(comp_nh1);
 
         EcmpTunnelRouteAdd(bgp_peer, VRF2, fip, 32,
@@ -174,6 +184,7 @@ public:
     int vm1_label;
     int ecmp_label;
     int eth_intf_id;
+    MacAddress vm1_mac;
 };
 
 //Packet from VM with ECMP FIP to destination ECMP

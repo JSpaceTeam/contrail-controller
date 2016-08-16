@@ -70,25 +70,27 @@ public:
     }
     virtual bool SendUpdate(const uint8_t *msg, size_t msgsize) { return true; }
     virtual BgpServer *server() { return NULL; }
+    virtual BgpServer *server() const { return NULL; }
     virtual IPeerClose *peer_close() { return NULL; }
     virtual IPeerDebugStats *peer_stats() { return NULL; }
     virtual const IPeerDebugStats *peer_stats() const { return NULL; }
     virtual bool IsReady() const { return true; }
     virtual bool IsXmppPeer() const { return false; }
-    virtual void Close() { }
+    virtual void Close(bool non_graceful) { }
     BgpProto::BgpPeerType PeerType() const {
          return internal_ ? BgpProto::IBGP : BgpProto::EBGP;
     }
     virtual uint32_t bgp_identifier() const { return 0; }
     virtual const string GetStateName() const { return ""; }
-    virtual void UpdateRefCount(int count) const { }
-    virtual tbb::atomic<int> GetRefCount() const {
-        tbb::atomic<int> count;
-        count = 0;
-        return count;
-    }
+    virtual void UpdateTotalPathCount(int count) const { }
+    virtual int GetTotalPathCount() const { return 0; }
     virtual void UpdatePrimaryPathCount(int count) const { }
     virtual int GetPrimaryPathCount() const { return 0; }
+    virtual bool IsRegistrationRequired() const { return true; }
+    virtual void MembershipRequestCallback(BgpTable *table) { }
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+        BgpRoute *route, BgpPath *path) { return false; }
+    virtual bool CanUseMembershipManager() const { return true; }
 
 private:
     int index_;
@@ -164,6 +166,11 @@ protected:
         return server_.local_autonomous_system();
     }
 
+    as_t PeerAsNumber() const {
+        assert(!internal_);
+        return 100;
+    }
+
     bool PeerIsInternal() {
         return internal_;
     }
@@ -212,9 +219,14 @@ protected:
         ASSERT_TRUE(table_ != NULL);
     }
 
+    void CreateRibOut(RibExportPolicy &policy) {
+        ribout_ = table_->RibOutLocate(&mgr_, policy);
+        RegisterRibOutPeers();
+    }
+
     void CreateRibOut(BgpProto::BgpPeerType type,
             RibExportPolicy::Encoding encoding, as_t as_number = 0) {
-        RibExportPolicy policy(type, encoding, as_number, false, -1, 0);
+        RibExportPolicy policy(type, encoding, as_number, false, false, -1, 0);
         ribout_ = table_->RibOutLocate(&mgr_, policy);
         RegisterRibOutPeers();
     }
@@ -223,7 +235,15 @@ protected:
             RibExportPolicy::Encoding encoding, as_t as_number,
             bool as_override, IpAddress nexthop) {
         RibExportPolicy policy(
-            type, encoding, as_number, as_override, nexthop, -1, 0);
+            type, encoding, as_number, as_override, false, nexthop, -1, 0);
+        ribout_ = table_->RibOutLocate(&mgr_, policy);
+        RegisterRibOutPeers();
+    }
+
+    void CreateRibOut(BgpProto::BgpPeerType type,
+            RibExportPolicy::Encoding encoding, as_t as_number, bool llgr) {
+        RibExportPolicy policy(
+            type, encoding, as_number, false, llgr, -1, 0);
         ribout_ = table_->RibOutLocate(&mgr_, policy);
         RegisterRibOutPeers();
     }
@@ -317,10 +337,11 @@ protected:
         attr_ptr_ = server_.attr_db()->Locate(attr);
     }
 
-    void AddPath() {
+    BgpPath *AddPath() {
         BgpPath *path =
             new BgpPath(peer_.get(), BgpPath::BGP_XMPP, attr_ptr_, 0, 0);
         rt_.InsertPath(path);
+        return path;
     }
 
     void AddInfeasiblePath() {
@@ -401,6 +422,15 @@ protected:
         const BgpAttr *attr = uinfo.roattr.attr();
         const AsPath *as_path = attr->as_path();
         EXPECT_FALSE(as_path->path().AsPathLoop(as_number, 0));
+    }
+
+    void VerifyAttrAsPathAsCount(as_t as_number, uint8_t count) {
+        const UpdateInfo &uinfo = uinfo_slist_->front();
+        const BgpAttr *attr = uinfo.roattr.attr();
+        const AsPath *as_path = attr->as_path();
+        EXPECT_FALSE(as_path->path().AsPathLoop(as_number, count));
+        if (count)
+            EXPECT_TRUE(as_path->path().AsPathLoop(as_number, count - 1));
     }
 
     void VerifyAttrNoClusterList() {
@@ -624,6 +654,79 @@ TEST_P(BgpTableExportParamTest1, AsOverride) {
     VerifyExportAccept();
     VerifyAttrAsPrepend();
     VerifyAttrAsPathCount(PeerIsInternal() ? 1 : 2);
+}
+
+//
+// Table : inet.0, bgp.l3vpn.0
+// Source: eBGP, iBGP
+// RibOut: eBGP
+// Intent: Remove private all (w/o replace) removes all private ASes.
+//
+TEST_P(BgpTableExportParamTest1, RemovePrivateAll) {
+    RibExportPolicy policy(
+        BgpProto::EBGP, RibExportPolicy::BGP, 300, false, false, -1, 0);
+    bool all = true; bool replace = false; bool peer_loop_check = false;
+    policy.SetRemovePrivatePolicy(all, replace, peer_loop_check);
+    CreateRibOut(policy);
+
+    SetAttrAsPath(65535);
+    SetAttrAsPath(64512);
+    AddPath();
+    RunExport();
+    VerifyExportAccept();
+    VerifyAttrAsPrepend();
+    VerifyAttrAsPathCount(PeerIsInternal() ? 1 : 2);
+    VerifyAttrAsPathAsCount(LocalAsNumber(), 1);
+    if (!PeerIsInternal())
+        VerifyAttrAsPathAsCount(PeerAsNumber(), 1);
+}
+
+//
+// Table : inet.0, bgp.l3vpn.0
+// Source: eBGP, iBGP
+// RibOut: eBGP
+// Intent: Remove private all (w/ replace) replaces all private ASes with
+//         the local as.
+//
+TEST_P(BgpTableExportParamTest1, RemovePrivateAllReplace) {
+    RibExportPolicy policy(
+        BgpProto::EBGP, RibExportPolicy::BGP, 300, false, false, -1, 0);
+    bool all = true; bool replace = true; bool peer_loop_check = false;
+    policy.SetRemovePrivatePolicy(all, replace, peer_loop_check);
+    CreateRibOut(policy);
+
+    SetAttrAsPath(65535);
+    SetAttrAsPath(64512);
+    AddPath();
+    RunExport();
+    VerifyExportAccept();
+    VerifyAttrAsPrepend();
+    VerifyAttrAsPathCount(PeerIsInternal() ? 3 : 4);
+    VerifyAttrAsPathAsCount(LocalAsNumber(), 3);
+    if (!PeerIsInternal())
+        VerifyAttrAsPathAsCount(PeerAsNumber(), 1);
+}
+
+//
+// Table : inet.0, bgp.l3vpn.0
+// Source: eBGP, iBGP
+// RibOut: eBGP
+// Intent: Private ASes are not removed if there's no remove private config.
+//
+TEST_P(BgpTableExportParamTest1, NoRemovePrivate) {
+    CreateRibOut(BgpProto::EBGP, RibExportPolicy::BGP, 300, true, IpAddress());
+    SetAttrAsPath(65535);
+    SetAttrAsPath(64512);
+    AddPath();
+    RunExport();
+    VerifyExportAccept();
+    VerifyAttrAsPrepend();
+    VerifyAttrAsPathCount(PeerIsInternal() ? 3 : 4);
+    VerifyAttrAsPathAsCount(LocalAsNumber(), 1);
+    VerifyAttrAsPathAsCount(64512, 1);
+    VerifyAttrAsPathAsCount(65535, 1);
+    if (!PeerIsInternal())
+        VerifyAttrAsPathAsCount(PeerAsNumber(), 1);
 }
 
 INSTANTIATE_TEST_CASE_P(Instance, BgpTableExportParamTest1,
@@ -924,6 +1027,47 @@ TEST_P(BgpTableExportParamTest3, AsOverrideAndRewriteNexthop) {
     UnregisterRibOut();
 }
 
+//
+// Table : inet.0, bgp.l3vpn.0
+// Source: eBGP
+// RibOut: iBGP
+// Intent: Remove private all (w/o replace) removes all private ASes.
+//
+TEST_P(BgpTableExportParamTest3, RemovePrivateAll) {
+    RibExportPolicy policy(BgpProto::IBGP, RibExportPolicy::BGP,
+        LocalAsNumber(), false, false, -1, 0);
+    bool all = true; bool replace = false; bool peer_loop_check = false;
+    policy.SetRemovePrivatePolicy(all, replace, peer_loop_check);
+    CreateRibOut(policy);
+
+    SetAttrAsPath(65535);
+    SetAttrAsPath(64512);
+    AddPath();
+    RunExport();
+    VerifyExportAccept();
+    VerifyAttrAsPathCount(1);
+    VerifyAttrAsPathAsCount(PeerAsNumber(), 1);
+}
+
+//
+// Table : inet.0, bgp.l3vpn.0
+// Source: eBGP
+// RibOut: iBGP
+// Intent: Private ASes are not removed if there's no remove private config.
+//
+TEST_P(BgpTableExportParamTest3, NoRemovePrivate) {
+    CreateRibOut(BgpProto::IBGP, RibExportPolicy::BGP, LocalAsNumber());
+    SetAttrAsPath(65535);
+    SetAttrAsPath(64512);
+    AddPath();
+    RunExport();
+    VerifyExportAccept();
+    VerifyAttrAsPathCount(3);
+    VerifyAttrAsPathAsCount(64512, 1);
+    VerifyAttrAsPathAsCount(65535, 1);
+    VerifyAttrAsPathAsCount(PeerAsNumber(), 1);
+}
+
 INSTANTIATE_TEST_CASE_P(Instance, BgpTableExportParamTest3,
     ::testing::Combine(
         ::testing::Values("inet.0", "bgp.l3vpn.0"),
@@ -1136,6 +1280,94 @@ TEST_P(BgpTableExportParamTest5, NoStripExtendedCommunity2) {
 
 INSTANTIATE_TEST_CASE_P(Instance, BgpTableExportParamTest5,
     ::testing::Combine(
+        ::testing::Bool(),
+        ::testing::Bool()));
+
+//
+// Long Lived Graceful Restart related tests.
+//
+typedef std::tr1::tuple<const char *, bool, bool, bool, bool> TestParams6;
+class BgpTableExportParamTest6 :
+    public BgpTableExportTest,
+    public ::testing::WithParamInterface<TestParams6> {
+    virtual void SetUp() {
+        table_name_ = std::tr1::get<0>(GetParam());
+        peer_llgr_ = std::tr1::get<1>(GetParam());
+        path_llgr_ = std::tr1::get<2>(GetParam());
+        comm_llgr_ = std::tr1::get<3>(GetParam());
+        internal_ = std::tr1::get<4>(GetParam());
+        BgpTableExportTest::SetUp();
+    }
+
+    virtual void TearDown() {
+        BgpTableExportTest::TearDown();
+    }
+
+public:
+    void VerifyLlgrState() {
+        const UpdateInfo &uinfo = uinfo_slist_->front();
+        const BgpAttr *attr = uinfo.roattr.attr();
+
+        // If path is not llgr_stale or if path has no llgr_stale community,
+        // then do not expect any change.
+        if (!path_llgr_ && !comm_llgr_) {
+            EXPECT_EQ(static_cast<Community *>(NULL), attr->community());
+            EXPECT_EQ(internal_ ? 100 : 0, attr->local_pref());
+            return;
+        }
+
+        // If peer supports LLGR, then expect attribute with LLGR_STALE
+        // bgp community. Local preference should remain intact. (for ibgp)
+        if (peer_llgr_) {
+            EXPECT_TRUE(
+                    attr->community()->ContainsValue(CommunityType::LlgrStale));
+            EXPECT_EQ(internal_ ? 100 : 0, attr->local_pref());
+            return;
+        }
+
+        // Since peer does not support LLGR, expect NoExport community.
+        // Local preference should be down as well to 1. (for ibgp)
+        EXPECT_TRUE(attr->community()->ContainsValue(CommunityType::NoExport));
+        EXPECT_EQ(0, attr->local_pref());
+    }
+
+    bool peer_llgr_;
+    bool path_llgr_;
+    bool comm_llgr_;
+    bool internal_;
+};
+
+TEST_P(BgpTableExportParamTest6, Llgr) {
+
+    // Create RibOut internal/external with peer support for LLGR (or not)
+    CreateRibOut(internal_ ? BgpProto::IBGP : BgpProto::EBGP,
+                 RibExportPolicy::BGP, 300, peer_llgr_);
+
+    // If the attribute needs to be tagged with LLGR_STALE, do so.
+    if (comm_llgr_) {
+        CommunityPtr comm = server_.comm_db()->AppendAndLocate(
+                attr_ptr_->community(), CommunityType::LlgrStale);
+        attr_ptr_ = server_.attr_db()->ReplaceCommunityAndLocate(
+                attr_ptr_.get(), comm);
+    }
+
+    // Create path with desired community in the attribute.
+    BgpPath *path = AddPath();
+
+    // Set the llgr stale flag in the path.
+    path_llgr_ ? path->SetLlgrStale() : path->ResetLlgrStale();
+
+    // Run through the export routine and verify generated LLGR attributes.
+    RunExport();
+    VerifyExportAccept();
+    VerifyLlgrState();
+}
+
+INSTANTIATE_TEST_CASE_P(Instance, BgpTableExportParamTest6,
+    ::testing::Combine(
+        ::testing::Values("inet.0", "bgp.l3vpn.0"),
+        ::testing::Bool(),
+        ::testing::Bool(),
         ::testing::Bool(),
         ::testing::Bool()));
 

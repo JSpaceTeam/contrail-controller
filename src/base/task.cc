@@ -8,6 +8,7 @@
 #include <iostream>
 #include <boost/intrusive/set.hpp>
 
+#include "tbb/atomic.h"
 #include "tbb/task.h"
 #include "tbb/enumerable_thread_specific.h"
 #include "base/logging.h"
@@ -181,6 +182,7 @@ public:
     void TaskExited(Task *t);
     void PolicySet();
     void TaskStarted() {run_count_++;};
+    void IncrementTotalRunTime(int64_t rtime) { total_run_time_ += rtime; }
     TaskStats *GetTaskGroupStats();
     TaskStats *GetTaskStats();
     TaskStats *GetTaskStats(int task_instance);
@@ -220,11 +222,14 @@ private:
     int                     task_id_;
     bool                    policy_set_;// policy already set?
     int                     run_count_; // # of tasks running in the group
+    tbb::atomic<uint64_t>   total_run_time_;
 
     TaskGroupPolicyList     policy_;    // Policy rules for the group
     TaskDeferList           deferq_;    // Tasks deferred till run_count_ is 0
     TaskEntry               *task_entry_;// Task entry for instance(-1)
     TaskEntryList           task_entry_db_;  // task-entries in this group
+    uint32_t                execute_delay_;
+    uint32_t                schedule_delay_;
 
     TaskStats               stats_;
     DISALLOW_COPY_AND_ASSIGN(TaskGroup);
@@ -245,18 +250,27 @@ tbb::task *TaskImpl::execute() {
         if (parent_->enqueue_time() != 0) {
             t = ClockMonotonicUsec();
             TaskScheduler *scheduler = TaskScheduler::GetInstance();
-            if ((t - parent_->enqueue_time()) > scheduler->schedule_delay()) {
+            if ((t - parent_->enqueue_time()) >
+                scheduler->schedule_delay(parent_)) {
                 TASK_TRACE(scheduler, parent_, "TBB schedule time(in usec) ",
                            (t - parent_->enqueue_time()));
             }
+        } else if (TaskScheduler::GetInstance()->track_run_time()) {
+            t = ClockMonotonicUsec();
         }
 
         bool is_complete = parent_->Run();
         if (t != 0) {
             int64_t delay = ClockMonotonicUsec() - t;
             TaskScheduler *scheduler = TaskScheduler::GetInstance();
-            if (delay > scheduler->execute_delay()) {
+            uint32_t execute_delay = scheduler->execute_delay(parent_);
+            if (execute_delay && delay > execute_delay) {
                 TASK_TRACE(scheduler, parent_, "Run time(in usec) ", delay);
+            }
+            if (scheduler->track_run_time()) {
+                TaskGroup *group =
+                    scheduler->QueryTaskGroup(parent_->GetTaskId());
+                group->IncrementTotalRunTime(delay);
             }
         }
 
@@ -327,9 +341,9 @@ int TaskScheduler::GetThreadCount(int thread_count) {
 // part of tbb. So, initialize TBB with one thread more than its default
 TaskScheduler::TaskScheduler(int task_count) : 
     task_scheduler_(GetThreadCount(task_count) + 1),
-    running_(true), seqno_(0), id_max_(0), log_fn_(), measure_delay_(false),
-    schedule_delay_(0), execute_delay_(0), enqueue_count_(0), done_count_(0),
-    cancel_count_(0) {
+    running_(true), seqno_(0), id_max_(0), log_fn_(), track_run_time_(false),
+    measure_delay_(false), schedule_delay_(0), execute_delay_(0),
+    enqueue_count_(0), done_count_(0), cancel_count_(0) {
     hw_thread_count_ = GetThreadCount(task_count);
     task_group_db_.resize(TaskScheduler::kVectorGrowSize);
     stop_entry_ = new TaskEntry(-1);
@@ -374,6 +388,18 @@ void TaskScheduler::Log(const char *file_name, uint32_t line_no,
 
 void TaskScheduler::RegisterLog(LogFn fn) {
     log_fn_ = fn;
+}
+
+uint32_t TaskScheduler::schedule_delay(Task *task) const {
+    if (task->schedule_delay() > schedule_delay_)
+        return task->schedule_delay();
+    return schedule_delay_;
+}
+
+uint32_t TaskScheduler::execute_delay(Task *task) const {
+    if (task->execute_delay() > execute_delay_)
+        return task->execute_delay();
+    return execute_delay_;
 }
 
 TaskScheduler *TaskScheduler::GetInstance() {
@@ -439,6 +465,14 @@ void TaskScheduler::EnableLatencyThresholds(uint32_t execute,
     measure_delay_ = (execute_delay_ != 0 || schedule_delay_ != 0);
 }
 
+void TaskScheduler::SetLatencyThreshold(const std::string &name,
+                                        uint32_t execute, uint32_t schedule) {
+    int task_id = GetTaskId(name);
+    TaskGroup *group = GetTaskGroup(task_id);
+    group->execute_delay_ = execute;
+    group->schedule_delay_ = schedule;
+}
+
 // Sets Policy for a task.
 // Adds policy entries for the task
 // Example: Policy <tid0> => <tid1, -1> <tid2, inst2> will result in following,
@@ -491,6 +525,8 @@ void TaskScheduler::EnqueueUnLocked(Task *t) {
     enqueue_count_++;
     t->SetSeqNo(++seqno_);
     TaskGroup *group = GetTaskGroup(t->GetTaskId());
+    t->schedule_delay_ = group->schedule_delay_;
+    t->execute_delay_ = group->execute_delay_;
     group->stats_.enqueue_count_++;
 
     TaskEntry *entry = GetTaskEntry(t->GetTaskId(), t->GetTaskInstance());
@@ -867,7 +903,8 @@ void TaskScheduler::SetThreadAmpFactor(int n) {
 ////////////////////////////////////////////////////////////////////////////
 
 TaskGroup::TaskGroup(int task_id) : task_id_(task_id), policy_set_(false), 
-    run_count_(0) {
+    run_count_(0), execute_delay_(0), schedule_delay_(0) {
+    total_run_time_ = 0;
     task_entry_db_.resize(TaskGroup::kVectorGrowSize);
     task_entry_ = new TaskEntry(task_id);
     memset(&stats_, 0, sizeof(stats_));
@@ -1311,13 +1348,13 @@ int TaskEntry::GetTaskDeferEntrySeqno() const {
 Task::Task(int task_id, int task_instance) : task_id_(task_id),
     task_instance_(task_instance), task_impl_(NULL), state_(INIT), seqno_(0),
     task_recycle_(false), task_cancel_(false), enqueue_time_(0),
-    schedule_time_(0) {
+    schedule_time_(0), execute_delay_(0), schedule_delay_(0) {
 }
 
 Task::Task(int task_id) : task_id_(task_id),
     task_instance_(-1), task_impl_(NULL), state_(INIT), seqno_(0),
     task_recycle_(false), task_cancel_(false), enqueue_time_(0),
-    schedule_time_(0) {
+    schedule_time_(0), execute_delay_(0), schedule_delay_(0) {
 }
 
 // Start execution of task
@@ -1325,7 +1362,8 @@ void Task::StartTask() {
     if (enqueue_time_ != 0) {
         schedule_time_ = ClockMonotonicUsec();
         TaskScheduler *scheduler = TaskScheduler::GetInstance();
-        if ((schedule_time_ - enqueue_time_) > scheduler->schedule_delay()) {
+        if ((schedule_time_ - enqueue_time_) >
+            scheduler->schedule_delay(this)) {
             TASK_TRACE(scheduler, this, "Schedule delay(in usec) ",
                        (schedule_time_ - enqueue_time_));
         }
@@ -1359,7 +1397,9 @@ void TaskEntry::GetSandeshData(SandeshTaskEntry *resp) const {
     resp->set_deferq_size(deferq_->size());
 }
 void TaskGroup::GetSandeshData(SandeshTaskGroup *resp, bool summary) const {
-    TaskScheduler *scheduler = TaskScheduler::GetInstance();
+    if (total_run_time_)
+        resp->set_total_run_time(duration_usecs_to_string(total_run_time_));
+
     std::vector<SandeshTaskEntry> list;
     TaskEntry *task_entry = QueryTaskEntry(-1);
     if (task_entry) {
@@ -1367,8 +1407,6 @@ void TaskGroup::GetSandeshData(SandeshTaskGroup *resp, bool summary) const {
         task_entry->GetSandeshData(&entry_resp);
         list.push_back(entry_resp);
     }
-
-    std::vector<SandeshTaskEntry> entry_list;
     for (TaskEntryList::const_iterator it = task_entry_db_.begin();
          it != task_entry_db_.end(); ++it) {
         task_entry = *it;
@@ -1383,6 +1421,7 @@ void TaskGroup::GetSandeshData(SandeshTaskGroup *resp, bool summary) const {
     if (summary)
         return;
 
+    TaskScheduler *scheduler = TaskScheduler::GetInstance();
     std::vector<SandeshTaskPolicyEntry> policy_list;
     for (TaskGroupPolicyList::const_iterator it = policy_.begin();
          it != policy_.end(); ++it) {

@@ -14,6 +14,7 @@ env.Append(CPPPATH = [env['TOP'],
                       env['TOP'] + '/bgp',
                       env['TOP'] + '/db',
                       env['TOP'] + '/io',
+                      env['TOP'] + '/tools/sandesh/library/common',
                       env['TOP'] + '/xmpp'
                      ])
 env.Append(LIBPATH = ['#/' + Dir('..').path,
@@ -67,6 +68,7 @@ env.Prepend(LIBS = ['control_test',
                     'bgp_ifmap_config',
                     'bgp_xmpp',
                     'peer_sandesh',
+                    'table_sandesh',
                     'bgp_schema', 'control_node', 'dbtest',
                     'ifmap_vnc', 'task_test',
                     'ifmap_test_util', 'ifmap_test_util_server',
@@ -98,6 +100,8 @@ else:
     env.Prepend(LINKFLAGS =
                 ['-Wl,--whole-archive',
                  '-rdynamic',
+                 '-lbase',
+                 '-lboost_filesystem',
                  '-lbgp_inet',
                  '-lbgp_ermvpn',
                  '-lbgp_evpn',
@@ -193,6 +197,10 @@ bgp_ip_test2 = env.UnitTest('bgp_ip_test2',
                             ['bgp_ip_test2.cc'])
 env.Alias('src/bgp:bgp_ip_test2', bgp_ip_test2)
 
+bgp_membership_test = env.UnitTest('bgp_membership_test',
+                                   ['bgp_membership_test.cc'])
+env.Alias('src/bgp:bgp_membership_test', bgp_membership_test)
+
 bgp_msg_builder_test = env.UnitTest('bgp_msg_builder_test',
                                    ['bgp_msg_builder_test.cc'])
 env.Alias('src/bgp:bgp_msg_builder_test', bgp_msg_builder_test)
@@ -205,9 +213,12 @@ bgp_peer_close_test = except_env.UnitTest('bgp_peer_close_test',
                                           ['bgp_peer_close_test.cc'])
 env.Alias('src/bgp:bgp_peer_close_test', bgp_peer_close_test)
 
-bgp_peer_membership_test = env.UnitTest('bgp_peer_membership_test',
-                                        ['bgp_peer_membership_test.cc'])
-env.Alias('src/bgp:bgp_peer_membership_test', bgp_peer_membership_test)
+peer_close_test = except_env.UnitTest('peer_close_test', ['peer_close_test.cc'])
+env.Alias('src/bgp:peer_close_test', peer_close_test)
+
+bgp_peer_test = env.UnitTest('bgp_peer_test',
+                            ['bgp_peer_test.cc'])
+env.Alias('src/bgp:bgp_peer_test', bgp_peer_test)
 
 bgp_proto_test = env.UnitTest('bgp_proto_test',
                             ['bgp_proto_test.cc'])
@@ -272,6 +283,9 @@ env.Alias('src/bgp:bgp_table_export_test', bgp_table_export_test)
 
 bgp_table_test = env.UnitTest('bgp_table_test', ['bgp_table_test.cc'])
 env.Alias('src/bgp:bgp_table_test', bgp_table_test)
+
+bgp_table_walk_test = env.UnitTest('bgp_table_walk_test', ['bgp_table_walk_test.cc'])
+env.Alias('src/bgp:bgp_table_walk_test', bgp_table_walk_test)
 
 bgp_update_rx_test = env.UnitTest('bgp_update_rx_test', ['bgp_update_rx_test.cc'])
 env.Alias('src/bgp:bgp_update_rx_test', bgp_update_rx_test)
@@ -379,6 +393,9 @@ env.Alias('src/bgp:rt_network_attr_test', rt_network_attr_test)
 
 xmpp_ecmp_test = env.UnitTest('xmpp_ecmp_test', ['xmpp_ecmp_test.cc'])
 env.Alias('src/bgp:xmpp_ecmp_test', xmpp_ecmp_test)
+
+xmpp_message_builder_test = env.UnitTest('xmpp_message_builder_test', ['xmpp_message_builder_test.cc'])
+env.Alias('src/bgp:xmpp_message_builder_test', xmpp_message_builder_test)
 
 rt_unicast_test = env.UnitTest('rt_unicast_test',
                               ['rt_unicast_test.cc'])
@@ -542,10 +559,11 @@ test_suite = [
     bgp_export_uplist_test,
     bgp_ip_test1,
     bgp_ip_test2,
+    bgp_membership_test,
     bgp_msg_builder_test,
     bgp_multicast_test,
     bgp_peer_close_test,
-    bgp_peer_membership_test,
+    bgp_peer_test,
     bgp_proto_test,
     bgp_ribout_updates_test,
     bgp_route_test,
@@ -562,6 +580,7 @@ test_suite = [
     bgp_stress_test,
     bgp_table_export_test,
     bgp_table_test,
+    bgp_table_walk_test,
     bgp_update_rx_test,
     bgp_update_test,
     bgp_xmpp_basic_test,
@@ -579,6 +598,7 @@ test_suite = [
     graceful_restart_test,
     path_resolver_test1,
     path_resolver_test2,
+    peer_close_test,
     ribout_attributes_test,
     route_aggregator_test,
     routepath_replicator_random_test,
@@ -615,6 +635,7 @@ test_suite = [
     svc_static_route_intergration_test4_1,
     svc_static_route_intergration_test4_2,
     xmpp_ecmp_test,
+    xmpp_message_builder_test,
     xmpp_sess_toggle_test,
 ]
 

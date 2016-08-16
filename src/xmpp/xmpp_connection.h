@@ -7,6 +7,7 @@
 
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/scoped_ptr.hpp>
+#include <tbb/atomic.h>
 #include <tbb/spin_mutex.h>
 
 #include "base/timer.h"
@@ -29,23 +30,31 @@ class XmppSession;
 class XmppConnection {
 public:
     struct ProtoStats {
-        ProtoStats() : open(0), close(0), keepalive(0), update(0) {
+        ProtoStats() {
+            open = 0;
+            close = 0;
+            keepalive = 0;
+            update = 0;
         }
-        uint32_t open;
-        uint32_t close;
-        uint32_t keepalive;
-        uint32_t update;
+        tbb::atomic<uint32_t> open;
+        tbb::atomic<uint32_t> close;
+        tbb::atomic<uint32_t> keepalive;
+        tbb::atomic<uint32_t> update;
     };
 
     struct ErrorStats {
-        ErrorStats() : connect_error(0), session_close(0), open_fail(0),
-        stream_feature_fail(0), handshake_fail(0) {
+        ErrorStats() {
+            connect_error = 0;
+            session_close = 0;
+            open_fail = 0;
+            stream_feature_fail = 0;
+            handshake_fail = 0;
         }
-        uint32_t connect_error;
-        uint32_t session_close;
-        uint32_t open_fail;
-        uint32_t stream_feature_fail;
-        uint32_t handshake_fail;
+        tbb::atomic<uint32_t> connect_error;
+        tbb::atomic<uint32_t> session_close;
+        tbb::atomic<uint32_t> open_fail;
+        tbb::atomic<uint32_t> stream_feature_fail;
+        tbb::atomic<uint32_t> handshake_fail;
     };
 
     XmppConnection(TcpServer *server, const XmppChannelConfig *config);
@@ -63,6 +72,7 @@ public:
     std::string local_endpoint_string() const;
     TcpServer *server() { return server_; }
     XmppSession *CreateSession();
+    int GetTaskInstance() const { return GetTaskInstance(is_client_); }
 
     std::string ToString() const; 
     std::string ToUVEKey() const; 
@@ -101,10 +111,8 @@ public:
     const XmppSession *session() const;
     XmppSession *session();
 
-    bool logUVE() const {
-        return ((IsClient() == false) && (log_uve_));
-    }
-    virtual bool IsClient() const = 0;
+    bool logUVE() const { return !is_client_ && log_uve_; }
+    bool IsClient() const { return is_client_; }
     virtual void ManagedDelete() = 0;
     virtual void RetryDelete() = 0;
     virtual LifetimeActor *deleter() = 0;
@@ -118,15 +126,6 @@ public:
     }
     XmppChannelMux *ChannelMux() {return mux_.get(); }
     void SetChannelMux(XmppChannelMux *channel_mux) { mux_.reset(channel_mux); }
-
-    int GetIndex() const {
-        // TODO, this is needed to ensure no two reader tasks on the
-        // same session can run in parallel, use endpoint_.port()
-        // return endpoint_.port();
-        //
-        // GR TODO: Use IP Address
-        return 0;
-    }
 
     void Initialize() { state_machine_->Initialize(); }
     void Clear() { state_machine_->Clear(); }
@@ -243,6 +242,7 @@ private:
                                     std::string error_message);
     XmppStanza::XmppMessage *XmppDecode(const std::string &msg);
     void LogKeepAliveSend();
+    int GetTaskInstance(bool is_client) const;
 
     boost::asio::ip::tcp::endpoint endpoint_;
     boost::asio::ip::tcp::endpoint local_endpoint_;
@@ -252,12 +252,14 @@ private:
     tbb::spin_mutex spin_mutex_;
     Timer *keepalive_timer_;
 
+    bool is_client_;
     bool log_uve_;
     bool admin_down_;
     bool disable_read_;
     std::string from_; // bare jid
     std::string to_;
     bool auth_enabled_;
+    mutable std::string uve_key_str_;
 
     boost::scoped_ptr<XmppStateMachine> state_machine_;
     boost::scoped_ptr<XmppChannelMux> mux_;
@@ -275,7 +277,6 @@ public:
     XmppServerConnection(XmppServer *server, const XmppChannelConfig *config);
     virtual ~XmppServerConnection();
 
-    virtual bool IsClient() const;
     virtual void ManagedDelete();
     virtual void RetryDelete();
     virtual LifetimeActor *deleter();
@@ -315,7 +316,7 @@ class XmppClientConnection : public XmppConnection {
 public:
     XmppClientConnection(XmppClient *server, const XmppChannelConfig *config);
     virtual ~XmppClientConnection();
-    virtual bool IsClient() const;
+
     virtual void ManagedDelete();
     virtual void RetryDelete();
     virtual LifetimeActor *deleter();

@@ -44,8 +44,11 @@ XmppConnection::XmppConnection(TcpServer *server,
       local_endpoint_(config->local_endpoint),
       config_(NULL),
       keepalive_timer_(TimerManager::CreateTimer(
-                           *server->event_manager()->io_service(),
-                           "Xmpp keepalive timer")),
+                  *server->event_manager()->io_service(),
+                  "Xmpp keepalive timer",
+                  TaskScheduler::GetInstance()->GetTaskId("xmpp::StateMachine"),
+                  GetTaskInstance(config->ClientOnly()))),
+      is_client_(config->ClientOnly()),
       log_uve_(config->logUVE),
       admin_down_(false), 
       disable_read_(false),
@@ -122,6 +125,25 @@ XmppSession *XmppConnection::CreateSession() {
     return xmpp_session;
 }
 
+//
+// Return the task instance for this XmppConnection.
+// Calculate from the remote IpAddress so that a restarting session uses the
+// same value as before.
+// Do not make this method virtual since it gets called from the constructor.
+//
+
+int XmppConnection::GetTaskInstance(bool is_client) const {
+    if (is_client)
+        return 0;
+    IpAddress address = endpoint().address();
+    int thread_count = TaskScheduler::GetInstance()->HardwareThreadCount();
+    if (address.is_v4()) {
+        return address.to_v4().to_ulong() % thread_count;
+    } else {
+        return 0;
+    }
+}
+
 xmsm::XmState XmppConnection::GetStateMcState() const {
     const XmppStateMachine *sm = state_machine();
     assert(sm);
@@ -164,9 +186,12 @@ std::string XmppConnection::ToString() const {
 }
 
 std::string XmppConnection::ToUVEKey() const {
-    std::ostringstream out;
-    out << FromString() << ":" << endpoint().address().to_string();
-    return out.str();
+    if (uve_key_str_.empty()) {
+        std::ostringstream out;
+        out << FromString() << ":" << endpoint().address().to_string();
+        uve_key_str_ = out.str();
+    }
+    return uve_key_str_;
 }
 
 void XmppConnection::SetFrom(const string &from) {
@@ -207,10 +232,16 @@ bool XmppConnection::Send(const uint8_t *data, size_t size) {
     if (session_ == NULL) {
         return false;
     }
-    XMPP_MESSAGE_TRACE(XmppTxStream, 
-           session_->remote_endpoint().address().to_string(),
-           session_->remote_endpoint().port(), size,
-           string(reinterpret_cast<const char *>(data), size));
+
+    TcpSession::Endpoint endpoint = session_->remote_endpoint();
+    string str(reinterpret_cast<const char *>(data), size);
+    if (!(mux_ &&
+         (mux_->TxMessageTrace(endpoint.address().to_string(),
+                               endpoint.port(), size, str, NULL)))) {
+        XMPP_MESSAGE_TRACE(XmppTxStream,
+                           endpoint.address().to_string(),
+                           endpoint.port(), size, str);
+    }
 
     stats_[1].update++;
     return session_->Send(data, size, &sent);
@@ -386,6 +417,8 @@ void XmppConnection::SendKeepAlive() {
 }
 
 bool XmppConnection::KeepAliveTimerExpired() {
+    if (state_machine_->get_state() != xmsm::ESTABLISHED)
+        return false;
 
     // TODO: check timestamp of last received packet.
     SendKeepAlive();
@@ -690,10 +723,6 @@ void XmppServerConnection::RetryDelete() {
     deleter()->RetryDelete();
 }
 
-bool XmppServerConnection::IsClient() const {
-    return false;
-}
-
 LifetimeManager *XmppServerConnection::lifetime_manager() {
     return server()->lifetime_manager();
 }
@@ -828,10 +857,6 @@ void XmppClientConnection::RetryDelete() {
     if (!deleter()->IsDeleted())
         return;
     deleter()->RetryDelete();
-}
-
-bool XmppClientConnection::IsClient() const {
-    return true;
 }
 
 LifetimeManager *XmppClientConnection::lifetime_manager() {

@@ -16,6 +16,7 @@
 #include <xmpp_enet_types.h>
 #include <xmpp_unicast_types.h>
 #include <cmn/agent.h>
+#include <oper/peer.h>
 
 class AgentRoute;
 class Peer;
@@ -127,15 +128,12 @@ public:
     std::string GetMcastLabelRange() { return label_range_; }
 
     Agent *agent() const {return agent_;}
-    BgpPeer *bgp_peer_id() const {return bgp_peer_id_.get();}
-    boost::shared_ptr<BgpPeer> bgp_peer_id_ref() {return bgp_peer_id_;}
+    BgpPeer *bgp_peer_id() {
+        return static_cast<BgpPeer *>(bgp_peer_id_.get());
+    }
+    PeerPtr bgp_peer_id_ref() {return bgp_peer_id_;}
     std::string GetBgpPeerName() const;
     void UpdateConnectionInfo(xmps::PeerState state);
-
-    //Unicast peer identifier
-    void increment_unicast_sequence_number() {unicast_sequence_number_++;}
-    uint64_t unicast_sequence_number() const {return unicast_sequence_number_;}
-
     bool ControllerSendEvpnRouteCommon(AgentRoute *route,
                                        const Ip4Address *nexthop_ip,
                                        std::string vn,
@@ -161,7 +159,8 @@ public:
                                    bool associate,
                                    const AgentPath *path,
                                    bool assisted_replication);
-
+    void AddEvpnRoute(const std::string &vrf_name, std::string mac_addr,
+                      autogen::EnetItemType *item);
 protected:
     virtual void WriteReadyCb(const boost::system::error_code &ec);
 
@@ -174,8 +173,6 @@ private:
     void AddMulticastEvpnRoute(const std::string &vrf_name,
                                const MacAddress &mac,
                                autogen::EnetItemType *item);
-    void AddEvpnRoute(const std::string &vrf_name, std::string mac_addr,
-                      autogen::EnetItemType *item);
     void AddRemoteRoute(std::string vrf_name, IpAddress ip, uint32_t plen,
                         autogen::ItemType *item,
                         const VnListType &vn_list);
@@ -228,9 +225,8 @@ private:
     std::string xmpp_server_;
     std::string label_range_;
     uint8_t xs_idx_;
-    boost::shared_ptr<BgpPeer> bgp_peer_id_;
+    PeerPtr bgp_peer_id_;
     Agent *agent_;
-    uint64_t unicast_sequence_number_;
 };
 
 #endif // __CONTROLLER_PEER_H__

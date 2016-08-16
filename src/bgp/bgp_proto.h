@@ -30,6 +30,23 @@ public:
         EBGP,
         XMPP,
     };
+
+    static std::string BgpPeerTypeString(BgpPeerType peer_type) {
+        switch (peer_type) {
+        case IBGP:
+            return "IBGP";
+            break;
+        case EBGP:
+            return "EBGP";
+            break;
+        case XMPP:
+            return "XMPP";
+            break;
+        }
+        assert(false);
+        return "OTHER";
+    }
+
     struct BgpMessage : public ParseObject {
         explicit BgpMessage(MessageType type) : type(type) {
         }
@@ -107,9 +124,82 @@ public:
             Capability() : code(Reserved) { }
             explicit Capability(int code, const uint8_t *src, int size) :
                 code(code), capability(src, src + size) {}
+
+            struct GR {
+                enum {
+                    ForwardingStatePreserved = 0x80,
+                    RestartTimeBitPosition = 12,
+                };
+                explicit GR() { Initialize(); }
+                void Initialize() {
+                    flags = 0;
+                    time = 0;
+                    families.clear();
+                }
+                struct Family {
+                    Family(uint16_t afi, uint8_t safi, uint8_t flags) :
+                        afi(afi), safi(safi), flags(flags) { }
+                    uint16_t afi;
+                    uint8_t  safi;
+                    uint8_t  flags;
+
+                    bool forwarding_state_preserved() const {
+                        return (flags & ForwardingStatePreserved) != 0;
+                    }
+                };
+                static Capability *Encode(uint16_t gr_time, uint8_t gr_flags,
+                        uint8_t gr_afi_flags,
+                        const std::vector<Address::Family> &gr_families);
+                static bool Decode(GR *gr_params,
+                        const std::vector<Capability *> &capabilities);
+                static void GetFamilies(const GR &gr_params,
+                                        std::vector<std::string> *families);
+                bool restarted() const { return (flags & 0x80) != 0; }
+                uint8_t flags;
+                uint16_t time;
+                std::vector<Family> families;
+            };
+
+            struct LLGR {
+                enum {
+                    ForwardingStatePreserved = 0x80,
+                    RestartTimeBitSize = 24,
+                };
+                explicit LLGR() { Initialize(); }
+                void Initialize() {
+                    time = 0;
+                    families.clear();
+                }
+                struct Family {
+                    Family(uint16_t afi, uint8_t safi, uint8_t flags,
+                           uint32_t time) :
+                            afi(afi), safi(safi), flags(flags), time(time) {
+                    }
+                    uint16_t afi;
+                    uint8_t  safi;
+                    uint8_t  flags;
+                    uint32_t time; // 24 bits only
+
+                    bool forwarding_state_preserved() const {
+                        return (flags & ForwardingStatePreserved) != 0;
+                    }
+                };
+
+                static Capability *Encode(uint32_t llgr_time,
+                        uint8_t llgr_afi_flags,
+                        const std::vector<Address::Family> &llgr_families);
+                static bool Decode(LLGR *llgr_params,
+                        const std::vector<Capability *> &capabilities);
+                static void GetFamilies(const LLGR &llgr_params,
+                                        std::vector<std::string> *families);
+                uint32_t time;
+                std::vector<Family> families;
+            };
+
             int code;
             std::vector<uint8_t> capability;
         };
+
         struct OptParam : public ParseObject {
             ~OptParam() {
                 STLDeleteValues(&capabilities);

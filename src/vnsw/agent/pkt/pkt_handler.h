@@ -123,6 +123,7 @@ struct AgentHdr {
         TRAP_ICMP_ERROR = AGENT_TRAP_ICMP_ERROR,
         TRAP_HOLD_ACTION = AGENT_TRAP_FLOW_ACTION_HOLD,
         TRAP_FLOW_ACTION_HOLD = AGENT_TRAP_FLOW_ACTION_HOLD,
+        TRAP_ROUTER_ALERT = AGENT_TRAP_ROUTER_ALERT,
         INVALID = MAX_AGENT_HDR_COMMANDS
     };
 
@@ -134,19 +135,19 @@ struct AgentHdr {
 
     AgentHdr() :
         ifindex(-1), vrf(-1), cmd(-1), cmd_param(-1), cmd_param_1(-1),
-        cmd_param_2(0), cmd_param_3(0), cmd_param_4(0),
+        cmd_param_2(0), cmd_param_3(0), cmd_param_4(0), cmd_param_5(0),
         nh(-1), flow_index(-1), mtu(0) {}
 
     AgentHdr(uint32_t ifindex_p, uint32_t vrf_p, uint16_t cmd_p) :
         ifindex(ifindex_p), vrf(vrf_p), cmd(cmd_p), cmd_param(-1),
         cmd_param_1(-1), cmd_param_2(0), cmd_param_3(0), cmd_param_4(0),
-        nh(-1), flow_index(-1), mtu(0) {}
+        cmd_param_5(0), nh(-1), flow_index(-1), mtu(0) {}
 
     AgentHdr(uint32_t ifindex_p, uint32_t vrf_p, uint16_t cmd_p,
              uint32_t param1, uint32_t param2) :
         ifindex(ifindex_p), vrf(vrf_p), cmd(cmd_p), cmd_param(param1),
         cmd_param_1(param2), cmd_param_2(0), cmd_param_3(0), cmd_param_4(0),
-        nh(-1), flow_index(-1), mtu(0) {}
+        cmd_param_5(0), nh(-1), flow_index(-1), mtu(0) {}
 
     ~AgentHdr() {}
 
@@ -159,6 +160,7 @@ struct AgentHdr {
     uint32_t            cmd_param_2;
     uint32_t            cmd_param_3;
     uint32_t            cmd_param_4;
+    uint8_t             cmd_param_5;
     uint32_t            nh;
     uint32_t            flow_index;
     uint16_t            mtu;
@@ -177,6 +179,8 @@ struct TunnelInfo {
         src_port = 0;
         ip_saddr = 0;
         ip_daddr = 0;
+        eth = NULL;
+        ip = NULL;
     }
 
     TunnelType          type;
@@ -185,6 +189,8 @@ struct TunnelInfo {
     uint16_t            src_port;   // Valid only for VXLAN and MPLSoUDP
     uint32_t            ip_saddr;
     uint32_t            ip_daddr;
+    struct ether_header *eth;
+    struct ip           *ip;
 };
 
 // Receive packets from the pkt0 (tap) interface, parse and send the packet to
@@ -235,6 +241,8 @@ public:
         PacketBufferEnqueueItem(const AgentHdr &h, const PacketBufferPtr &b)
             : hdr(h), buff(b) {}
     };
+    typedef WorkQueue<boost::shared_ptr<PacketBufferEnqueueItem> >
+        PktHandlerQueue;
 
     PktHandler(Agent *, PktModule *pkt_module);
     virtual ~PktHandler();
@@ -279,6 +287,7 @@ public:
     void Enqueue(PktModuleName module, boost::shared_ptr<PktInfo> pkt_info);
     bool IsFlowPacket(PktInfo *pkt_info);
     void CalculatePort(PktInfo *pkt_info);
+    const PktHandlerQueue *work_queue() const { return &work_queue_; }
 
 private:
     void PktModuleEnqueue(PktModuleName mod, const AgentHdr &hdr,
@@ -296,6 +305,7 @@ private:
     bool ComputeForwardingMode(PktInfo *pkt_info) const;
 
     void SetOuterIp(PktInfo *pkt_info, uint8_t *pkt);
+    void SetOuterMac(PktInfo *pkt_info);
     bool IgnoreFragmentedPacket(PktInfo *pkt_info);
     bool IsDHCPPacket(PktInfo *pkt_info);
     bool IsValidInterface(uint32_t ifindex, Interface **interface);
@@ -313,7 +323,7 @@ private:
 
     Agent *agent_;
     PktModule *pkt_module_;
-    WorkQueue<boost::shared_ptr<PacketBufferEnqueueItem> > work_queue_;
+    PktHandlerQueue work_queue_;
     DISALLOW_COPY_AND_ASSIGN(PktHandler);
 };
 
@@ -377,6 +387,8 @@ struct PktInfo {
                            uint32_t mdata);
     void set_len(uint32_t len);
     void reset_packet_buffer();
+
+    uint32_t GetUdpPayloadLength() const;
 
 private:
     PacketBufferPtr     packet_buffer_;

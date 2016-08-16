@@ -12,13 +12,31 @@ public:
     ProfileData();
     ~ProfileData(){}
     struct WorkQueueStats {
+        std::string name_;
         uint64_t queue_count_;
         uint64_t enqueue_count_;
         uint64_t dequeue_count_;
         uint64_t max_queue_count_;
-        uint64_t task_start_count_;
+        uint64_t start_count_;
+        uint64_t busy_time_;
         void Reset();
         void Get();
+    };
+
+    struct FlowTokenStats {
+        uint32_t add_tokens_;
+        uint64_t add_failures_;
+        uint64_t add_restarts_;
+        uint32_t ksync_tokens_;
+        uint64_t ksync_failures_;
+        uint64_t ksync_restarts_;
+        uint32_t update_tokens_;
+        uint64_t update_failures_;
+        uint64_t update_restarts_;
+        uint32_t del_tokens_;
+        uint64_t del_failures_;
+        uint64_t del_restarts_;
+        void Reset();
     };
 
     struct DBTableStats {
@@ -38,9 +56,19 @@ public:
         uint64_t del_count_;
         uint64_t audit_count_;
         uint64_t reval_count_;
-        uint64_t handle_update_;
+        uint64_t recompute_count_;
+        uint64_t vrouter_responses_;
         uint64_t vrouter_error_;
-        WorkQueueStats pkt_flow_queue_count_;
+        uint64_t evict_count_;
+        FlowTokenStats token_stats_;
+        WorkQueueStats pkt_handler_queue_;
+        WorkQueueStats flow_mgmt_queue_;
+        WorkQueueStats flow_update_queue_;
+        std::vector<WorkQueueStats> flow_event_queue_;
+        std::vector<WorkQueueStats> flow_tokenless_queue_;
+        std::vector<WorkQueueStats> flow_delete_queue_;
+        std::vector<WorkQueueStats> flow_ksync_queue_;
+        std::vector<WorkQueueStats> flow_stats_queue_;
         void Get();
         void Reset();
     };
@@ -98,17 +126,21 @@ public:
     static const uint16_t kMinutesHistoryCount = 60;
     static const uint16_t kHoursHistoryCount = 24;
     typedef boost::function<void(ProfileData *data)> PktFlowStatsCb;
-
+    typedef boost::function<void(ProfileData *data)> KSyncStatsCb;
+    typedef boost::function<void(ProfileData *data)> ProfileCb;
 
     AgentProfile(Agent *agent, bool enable);
     ~AgentProfile();
     bool Init();
-    bool Shutdown();
+    void Shutdown();
+    void InitDone();
 
     bool TimerRun();
     void Log();
 
-    void RegisterPktFlowStatsCb(PktFlowStatsCb cb) { pkt_flow_stats_cb_ = cb; }
+    void RegisterPktFlowStatsCb(ProfileCb cb) { pkt_flow_stats_cb_ = cb; }
+    void RegisterKSyncStatsCb(ProfileCb cb) { ksync_stats_cb_ = cb; }
+    void RegisterFlowStatsCb(ProfileCb cb) { flow_stats_cb_ = cb; }
     void AddProfileData(ProfileData *data);
     ProfileData *GetProfileData(uint16_t index);
     uint16_t seconds_history_index() const { return seconds_history_index_; }
@@ -137,7 +169,9 @@ public:
     uint16_t hours_history_index_;
     ProfileData hours_history_data_[kHoursHistoryCount];
 
-    PktFlowStatsCb pkt_flow_stats_cb_;
+    ProfileCb pkt_flow_stats_cb_;
+    ProfileCb ksync_stats_cb_;
+    ProfileCb flow_stats_cb_;
     DISALLOW_COPY_AND_ASSIGN(AgentProfile);
 };
 

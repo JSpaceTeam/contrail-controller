@@ -6,6 +6,7 @@
 #define SRC_BGP_ROUTING_INSTANCE_SERVICE_CHAINING_H_
 
 #include <boost/shared_ptr.hpp>
+#include <tbb/mutex.h>
 
 #include <list>
 #include <map>
@@ -215,6 +216,8 @@ private:
     bool dest_table_unregistered_;
     bool aggregate_;  // Whether the host route needs to be aggregated
     LifetimeRef<ServiceChain> src_table_delete_ref_;
+    LifetimeRef<ServiceChain> dest_table_delete_ref_;
+    LifetimeRef<ServiceChain> connected_table_delete_ref_;
 
     // Helper function to match
     bool IsMoreSpecific(BgpRoute *route, PrefixT *aggregate_match) const;
@@ -304,15 +307,17 @@ private:
     virtual void DisableQueue() { process_queue_->set_disable(true); }
     virtual void EnableQueue() { process_queue_->set_disable(false); }
 
-    int id_;
-    int registration_id_;
+    // Mutex is used to serialize access from multiple bgp::ConfigHelper tasks.
     BgpServer *server_;
+    tbb::mutex mutex_;
     BgpConditionListener *listener_;
     boost::scoped_ptr<TaskTrigger> resolve_trigger_;
-    WorkQueue<ServiceChainRequestT *> *process_queue_;
-    bool aggregate_host_route_;
+    boost::scoped_ptr<WorkQueue<ServiceChainRequestT *> > process_queue_;
     ServiceChainMap chain_set_;
     PendingServiceChainList pending_chains_;
+    bool aggregate_host_route_;
+    int id_;
+    int registration_id_;
 
     DISALLOW_COPY_AND_ASSIGN(ServiceChainMgr);
 };

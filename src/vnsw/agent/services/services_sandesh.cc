@@ -31,7 +31,10 @@
     entry.set_icmpv6_ping_request(stats.icmpv6_ping_request_);                 \
     entry.set_icmpv6_ping_response(stats.icmpv6_ping_response_);               \
     entry.set_icmpv6_neighbor_solicit(stats.icmpv6_neighbor_solicit_);         \
-    entry.set_icmpv6_neighbor_advert(stats.icmpv6_neighbor_advert_);           \
+    entry.set_icmpv6_neighbor_advert_solicited                                 \
+        (stats.icmpv6_neighbor_advert_solicited_);                             \
+    entry.set_icmpv6_neighbor_advert_unsolicited                                 \
+        (stats.icmpv6_neighbor_advert_unsolicited_);                             \
     list.push_back(entry);
 
 std::map<uint16_t, std::string> g_ip_protocol_map = 
@@ -223,11 +226,23 @@ void ServicesSandesh::DnsStatsSandesh(std::string ctxt, bool more) {
     uint8_t count = 0;
     std::vector<string> &list =
         const_cast<std::vector<string>&>(dns->get_dns_resolver());
-    while (count < MAX_XMPP_SERVERS) {
-        if (!Agent::GetInstance()->dns_server(count).empty()) {
-            list.push_back(Agent::GetInstance()->dns_server(count)); 
+
+    std::vector<DSResponse> ds_reponse =
+        Agent::GetInstance()->GetDiscoveryDnsServerResponseList();
+
+    if (ds_reponse.size()) {
+        std::vector<DSResponse>::iterator iter;
+        for (iter = ds_reponse.begin(); iter != ds_reponse.end(); iter++) {
+            DSResponse dr = *iter;
+            list.push_back(dr.ep.address().to_string());
         }
-        count++;
+    } else {
+        while (count < MAX_XMPP_SERVERS) {
+            if (!Agent::GetInstance()->dns_server(count).empty()) {
+                list.push_back(Agent::GetInstance()->dns_server(count));
+            }
+            count++;
+        }
     }
     dns->set_dns_requests(nstats.requests);
     dns->set_dns_resolved(nstats.resolved);
@@ -261,7 +276,10 @@ void ServicesSandesh::Icmpv6StatsSandesh(std::string ctxt, bool more) {
     icmp->set_icmpv6_ping_response(istats.icmpv6_ping_response_);
     icmp->set_icmpv6_drop(istats.icmpv6_drop_);
     icmp->set_icmpv6_neighbor_solicit(istats.icmpv6_neighbor_solicit_);
-    icmp->set_icmpv6_neighbor_advert(istats.icmpv6_neighbor_advert_);
+    icmp->set_icmpv6_neighbor_advert_solicited
+        (istats.icmpv6_neighbor_advert_solicited_);
+    icmp->set_icmpv6_neighbor_advert_unsolicited
+        (istats.icmpv6_neighbor_advert_unsolicited_);
     icmp->set_context(ctxt);
     icmp->set_more(more);
     icmp->Response();

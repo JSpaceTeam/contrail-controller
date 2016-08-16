@@ -26,8 +26,8 @@ class LoadbalancerSM(DBBaseSM):
         self.virtual_machine_interface = None
         self.service_instance = None
         self.loadbalancer_listeners = set()
-        self.update(obj_dict)
         self.last_sent = None
+        self.update(obj_dict)
     # end __init__
 
     def update(self, obj=None):
@@ -45,11 +45,21 @@ class LoadbalancerSM(DBBaseSM):
         self.update_multiple_refs('loadbalancer_listener', obj)
     # end update
 
+    def add(self):
+        self.last_sent = \
+            self._manager.loadbalancer_agent.loadbalancer_add(self)
+    # end add
+
+    def evaluate(self):
+        self.add()
+    # end evaluate
+
     @classmethod
     def delete(cls, uuid):
         if uuid not in cls._dict:
             return
         obj = cls._dict[uuid]
+        cls._manager.loadbalancer_agent.delete_loadbalancer(obj)
         obj.update_single_ref('virtual_machine_interface', {})
         obj.update_single_ref('service_instance', {})
         obj.update_multiple_refs('loadbalancer_listener', {})
@@ -65,8 +75,8 @@ class LoadbalancerListenerSM(DBBaseSM):
         self.uuid = uuid
         self.loadbalancer = None
         self.loadbalancer_pool = None
-        self.update(obj_dict)
         self.last_sent = None
+        self.update(obj_dict)
     # end __init__
 
     def update(self, obj=None):
@@ -81,13 +91,23 @@ class LoadbalancerListenerSM(DBBaseSM):
         self.update_single_ref('loadbalancer_pool', obj)
     # end update
 
+    def add(self):
+        self.last_sent = \
+            self._manager.loadbalancer_agent.listener_add(self)
+    # end add
+
+    def evaluate(self):
+        self.add()
+    # end evaluate
+
     @classmethod
     def delete(cls, uuid):
         if uuid not in cls._dict:
             return
         obj = cls._dict[uuid]
+        cls._manager.loadbalancer_agent.delete_listener(obj)
         obj.update_single_ref('loadbalancer', {})
-        obj.update_single_ref('loadbalancer_listener', {})
+        obj.update_single_ref('loadbalancer_pool', {})
         del cls._dict[uuid]
     # end delete
 # end class LoadbalancerListenerSM
@@ -104,8 +124,10 @@ class LoadbalancerPoolSM(DBBaseSM):
         self.virtual_machine_interface = None
         self.virtual_ip = None
         self.loadbalancer_listener = None
-        self.update(obj_dict)
+        self.loadbalancer_id = None
         self.last_sent = None
+        self.custom_attributes = []
+        self.update(obj_dict)
     # end __init__
 
     def update(self, obj=None):
@@ -115,6 +137,9 @@ class LoadbalancerPoolSM(DBBaseSM):
         self.fq_name = obj['fq_name']
         self.params = obj.get('loadbalancer_pool_properties', None)
         self.provider = obj.get('loadbalancer_pool_provider', None)
+        kvpairs = obj.get('loadbalancer_pool_custom_attributes', None)
+        if kvpairs:
+            self.custom_attributes = kvpairs.get('key_value_pair', [])
         self.members = set([lm['uuid']
                             for lm in obj.get('loadbalancer_members', [])])
         self.id_perms = obj.get('id_perms', None)
@@ -126,6 +151,33 @@ class LoadbalancerPoolSM(DBBaseSM):
         self.update_single_ref('virtual_machine_interface', obj)
         self.update_multiple_refs('loadbalancer_healthmonitor', obj)
     # end update
+
+    def add(self):
+        if self.loadbalancer_listener:
+            ll_obj = LoadbalancerListenerSM.get(self.loadbalancer_listener)
+            self.loadbalancer_id = ll_obj.loadbalancer
+
+        self.last_sent = \
+            self._manager.loadbalancer_agent.loadbalancer_pool_add(self)
+
+        if len(self.members):
+            for member in self.members:
+                member_obj = LoadbalancerMemberSM.get(member)
+                if member_obj:
+                    member_obj.last_sent = \
+                        self._manager.loadbalancer_agent.loadbalancer_member_add(
+                            member_obj)
+
+        if self.virtual_ip:
+            vip_obj = VirtualIpSM.get(self.virtual_ip)
+            if vip_obj:
+                vip_obj.last_sent = \
+                    self._manager.loadbalancer_agent.virtual_ip_add(vip_obj)
+    # end add
+
+    def evaluate(self):
+        self.add()
+    # end evaluate
 
     @classmethod
     def delete(cls, uuid):
@@ -140,39 +192,7 @@ class LoadbalancerPoolSM(DBBaseSM):
         obj.update_multiple_refs('loadbalancer_healthmonitor', {})
         del cls._dict[uuid]
     # end delete
-
-    def add(self):
-        self.last_sent = \
-            self._manager.loadbalancer_agent.loadbalancer_pool_add(self)
-        if len(self.members):
-            for member in self.members:
-                member_obj = LoadbalancerMemberSM.get(member)
-                if member_obj:
-                    member_obj.last_sent = \
-                        self._manager.loadbalancer_agent.loadbalancer_member_add(
-                            member_obj)
-        if self.virtual_ip:
-            vip_obj = VirtualIpSM.get(self.virtual_ip)
-            if vip_obj:
-                vip_obj.last_sent = \
-                    self._manager.loadbalancer_agent.virtual_ip_add(vip_obj)
-
-        if self.loadbalancer_listener:
-            ll_obj = LoadbalancerListenerSM.get(self.loadbalancer_listener)
-            lb_obj = LoadbalancerSM.get(ll_obj.loadbalancer)
-            if lb_obj:
-                lb_obj.last_sent = \
-                    self._manager.loadbalancer_agent.loadbalancer_add(lb_obj)
-            if ll_obj:
-                ll_obj.last_sent = \
-                    self._manager.loadbalancer_agent.listener_add(ll_obj)
-    # end add
-
-    def evaluate(self):
-        self.add()
-
 # end class LoadbalancerPoolSM
-
 
 class LoadbalancerMemberSM(DBBaseSM):
     _dict = {}
@@ -181,8 +201,8 @@ class LoadbalancerMemberSM(DBBaseSM):
     def __init__(self, uuid, obj_dict=None):
         self.uuid = uuid
         self.loadbalancer_pool = {}
-        self.update(obj_dict)
         self.last_sent = None
+        self.update(obj_dict)
         if self.loadbalancer_pool:
             parent = LoadbalancerPoolSM.get(self.loadbalancer_pool)
             parent.members.add(self.uuid)
@@ -196,6 +216,10 @@ class LoadbalancerMemberSM(DBBaseSM):
         self.loadbalancer_pool = self.get_parent_uuid(obj)
         self.id_perms = obj.get('id_perms', None)
     # end update
+
+    def evaluate(self):
+        pass
+    # end evaluate
 
     @classmethod
     def delete(cls, uuid):
@@ -211,7 +235,6 @@ class LoadbalancerMemberSM(DBBaseSM):
     # end delete
 # end class LoadbalancerMemberSM
 
-
 class VirtualIpSM(DBBaseSM):
     _dict = {}
     obj_type = 'virtual_ip'
@@ -220,8 +243,8 @@ class VirtualIpSM(DBBaseSM):
         self.uuid = uuid
         self.virtual_machine_interface = None
         self.loadbalancer_pool = None
-        self.update(obj_dict)
         self.last_sent = None
+        self.update(obj_dict)
     # end __init__
 
     def update(self, obj=None):
@@ -236,6 +259,10 @@ class VirtualIpSM(DBBaseSM):
         self.display_name = obj.get('display_name', None)
     # end update
 
+    def evaluate(self):
+        pass
+    # end evaluate
+
     @classmethod
     def delete(cls, uuid):
         if uuid not in cls._dict:
@@ -246,9 +273,7 @@ class VirtualIpSM(DBBaseSM):
         obj.update_single_ref('loadbalancer_pool', {})
         del cls._dict[uuid]
     # end delete
-
 # end class VirtualIpSM
-
 
 class HealthMonitorSM(DBBaseSM):
     _dict = {}
@@ -273,6 +298,10 @@ class HealthMonitorSM(DBBaseSM):
         self.last_sent = self._manager.loadbalancer_agent.update_hm(self)
     # end update
 
+    def evaluate(self):
+        pass
+    # end evaluate
+
     @classmethod
     def delete(cls, uuid):
         if uuid not in cls._dict:
@@ -282,7 +311,6 @@ class HealthMonitorSM(DBBaseSM):
         del cls._dict[uuid]
     # end delete
 # end class HealthMonitorSM
-
 
 class VirtualMachineSM(DBBaseSM):
     _dict = {}
@@ -408,6 +436,7 @@ class VirtualMachineInterfaceSM(DBBaseSM):
         self.instance_id = None
         self.physical_interface = None
         self.port_tuple = None
+        self.fat_flow_ports = set()
         self.aaps = None
         obj_dict = self.update(obj_dict)
         self.add_to_parent(obj_dict)
@@ -424,6 +453,12 @@ class VirtualMachineInterfaceSM(DBBaseSM):
         self.aaps = obj.get('virtual_machine_interface_allowed_address_pairs', None)
         if self.aaps:
             self.aaps = self.aaps.get('allowed_address_pair', None)
+        self.fat_flow_ports.clear()
+        ffps = obj.get('virtual_machine_interface_fat_flow_protocols', None)
+        if ffps:
+            for ffp in ffps.get('fat_flow_protocol', []):
+                if ffp['port']:
+                    self.fat_flow_ports.add(ffp['port'])
         self.update_single_ref('virtual_ip', obj)
         self.update_single_ref('loadbalancer', obj)
         self.update_single_ref('loadbalancer_pool', obj)
@@ -484,8 +519,8 @@ class ServiceInstanceSM(DBBaseSM):
         self.service_template = None
         self.loadbalancer = None
         self.loadbalancer_pool = None
-        self.interface_route_tables = set()
-        self.service_health_checks = set()
+        self.interface_route_tables = {}
+        self.service_health_checks = {}
         self.instance_ips = set()
         self.virtual_machines = set()
         self.logical_router = None
@@ -529,8 +564,8 @@ class ServiceInstanceSM(DBBaseSM):
         self.update_single_ref('loadbalancer', obj)
         self.update_single_ref('loadbalancer_pool', obj)
         self.update_single_ref('logical_router', obj)
-        self.update_multiple_refs('interface_route_table', obj)
-        self.update_multiple_refs('service_health_check', obj)
+        self.update_multiple_refs_with_attr('interface_route_table', obj)
+        self.update_multiple_refs_with_attr('service_health_check', obj)
         self.update_multiple_refs('instance_ip', obj)
         self.update_multiple_refs('virtual_machine', obj)
         self.id_perms = obj.get('id_perms', None)
@@ -575,8 +610,8 @@ class ServiceInstanceSM(DBBaseSM):
         obj.update_single_ref('loadbalancer', {})
         obj.update_single_ref('loadbalancer_pool', {})
         obj.update_single_ref('logical_router', {})
-        obj.update_multiple_refs('interface_route_table', {})
-        obj.update_multiple_refs('service_health_check', {})
+        obj.update_multiple_refs_with_attr('interface_route_table', {})
+        obj.update_multiple_refs_with_attr('service_health_check', {})
         obj.update_multiple_refs('instance_ip', {})
         obj.update_multiple_refs('virtual_machine', {})
         obj.remove_from_parent()
@@ -638,6 +673,7 @@ class VirtualNetworkSM(DBBaseSM):
     def __init__(self, uuid, obj_dict=None):
         self.uuid = uuid
         self.virtual_machine_interfaces = set()
+        self.instance_ips = set()
         obj_dict = self.update(obj_dict)
         self.add_to_parent(obj_dict)
     # end __init__
@@ -648,6 +684,7 @@ class VirtualNetworkSM(DBBaseSM):
         self.name = obj['fq_name'][-1]
         self.fq_name = obj['fq_name']
         self.update_multiple_refs('virtual_machine_interface', obj)
+        self.update_multiple_refs('instance_ip', obj)
         return obj
     # end update
 
@@ -657,6 +694,7 @@ class VirtualNetworkSM(DBBaseSM):
             return
         obj = cls._dict[uuid]
         obj.update_multiple_refs('virtual_machine_interface', {})
+        obj.update_multiple_refs('instance_ip', {})
         obj.remove_from_parent()
         del cls._dict[uuid]
     # end delete
@@ -722,7 +760,9 @@ class InstanceIpSM(DBBaseSM):
         self.service_instance_ip = None
         self.instance_ip_secondary = None
         self.secondary_tracking_ip = None
+        self.service_health_check_ip = None
         self.virtual_machine_interfaces = set()
+        self.virtual_networks = set()
         self.update(obj_dict)
     # end __init__
 
@@ -731,12 +771,15 @@ class InstanceIpSM(DBBaseSM):
             obj = self.read_obj(self.uuid)
         self.name = obj['fq_name'][-1]
         self.fq_name = obj['fq_name']
+        self.instance_ip_mode = obj.get('instance_ip_mode', None)
         self.service_instance_ip = obj.get('service_instance_ip', False)
         self.instance_ip_secondary = obj.get('instance_ip_secondary', False)
         self.secondary_tracking_ip = obj.get('secondary_ip_tracking_ip', None)
+        self.service_health_check_ip = obj.get('service_health_check_ip', None)
         self.family = obj.get('instance_ip_family', 'v4')
         self.address = obj.get('instance_ip_address', None)
         self.update_multiple_refs('virtual_machine_interface', obj)
+        self.update_multiple_refs('virtual_network', obj)
         self.update_single_ref('service_instance', obj)
     # end update
 
@@ -747,6 +790,7 @@ class InstanceIpSM(DBBaseSM):
         obj = cls._dict[uuid]
         obj.update_single_ref('service_instance', {})
         obj.update_multiple_refs('virtual_machine_interface', {})
+        obj.update_multiple_refs('virtual_network', {})
         del cls._dict[uuid]
     # end delete
 
@@ -970,8 +1014,7 @@ class InterfaceRouteTableSM(DBBaseSM):
     def __init__(self, uuid, obj_dict=None):
         self.uuid = uuid
         self.virtual_machine_interfaces = set()
-        self.service_instance = None
-        self.service_interface_tag = None
+        self.service_instances = {}
         self.si_uuid = None
         self.if_type = None
         self.update(obj_dict)
@@ -983,10 +1026,7 @@ class InterfaceRouteTableSM(DBBaseSM):
         self.name = obj['fq_name'][-1]
         self.fq_name = obj['fq_name']
         self.update_multiple_refs('virtual_machine_interface', obj)
-        self.update_single_ref('service_instance', obj)
-        ref_attr = self.get_single_ref_attr('service_instance', obj)
-        if ref_attr:
-            self.service_interface_tag = ref_attr['interface_type']
+        self.update_multiple_refs_with_attr('service_instance', obj)
         name_split = self.name.split(' ')
         if len(name_split) == 2:
             self.si_uuid = name_split[0]
@@ -999,7 +1039,7 @@ class InterfaceRouteTableSM(DBBaseSM):
             return
         obj = cls._dict[uuid]
         obj.update_multiple_refs('virtual_machine_interface', {})
-        obj.update_single_ref('service_instance', {})
+        obj.update_multiple_refs_with_attr('service_instance', {})
         del cls._dict[uuid]
     # end delete
 
@@ -1034,6 +1074,7 @@ class ServiceApplianceSM(DBBaseSM):
             'service_appliance_user_credentials', None)
         self.ip_address = obj.get('service_appliance_ip_address', None)
         self.service_appliance_set = self.get_parent_uuid(obj)
+        self.physical_interfaces = {}
         ref_objs = obj.get("physical_interface_refs",[])
         for ref in ref_objs:
             self.physical_interfaces[ref[
@@ -1121,6 +1162,7 @@ class LogicalRouterSM(DBBaseSM):
     def update(self, obj=None):
         if obj is None:
             obj = self.read_obj(self.uuid)
+        self.fq_name = obj['fq_name']
         self.parent_uuid = obj['parent_uuid']
         self.update_single_ref('service_instance', obj)
         self.update_multiple_refs('virtual_machine_interface', obj)
@@ -1186,8 +1228,7 @@ class ServiceHealthCheckSM(DBBaseSM):
     def __init__(self, uuid, obj_dict=None):
         self.uuid = uuid
         self.virtual_machine_interfaces = set()
-        self.service_instance = None
-        self.service_interface_tag = None
+        self.service_instances = {}
         self.update(obj_dict)
     # end __init__
 
@@ -1196,11 +1237,9 @@ class ServiceHealthCheckSM(DBBaseSM):
             obj = self.read_obj(self.uuid)
         self.parent_uuid = obj['parent_uuid']
         self.name = obj['fq_name'][-1]
+        self.params = obj.get('service_health_check_properties', None)
         self.update_multiple_refs('virtual_machine_interface', obj)
-        self.update_single_ref('service_instance', obj)
-        ref_attr = self.get_single_ref_attr('service_instance', obj)
-        if ref_attr:
-            self.service_interface_tag = ref_attr['interface_type']
+        self.update_multiple_refs_with_attr('service_instance', obj)
     # end update
 
     @classmethod
@@ -1208,7 +1247,7 @@ class ServiceHealthCheckSM(DBBaseSM):
         if uuid not in cls._dict:
             return
         obj = cls._dict[uuid]
-        obj.update_single_ref('service_instance', {})
+        obj.update_multiple_refs_with_attr('service_instance', {})
         obj.update_multiple_refs('virtual_machine_interface', {})
         del cls._dict[uuid]
     # end delete

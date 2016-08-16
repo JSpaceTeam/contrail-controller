@@ -23,6 +23,7 @@
 #include <sandesh/common/vns_types.h>
 #include <sandesh/common/vns_constants.h>
 #include "analytics_types.h"
+#include "nodeinfo_types.h"
 #include "query_engine/options.h"
 #include "query.h"
 #include <base/misc_utils.h>
@@ -39,6 +40,9 @@ using namespace boost::asio;
 using namespace std;
 using process::ConnectionStateManager;
 using process::GetProcessStateCb;
+using process::ConnectionType;
+using process::ConnectionTypeName;
+using process::g_process_info_constants;
 // This is to force qed to wait for a gdbattach
 // before proceeding.
 // It will make it easier to debug qed during systest
@@ -132,7 +136,7 @@ static void ShutdownQe(DiscoveryServiceClient *ds_client,
     }
     WaitForIdle();
     Sandesh::Uninit();
-    ConnectionStateManager<NodeStatusUVE, NodeStatus>::
+    ConnectionStateManager::
         GetInstance()->Shutdown();
     WaitForIdle();
 }
@@ -222,18 +226,29 @@ main(int argc, char *argv[]) {
     // 2. Redis
     // 3. Cassandra
     // 4. Discovery (if collector list not configured)
-    int num_expected_connections = 4;
-    bool use_collector_list = false;
-    if (options.collectors_configured() || !csf) {
-        num_expected_connections = 3;
-        use_collector_list = true;
+    std::vector<ConnectionTypeName> expected_connections =
+        boost::assign::list_of
+         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
+                             ConnectionType::DATABASE)->second, ""))
+         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
+                             ConnectionType::REDIS_QUERY)->second, "Query"))
+         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
+                             ConnectionType::COLLECTOR)->second, ""));
+    bool use_collector_list = true;
+    if (!options.collectors_configured() && csf) {
+        // Use discovery to connect to collector
+        use_collector_list = false;
+        expected_connections.push_back(ConnectionTypeName(
+            g_process_info_constants.ConnectionTypeNames.find(
+                ConnectionType::DISCOVERY)->second,
+            g_vns_constants.COLLECTOR_DISCOVERY_SERVICE_NAME));
     }
-    ConnectionStateManager<NodeStatusUVE, NodeStatus>::
+    ConnectionStateManager::
         GetInstance()->Init(*evm.io_service(),
             options.hostname(), module_name,
             instance_id,
             boost::bind(&GetProcessStateCb, _1, _2, _3,
-            num_expected_connections));
+            expected_connections), "ObjectCollectorInfo");
     Sandesh::set_send_rate_limit(options.sandesh_send_rate_limit());
     bool success;
     // subscribe to the collector service with discovery only if the
@@ -293,10 +308,6 @@ main(int argc, char *argv[]) {
 
     boost::scoped_ptr<QueryEngine> qe;
 
-    //Get Platform info
-    //cql not supported in precise, centos 6.4 6.5
-    bool use_cql = MiscUtils::IsCqlSupported();
-
     if (cassandra_ports.size() == 1 && cassandra_ports[0] == 0) {
         qe.reset(new QueryEngine(&evm,
             options.redis_server(),
@@ -316,8 +327,7 @@ main(int argc, char *argv[]) {
             max_tasks,
             options.max_slice(),
             options.cassandra_user(),
-            options.cassandra_password(),
-            use_cql));
+            options.cassandra_password()));
     }
 
     CpuLoadData::Init();

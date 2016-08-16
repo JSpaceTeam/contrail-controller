@@ -3,7 +3,7 @@ from pysandesh.sandesh_base import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 
 class CfgParser(object):
-    CONF_DEFAULT_PATH = '/etc/contrail/contrail-alarm-gen.conf'
+
     def __init__(self, argv):
         self._devices = []
         self._args = None
@@ -13,7 +13,7 @@ class CfgParser(object):
     def parse(self):
         '''
             command line example
-contrail-alarm-gen  --log_level SYS_DEBUG
+            contrail-alarm-gen  --log_level SYS_DEBUG
                     --logging_level DEBUG
                     --log_category test
                     --log_file <stdout>
@@ -30,23 +30,14 @@ contrail-alarm-gen  --log_level SYS_DEBUG
                     --alarmgen_list 127.0.0.1:0
                     --kafka_broker_list 127.0.0.1:9092
                     --zk_list 127.0.0.1:2181
+                    --rabbitmq_server_list 127.0.0.1:5672
                     --conf_file /etc/contrail/contrail-alarm-gen.conf
-
-[DEFAULTS]
-log_local = 0
-log_level = SYS_DEBUG
-log_category =
-log_file = /var/log/contrail/contrail-alarm-gen.log
-
         '''
         # Source any specified config/ini file
         # Turn off help, so we print all options in response to -h
         conf_parser = argparse.ArgumentParser(add_help=False)
-
-        kwargs = {'help': "Specify config file", 'metavar':"FILE"}
-        if os.path.exists(self.CONF_DEFAULT_PATH):
-            kwargs['default'] = self.CONF_DEFAULT_PATH
-        conf_parser.add_argument("-c", "--conf_file", **kwargs)
+        conf_parser.add_argument("-c", "--conf_file", action="append",
+            help="Specify config file", metavar="FILE")
         args, remaining_argv = conf_parser.parse_known_args(self._argv.split())
 
         defaults = {
@@ -63,6 +54,12 @@ log_file = /var/log/contrail/contrail-alarm-gen.log
             'worker_id'         : '0',
             'partitions'        : 15,
             'zk_list'           : None,
+            'rabbitmq_server_list' : None,
+            'rabbitmq_port'     : 5672,
+            'rabbitmq_user'     : 'guest',
+            'rabbitmq_password' : 'guest',
+            'rabbitmq_vhost'    : None,
+            'rabbitmq_ha_mode'  : False,
             'redis_uve_list'    : ['127.0.0.1:6379'],
             'alarmgen_list'     : ['127.0.0.1:0'],
             'sandesh_send_rate_limit' : SandeshSystem.get_sandesh_send_rate_limit(),
@@ -79,16 +76,28 @@ log_file = /var/log/contrail/contrail-alarm-gen.log
             'disc_server_port'   : 5998,
         }
 
+        keystone_opts = {
+            'auth_host': '127.0.0.1',
+            'auth_protocol': 'http',
+            'auth_port': 35357,
+            'admin_user': 'user1',
+            'admin_password': 'password1',
+            'admin_tenant_name': 'default-domain'
+        }
+
         config = None
         if args.conf_file:
             config = ConfigParser.SafeConfigParser()
             config.optionxform = str
-            config.read([args.conf_file])
-            defaults.update(dict(config.items("DEFAULTS")))
+            config.read(args.conf_file)
+            if 'DEFAULTS' in config.sections():
+                defaults.update(dict(config.items('DEFAULTS')))
             if 'REDIS' in config.sections():
                 redis_opts.update(dict(config.items('REDIS')))
             if 'DISCOVERY' in config.sections():
                 disc_opts.update(dict(config.items('DISCOVERY')))
+            if 'KEYSTONE' in config.sections():
+                keystone_opts.update(dict(config.items('KEYSTONE')))
         # Override with CLI options
         # Don't surpress add_help here so it will handle -h
         parser = argparse.ArgumentParser(
@@ -102,6 +111,7 @@ log_file = /var/log/contrail/contrail-alarm-gen.log
 
         defaults.update(redis_opts)
         defaults.update(disc_opts)
+        defaults.update(keystone_opts)
         parser.set_defaults(**defaults)
         parser.add_argument("--host_ip",
             help="Host IP address")
@@ -146,6 +156,19 @@ log_file = /var/log/contrail/contrail-alarm-gen.log
         parser.add_argument("--zk_list",
             help="List of zookeepers in ip:port format",
             nargs="+")
+        parser.add_argument("--rabbitmq_server_list", type=str,
+            help="List of Rabbitmq server ip address separated by comma")
+        parser.add_argument("--rabbitmq_port",
+            help="Rabbitmq server port")
+        parser.add_argument("--rabbitmq_user",
+            help="Username for Rabbitmq")
+        parser.add_argument("--rabbitmq_password",
+            help="Password for Rabbitmq")
+        parser.add_argument("--rabbitmq_vhost",
+            help="vhost for Rabbitmq")
+        parser.add_argument("--rabbitmq_ha_mode",
+            action="store_true",
+            help="True if the rabbitmq cluster is mirroring all queue")
         parser.add_argument("--redis_uve_list",
             help="List of redis-uve in ip:port format. For internal use only",
             nargs="+")
@@ -156,6 +179,18 @@ log_file = /var/log/contrail/contrail-alarm-gen.log
             help="Sandesh send rate limit in messages/sec")
         parser.add_argument("--kafka_prefix",
             help="System Prefix for Kafka")
+        parser.add_argument("--auth_host",
+            help="ip of keystone server")
+        parser.add_argument("--auth_protocol",
+            help="keystone authentication protocol")
+        parser.add_argument("--auth_port", type=int,
+            help="ip of keystone server")
+        parser.add_argument("--admin_user",
+            help="Name of keystone admin user")
+        parser.add_argument("--admin_password",
+            help="Password of keystone admin user")
+        parser.add_argument("--admin_tenant_name",
+            help="Tenant name for keystone admin user")
         self._args = parser.parse_args(remaining_argv)
         if type(self._args.collectors) is str:
             self._args.collectors = self._args.collectors.split()
@@ -236,3 +271,19 @@ log_file = /var/log/contrail/contrail-alarm-gen.log
 
     def kafka_prefix(self):
         return self._args.kafka_prefix
+
+    def rabbitmq_params(self):
+        return {'servers': self._args.rabbitmq_server_list,
+                'port': self._args.rabbitmq_port,
+                'user': self._args.rabbitmq_user,
+                'password': self._args.rabbitmq_password,
+                'vhost': self._args.rabbitmq_vhost,
+                'ha_mode': self._args.rabbitmq_ha_mode}
+
+    def keystone_params(self):
+        return {'auth_host': self._args.auth_host,
+                'auth_protocol': self._args.auth_protocol,
+                'auth_port': self._args.auth_port,
+                'admin_user': self._args.admin_user,
+                'admin_password': self._args.admin_password,
+                'admin_tenant_name': self._args.admin_tenant_name}

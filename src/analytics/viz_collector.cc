@@ -43,23 +43,23 @@ VizCollector::VizCollector(EventManager *evm, unsigned short listen_port,
             const std::string &kafka_prefix, const TtlMap& ttl_map,
             const std::string &cassandra_user,
             const std::string &cassandra_password,
-            bool use_cql, const std::string &zookeeper_server_list,
+            const std::string &zookeeper_server_list,
             bool use_zookeeper) :
     db_initializer_(new DbHandlerInitializer(evm, DbGlobalName(dup), -1,
         std::string("collector:DbIf"),
         boost::bind(&VizCollector::DbInitializeCb, this),
         cassandra_ips, cassandra_ports, ttl_map, cassandra_user,
-        cassandra_password, use_cql, zookeeper_server_list, use_zookeeper)),
+        cassandra_password, zookeeper_server_list, use_zookeeper)),
     osp_(new OpServerProxy(evm, this, redis_uve_ip, redis_uve_port,
          redis_password, brokers, partitions, kafka_prefix)),
     ruleeng_(new Ruleeng(db_initializer_->GetDbHandler(), osp_.get())),
     collector_(new Collector(evm, listen_port, db_initializer_->GetDbHandler(),
         osp_.get(),
-        boost::bind(&Ruleeng::rule_execute, ruleeng_.get(), _1, _2, _3),
+        boost::bind(&Ruleeng::rule_execute, ruleeng_.get(), _1, _2, _3, _4),
         cassandra_ips, cassandra_ports, ttl_map, cassandra_user,
-        cassandra_password, use_cql)),
+        cassandra_password)),
     syslog_listener_(new SyslogListeners(evm,
-            boost::bind(&Ruleeng::rule_execute, ruleeng_.get(), _1, _2, _3),
+            boost::bind(&Ruleeng::rule_execute, ruleeng_.get(), _1, _2, _3, _4),
             db_initializer_->GetDbHandler(), syslog_port)),
     sflow_collector_(new SFlowCollector(evm, db_initializer_->GetDbHandler(),
         std::string(), sflow_port)),
@@ -129,7 +129,7 @@ VizCollector::VizCollector(EventManager *evm, DbHandlerPtr db_handler,
     ruleeng_(ruleeng),
     collector_(collector),
     syslog_listener_(new SyslogListeners (evm,
-            boost::bind(&Ruleeng::rule_execute, ruleeng, _1, _2, _3),
+            boost::bind(&Ruleeng::rule_execute, ruleeng, _1, _2, _3, _4),
             db_handler)),
     sflow_collector_(NULL), ipfix_collector_(NULL), redis_gen_(0), partitions_(0) {
     error_code error;
@@ -231,12 +231,6 @@ void VizCollector::SendGeneratorStatistics() {
     }
 }
 
-void VizCollector::TestDatabaseConnection() {
-    if (collector_) {
-        collector_->TestDatabaseConnection();
-    }
-}
-
 void VizCollector::SendDbStatistics() {
     DbHandlerPtr db_handler(db_initializer_->GetDbHandler());
     // DB stats
@@ -278,10 +272,10 @@ public:
         // Socket statistics
         SocketIOStats rx_socket_stats;
         Collector *collector(vsc->Analytics()->GetCollector());
-        collector->GetRxSocketStats(rx_socket_stats);
+        collector->GetRxSocketStats(&rx_socket_stats);
         resp->set_rx_socket_stats(rx_socket_stats);
         SocketIOStats tx_socket_stats;
-        collector->GetTxSocketStats(tx_socket_stats);
+        collector->GetTxSocketStats(&tx_socket_stats);
         resp->set_tx_socket_stats(tx_socket_stats);
         // Collector statistics
         resp->set_stats(vsc->Analytics()->GetCollector()->GetStats());
@@ -295,6 +289,14 @@ public:
         if (vsc->Analytics()->GetCqlMetrics(&cmetrics)) {
             resp->set_cql_metrics(cmetrics);
         }
+        // Get cumulative CollectorDbStats
+        std::vector<GenDb::DbTableInfo> vdbti, vstats_dbti;
+        GenDb::DbErrors dbe;
+        DbHandlerPtr db_handler(vsc->Analytics()->GetDbHandler());
+        db_handler->GetCumulativeStats(&vdbti, &dbe, &vstats_dbti);
+        resp->set_table_info(vdbti);
+        resp->set_errors(dbe);
+        resp->set_statistics_table_info(vstats_dbti);
         // Send the response
         resp->set_context(req->context());
         resp->Response();

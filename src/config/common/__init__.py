@@ -62,3 +62,9 @@ try:
     cfg.CONF.register_cli_opt(cfg.IntOpt(name="zk_connect_timeout", default=30))
 except ArgsAlreadyParsedError:
     pass
+
+HEX_ELEM = '[0-9A-Fa-f]'
+UUID_PATTERN = '-'.join([HEX_ELEM + '{8}', HEX_ELEM + '{4}',
+                         HEX_ELEM + '{4}', HEX_ELEM + '{4}',
+                         HEX_ELEM + '{12}'])
+

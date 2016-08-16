@@ -10,6 +10,7 @@ from vnc_api.vnc_api import ServiceTemplate, ServiceInstance, ServiceInstanceTyp
 from vnc_api.vnc_api import ServiceScaleOutType, ServiceInstanceInterfaceType
 from vnc_api.vnc_api import NoIdError, RefsExistError
 from vnc_api.vnc_api import KeyValuePair, KeyValuePairs
+from vnc_api.vnc_api import FatFlowProtocols, ProtocolType
 
 from svc_monitor.config_db import *
 import haproxy_config
@@ -176,6 +177,7 @@ class OpencontrailLoadbalancerDriver(
         if si_obj:
             self._service_instance_update_props(si_obj, props)
         else:
+            self._get_template()
             si_obj = ServiceInstance(name=fq_name[-1], parent_type='project',
                 fq_name=fq_name, service_instance_properties=props)
             si_obj.set_service_template(self.get_lb_template())
@@ -184,7 +186,7 @@ class OpencontrailLoadbalancerDriver(
 
         if si_refs is None or si_refs != si_obj.uuid:
             self._api.ref_update('loadbalancer-pool', pool.uuid,
-                'service_instance_refs', si_obj.uuid, None, 'ADD')
+                'service-instance', si_obj.uuid, None, 'ADD')
         self.db.pool_driver_info_insert(pool_id,
                                         {'service_instance': si_obj.uuid})
 
@@ -201,7 +203,7 @@ class OpencontrailLoadbalancerDriver(
         pool = LoadbalancerPoolSM.get(pool_id)
         if pool:
             self._api.ref_update('loadbalancer-pool', pool_id,
-                  'service_instance_refs', si_id, None, 'DELETE')
+                  'service-instance', si_id, None, 'DELETE')
         try:
             self._api.service_instance_delete(id=si_id)
             ServiceInstanceSM.delete(si_id)
@@ -234,6 +236,7 @@ class OpencontrailLoadbalancerDriver(
         if si_obj:
             self._service_instance_update_props(si_obj, props)
         else:
+            self._get_template()
             si_obj = ServiceInstance(name=fq_name[-1], parent_type='project',
                 fq_name=fq_name, service_instance_properties=props)
             si_obj.set_service_template(self.get_lb_template())
@@ -242,25 +245,29 @@ class OpencontrailLoadbalancerDriver(
 
         if si_refs is None or si_refs != si_obj.uuid:
             self._api.ref_update('loadbalancer', lb.uuid,
-                'service_instance_refs', si_obj.uuid, None, 'ADD')
+                'service-instance', si_obj.uuid, None, 'ADD')
 
     def _clear_loadbalancer_instance_v2(self, lb_id):
-        driver_data = self.db.loadbalancer_driver_info_get(lb_id)
-        if driver_data is None:
-            return
-        si_id = driver_data['service_instance']
-        si = ServiceInstanceSM.get(si_id)
-        if si is None:
+        lb = LoadbalancerSM.get(lb_id)
+        if lb is None:
+            msg = ('Unable to retrieve loadbalancer %s' % lb_id)
+            self._svc_manager.logger.error(msg)
             return
 
-        lb_id = si.loadbalancer
-        lb = LoadbalancerSM.get(lb_id)
-        if lb:
-            self._api.ref_update('loadbalancer', lb_id,
-                  'service_instance_refs', si_id, None, 'DELETE')
+        si_refs = lb.service_instance
+        si_obj = ServiceInstanceSM.get(si_refs)
+        if si_obj is None:
+            return
+
+        if si_refs:
+            try:
+                self._api.ref_update('loadbalancer', lb.uuid,
+                    'service-instance', si_obj.uuid, None, 'DELETE')
+            except:
+                pass
         try:
-            self._api.service_instance_delete(id=si_id)
-            ServiceInstanceSM.delete(si_id)
+            self._api.service_instance_delete(id=si_obj.uuid)
+            ServiceInstanceSM.delete(si_obj.uuid)
         except RefsExistError as ex:
             self._svc_manager.logger.error(str(ex))
 
@@ -289,7 +296,6 @@ class OpencontrailLoadbalancerDriver(
         self.plugin.update_status(Vip, vip["id"],
                                   constants.ACTIVE)
         """
-        self._get_template()
         if vip['pool_id']:
             self._update_loadbalancer_instance(vip['pool_id'], vip['id'])
 
@@ -318,9 +324,8 @@ class OpencontrailLoadbalancerDriver(
         self.plugin.update_status(Pool, pool["id"],
                                   constants.ACTIVE)
         """
-        self._get_template()
         if pool.get('loadbalancer_id', None):
-            self._update_loadbalancer_instance_v2(pool['id'], pool['loadbalancer_id'])
+            self._update_loadbalancer_instance_v2(pool['loadbalancer_id'])
         elif pool.get('vip_id', None):
             self._update_loadbalancer_instance(pool['id'], pool['vip_id'])
 
@@ -331,7 +336,7 @@ class OpencontrailLoadbalancerDriver(
                                   pool["id"], constants.ACTIVE)
         """
         if pool.get('loadbalancer_id', None):
-            self._update_loadbalancer_instance_v2(pool['id'], pool['loadbalancer_id'])
+            self._update_loadbalancer_instance_v2(pool['loadbalancer_id'])
         elif pool.get('vip_id', None):
             self._update_loadbalancer_instance(pool['id'], pool['vip_id'])
 
@@ -340,7 +345,9 @@ class OpencontrailLoadbalancerDriver(
         self.plugin._delete_db_pool(pool["id"])
         or set the status to ERROR if deletion failed
         """
-        if pool['vip_id']:
+        if pool.get('loadbalancer_id', None):
+            self._update_loadbalancer_instance_v2(pool['loadbalancer_id'])
+        elif pool['vip_id']:
             self._clear_loadbalancer_instance(pool['tenant_id'], pool['id'])
 
     def stats(self, pool_id):
@@ -386,36 +393,97 @@ class OpencontrailLoadbalancerDriver(
     def update_health_monitor(self, id, health_monitor):
         pass
 
+    def get_vip_port_v1(self, pool):
+        vip = VirtualIpSM.get(pool.virtual_ip)
+        if not vip:
+            return None
+        return vip.virtual_machine_interface
+
+    def get_port_list_v1(self, pool):
+        port_list = set()
+        vip = VirtualIpSM.get(pool.virtual_ip)
+        if not vip:
+            return port_list
+        if vip.params.get('port', None):
+            port_list.add(vip.params.get('port'))
+        return port_list
+
+    def get_port_list_v2(self, lb):
+        port_list = set()
+        for ll_id in lb.loadbalancer_listeners:
+            ll = LoadbalancerListenerSM.get(ll_id)
+            if not ll:
+                continue
+            port = ll.params.get('protocol_port', None)
+            if port:
+                port_list.add(port)
+
+        return port_list
+
+    def update_vmi_fat_flows(self, vip_vmi_id, port_list):
+        vip_vmi = VirtualMachineInterfaceSM.get(vip_vmi_id)
+        if not vip_vmi or not len(vip_vmi.instance_ips):
+            return
+        vip_iip = InstanceIpSM.get(list(vip_vmi.instance_ips)[0])
+        if not vip_iip:
+            return
+
+        for vmi_id in vip_iip.virtual_machine_interfaces:
+            if vmi_id == vip_vmi_id:
+                continue
+            vmi = VirtualMachineInterfaceSM.get(vmi_id)
+            if not vmi:
+                continue
+            if not vmi.fat_flow_ports.symmetric_difference(port_list):
+                continue
+            try:
+                vmi_obj = self._api.virtual_machine_interface_read(id=vmi.uuid)
+                ffp = FatFlowProtocols()
+                for port in port_list:
+                    ffp.add_fat_flow_protocol(ProtocolType(port=port))
+                vmi_obj.set_virtual_machine_interface_fat_flow_protocols(ffp)
+                self._api.virtual_machine_interface_update(vmi_obj)
+                vmi.update()
+            except NoIdError:
+                continue
+
     def set_config_v1(self, pool_id):
         pool = LoadbalancerPoolSM.get(pool_id)
         if not pool:
             return
+        self.update_vmi_fat_flows(self.get_vip_port_v1(pool),
+           self.get_port_list_v1(pool))
         conf = haproxy_config.get_config_v1(pool)
-        self.set_haproxy_config(pool.service_instance, pool.uuid, conf)
+        self.set_haproxy_config(pool.service_instance, 'v1', pool.uuid, conf)
 
     def set_config_v2(self, lb_id):
         lb = LoadbalancerSM.get(lb_id)
         if not lb:
             return
+        self.update_vmi_fat_flows(lb.virtual_machine_interface,
+            self.get_port_list_v2(lb))
         conf = haproxy_config.get_config_v2(lb)
-        self.set_haproxy_config(lb.service_instance, lb.uuid, conf)
+        self.set_haproxy_config(lb.service_instance, 'v2', lb.uuid, conf)
+        return conf
 
-    def set_haproxy_config(self, si_id, lb_uuid, conf):
+    def set_haproxy_config(self, si_id, lb_version, lb_uuid, conf):
         si = ServiceInstanceSM.get(si_id)
         if not si:
             return
 
-        for kv in si.kvps:
+        for kv in si.kvps or []:
             if kv['key'] == 'haproxy_config':
-                 if kv['value'] == conf:
-                     return
+                if kv['value'] == conf:
+                    return
 
         si_obj = ServiceInstance()
         si_obj.uuid = si.uuid
         si_obj.fq_name = si.fq_name
-        kvp = KeyValuePair('haproxy_config', conf)
+        kvp = KeyValuePair('lb_version', lb_version)
         si_obj.add_service_instance_bindings(kvp)
         kvp = KeyValuePair('lb_uuid', lb_uuid)
+        si_obj.add_service_instance_bindings(kvp)
+        kvp = KeyValuePair('haproxy_config', conf)
         si_obj.add_service_instance_bindings(kvp)
         try:
             self._api.service_instance_update(si_obj)

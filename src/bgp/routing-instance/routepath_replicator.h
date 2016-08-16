@@ -18,7 +18,8 @@
 #include "base/lifetime.h"
 #include "base/util.h"
 #include "bgp/bgp_path.h"
-#include "db/db_table_walker.h"
+#include "db/db_entry.h"
+#include "db/db_table.h"
 
 class BgpRoute;
 class BgpServer;
@@ -26,7 +27,6 @@ class BgpTable;
 class RtGroup;
 class RoutePathReplicator;
 class RouteTarget;
-class TaskTrigger;
 
 //
 // This keeps track of a RoutePathReplicator's listener state for a BgpTable.
@@ -89,6 +89,18 @@ public:
         return table_;
     }
 
+    const DBTable::DBTableWalkRef &walk_ref() const {
+        return walk_ref_;
+    }
+
+    DBTable::DBTableWalkRef &walk_ref() {
+        return walk_ref_;
+    }
+
+    void set_walk_ref(DBTable::DBTableWalkRef walk_ref) {
+        walk_ref_ = walk_ref;
+    }
+
 private:
     class DeleteActor;
     RoutePathReplicator *replicator_;
@@ -97,39 +109,9 @@ private:
     boost::scoped_ptr<DeleteActor> deleter_;
     LifetimeRef<TableState> table_delete_ref_;
     GroupList list_;
+    DBTable::DBTableWalkRef walk_ref_;
 
     DISALLOW_COPY_AND_ASSIGN(TableState);
-};
-
-
-// BulkSyncState
-// This class holds the information of the TableWalk requests posted from
-// config sync.
-class BulkSyncState {
-public:
-    BulkSyncState() : id_(DBTable::kInvalidId), walk_again_(false) {
-    }
-
-    DBTableWalker::WalkId GetWalkerId() {
-        return id_;
-    }
-
-    void SetWalkerId(DBTableWalker::WalkId id) {
-        id_ = id;
-    }
-
-    void SetWalkAgain(bool walk) {
-        walk_again_ = walk;
-    }
-
-    bool WalkAgain() {
-        return walk_again_;
-    }
-
-private:
-    DBTableWalker::WalkId id_;
-    bool walk_again_;
-    DISALLOW_COPY_AND_ASSIGN(BulkSyncState);
 };
 
 //
@@ -224,7 +206,7 @@ private:
 //
 // 1. When an export target is added to or removed from a VRF table, walk all
 //    routes in the VRF table to re-evaluate the new set of secondary paths.
-//    The DBTableWalker provides this functionality.
+//    The DBTableWalkMgr provides this functionality.
 // 2. When an import target is added to or removed from a VRF table, walk all
 //    VRF tables that have the target in question as an export target.  The
 //    list of tables that export a target is maintained in the RTargetGroupMgr.
@@ -246,15 +228,11 @@ private:
 // VPN table. This entry is created when the replicator is initialized and
 // deleted during shutdown.
 //
-// The BulkSyncOrders list keeps track of all the table walk requests that
-// need to be triggered. Requests are added to this list because of 1 and 2.
-// This list and StartWalk and BulkSyncOrders methods handle the complexity
-// of multiple walk requests for the same table - either when the previous
-// walk has already started or not.
-//
 // The UnregTableList keeps track of tables for which we need to delete the
 // TableState. Requests are enqueued from the db::DBTable task when a table
 // walk finishes and the TableState is empty.
+//
+// A mutex is used to serialize access from multiple bgp::ConfigHelper tasks.
 //
 class RoutePathReplicator {
 public:
@@ -262,17 +240,13 @@ public:
     virtual ~RoutePathReplicator();
 
     void Initialize();
-    void DeleteVpnTableState();
-
     void Join(BgpTable *table, const RouteTarget &rt, bool import);
     void Leave(BgpTable *table, const RouteTarget &rt, bool import);
 
-    const RtReplicated *GetReplicationState(BgpTable *table,
-                                            BgpRoute *rt) const;
     std::vector<std::string> GetReplicatedTableNameList(const BgpTable *table,
         const BgpRoute *route, const BgpPath *path) const;
-
-    SandeshTraceBufferPtr trace_buffer() const { return trace_buf_; }
+    const RtReplicated *GetReplicationState(BgpTable *table,
+                                            BgpRoute *rt) const;
 
 private:
     friend class ReplicationTest;
@@ -280,10 +254,8 @@ private:
     friend class TableState;
 
     typedef std::map<BgpTable *, TableState *> TableStateList;
-    typedef std::map<BgpTable *, BulkSyncState *> BulkSyncOrders;
     typedef std::set<BgpTable *> UnregTableList;
 
-    bool StartWalk();
     void RequestWalk(BgpTable *table);
     void BulkReplicationDone(DBTableBase *dbtable);
     bool UnregisterTables();
@@ -306,22 +278,15 @@ private:
                      RtReplicated *dbstate,
                      const RtReplicated::ReplicatedRtPathList *future);
 
-    bool BulkSyncExists(BgpTable *table) const {
-        return (bulk_sync_.find(table) != bulk_sync_.end());
-    }
-
     BgpServer *server() { return server_; }
     Address::Family family() const { return family_; }
     const BgpServer *server() const { return server_; }
 
-    // Mutex to protect bulk_sync_ from multiple DBTable tasks.
-    tbb::mutex mutex_;
-    BulkSyncOrders bulk_sync_;
-    TableStateList table_state_list_;
     BgpServer *server_;
+    tbb::mutex mutex_;
+    TableStateList table_state_list_;
     Address::Family family_;
     BgpTable *vpn_table_;
-    boost::scoped_ptr<TaskTrigger> walk_trigger_;
     SandeshTraceBufferPtr trace_buf_;
 
     DISALLOW_COPY_AND_ASSIGN(RoutePathReplicator);

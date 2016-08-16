@@ -9,12 +9,15 @@
 #include <vector>
 
 #include <boost/function.hpp>
+#include <tbb/mutex.h>
+
 #include "base/util.h"
 
 class DBGraph;
 class DBPartition;
 class DBTableBase;
 class DBTableWalker;
+class DBTableWalkMgr;
 
 // A database is a collection of tables.
 // The storage is implemented by a set of shards (DB Partitions).
@@ -26,7 +29,7 @@ public:
     typedef TableMap::iterator iterator;
     typedef TableMap::const_iterator const_iterator;
 
-    DB();
+    DB(int task_id = -1);
     ~DB();
 
     // Get the partition with the specified id.
@@ -44,6 +47,9 @@ public:
     // Table walker
     DBTableWalker *GetWalker() {
         return walker_.get();
+    }
+    DBTableWalkMgr *GetWalkMgr() {
+        return walk_mgr_.get();
     }
 
     DBGraph *GetGraph(const std::string &name);
@@ -69,6 +75,8 @@ public:
         return tables_.lower_bound(name);
     }
 
+    int task_id() const { return task_id_; }
+
 private:
     typedef std::map<std::string, CreateFunction> FactoryMap;
     typedef std::map<std::string, DBGraph *> GraphMap;
@@ -76,10 +84,13 @@ private:
     static int partition_count_;
     static FactoryMap *factories();
 
+    tbb::mutex mutex_;
+    int task_id_;
     std::vector<DBPartition *> partitions_;
     TableMap tables_;
     GraphMap graph_map_;
     std::auto_ptr<DBTableWalker> walker_;
+    std::auto_ptr<DBTableWalkMgr> walk_mgr_;
 
     DISALLOW_COPY_AND_ASSIGN(DB);
 };

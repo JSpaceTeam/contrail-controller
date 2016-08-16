@@ -40,6 +40,7 @@ do {                                                                          \
 #define DNS_MX_RECORD    0x0F
 #define DNS_TXT_RECORD   0x10
 #define DNS_AAAA_RECORD  0x1C
+#define DNS_SRV_RECORD   0x21
 #define DNS_TYPE_ANY     0x00ff
 
 // DNS return codes
@@ -131,6 +132,18 @@ struct DnsSOAData {
     }
 };
 
+// Data format in an SRV record
+struct DnsSRVData {
+    uint16_t priority;
+    uint16_t weight;
+    uint16_t port;
+    std::string hostname;
+    uint16_t hn_plen;       // length of the prefix in hostname that is unique
+    uint16_t hn_offset;     // offset from where rest of hostname name exists
+
+    DnsSRVData() : hn_plen(0), hn_offset(0) {}
+};
+
 struct DnsItem {
     uint16_t eclass;
     uint16_t type;
@@ -144,6 +157,7 @@ struct DnsItem {
     std::string name;
     std::string data;
     DnsSOAData soa;
+    DnsSRVData srv;
 
     DnsItem() : eclass(1), type(0), ttl(0), priority(0), offset(0),
     name_plen(0), name_offset(0), data_plen(0), data_offset(0), soa() {}
@@ -277,11 +291,13 @@ public:
     static const std::string &DnsResponseCode(uint16_t code);
     static uint8_t *AddName(uint8_t *ptr, const std::string &addr,
                             uint16_t plen, uint16_t offset, uint16_t &length);
-    static int ParseDnsQuery(uint8_t *buf, DnsItems &items);
-    static bool ParseDnsResponse(uint8_t *buf, uint16_t &xid, dns_flags &flags,
-                                 DnsItems &ques, DnsItems &ans,
-                                 DnsItems &auth, DnsItems &add);
-    static int ParseDnsUpdate(uint8_t *buf, DnsUpdateData &data);
+    static bool ParseDnsQuery(uint8_t *dns, uint16_t dnslen,
+                              uint16_t *parsed_length, DnsItems &items);
+    static bool ParseDnsResponse(uint8_t *dns, uint16_t dnslen, uint16_t &xid,
+                                 dns_flags &flags, DnsItems &ques,
+                                 DnsItems &ans, DnsItems &auth, DnsItems &add);
+    static bool ParseDnsUpdate(uint8_t *dns, uint16_t dnslen,
+                               DnsUpdateData &data);
     static int BuildDnsQuery(uint8_t *buf, uint16_t xid, 
                              const std::string &domain,
                              const DnsItems &items);
@@ -294,6 +310,8 @@ public:
                                        uint16_t &length);
     static uint8_t *AddAnswerSection(uint8_t *ptr, const DnsItem &item, 
                                      uint16_t &length);
+    static uint8_t *AddUpdate(uint8_t *ptr, const DnsItem &item,
+                             uint16_t cl, uint32_t ttl, uint16_t &length);
     static void BuildDnsHeader(dnshdr *dns, uint16_t xid, DnsReq req, 
                                DnsOpcode op, bool rd, bool ra, uint8_t ret, 
                                uint16_t ques_count);
@@ -312,25 +330,37 @@ public:
     static void RemoveSpecialChars(std::string &name);
 private:
 
-    static inline uint8_t *ReadByte(uint8_t *ptr, uint8_t &value) {
+    static inline bool ReadByte(uint8_t *dns, uint16_t dnslen, int *remlen,
+                                uint8_t &value) {
+        if (*remlen < 1) {
+            return false;
+        }
+        uint8_t *ptr = dns + (dnslen - *remlen);
+        *remlen -= 1;
         value = *(uint8_t *) ptr;
-        ptr += 1;
-
-        return ptr;
+        return true;
     }
 
-    static inline uint8_t *ReadShort(uint8_t *ptr, uint16_t &value) {
+    static inline bool ReadShort(uint8_t *dns, uint16_t dnslen, int *remlen,
+                                 uint16_t &value) {
+        if (*remlen < 2) {
+            return false;
+        }
+        uint8_t *ptr = dns + (dnslen - *remlen);
+        *remlen -= 2;
         value = ntohs(*(uint16_t *) ptr);
-        ptr += 2;
-
-        return ptr;
+        return true;
     }
 
-    static inline uint8_t *ReadWord(uint8_t *ptr, uint32_t &value) {
+    static inline bool ReadWord(uint8_t *dns, uint16_t dnslen, int *remlen,
+                                uint32_t &value) {
+        if (*remlen < 4) {
+            return false;
+        }
+        uint8_t *ptr = dns + (dnslen - *remlen);
+        *remlen -= 4;
         value = ntohl(*(uint32_t *) ptr);
-        ptr += 4;
-
-        return ptr;
+        return true;
     }
 
     static inline uint8_t *WriteByte(uint8_t *ptr, uint8_t value) {
@@ -359,14 +389,14 @@ private:
                                          uint16_t type, uint16_t cl, 
                                          uint32_t ttl, const std::string &data, 
                                          uint16_t &length);
-    static uint8_t *AddUpdate(uint8_t *ptr, const DnsItem &item,
-                             uint16_t cl, uint32_t ttl, uint16_t &length);
-    static uint8_t *ReadName(uint8_t *dns, uint8_t *ptr, std::string &name,
-                             uint16_t &plen, uint16_t &offset);
-    static uint8_t *ReadData(uint8_t *buf, uint8_t *ptr, DnsItem &item);
-    static uint8_t *ReadQuestionEntry(uint8_t *buf, uint8_t *ptr, 
-                                      DnsItem &item);
-    static uint8_t *ReadAnswerEntry(uint8_t *dns, uint8_t *ptr, DnsItem &item);
+    static bool ReadName(uint8_t *dns, uint16_t dnslen, int *remlen,
+                         std::string &name, uint16_t &plen, uint16_t &offset);
+    static bool ReadData(uint8_t *dns, uint16_t dnslen, int *remlen,
+                         DnsItem &item);
+    static bool ReadQuestionEntry(uint8_t *dns, uint16_t dnslen, int *remlen,
+                                  DnsItem &item);
+    static bool ReadAnswerEntry(uint8_t *dns, uint16_t dnslen, int *remlen,
+                                DnsItem &item);
 };
 
 // Identify the offsets for names in a DNS message

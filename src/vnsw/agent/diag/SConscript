@@ -21,6 +21,8 @@ libdiag = env.Library('diag',
                     'diag.cc',
                     'ping.cc',
                     'traceroute.cc',
+                    'overlay_ping.cc',
+                    'overlay_traceroute.cc',
                     'diag_pkt_handler.cc'
                    ])
 

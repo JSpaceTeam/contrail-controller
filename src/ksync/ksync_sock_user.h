@@ -43,6 +43,8 @@ public:
     virtual void VrfStatsMsgHandler(vr_vrf_stats_req *req);
     virtual void DropStatsMsgHandler(vr_drop_stats_req *req);
     virtual void VxLanMsgHandler(vr_vxlan_req *req);
+    virtual void QosConfigMsgHandler(vr_qos_map_req *req);
+    virtual void ForwardingClassMsgHandler(vr_fc_map_req *req);
     virtual void VrouterOpsMsgHandler(vrouter_ops *req);
     virtual void Process() {}
 private:
@@ -83,6 +85,7 @@ public:
 
     KSyncSockTypeMap(boost::asio::io_service &ios) : KSyncSock(), sock_(ios) {
         block_msg_processing_ = false;
+        is_incremental_index_ = false;
     }
     ~KSyncSockTypeMap() {
         assert(nh_map.size() == 0);
@@ -137,7 +140,7 @@ public:
     static void set_error_code(int code) { error_code_ = code; }
     static int error_code() { return error_code_; }
     static void SimulateResponse(uint32_t, int, int);
-    static void SendNetlinkDoneMsg(int seq_num);
+    static void SendNetlinkDoneMsg(uint32_t seq_num);
     static void IfDumpResponse(uint32_t);
     static void IfNetlinkMsgSend(uint32_t seq_num, ksync_map_if::const_iterator it);
     static void IfStatsUpdate(int, int, int, int, int, int, int);
@@ -177,7 +180,9 @@ public:
     static void IncrFlowStats(int idx, int pkts, int bytes);
     static void SetTcpFlag(int idx, uint32_t flags);
     static void SetOFlowStats(int idx, uint8_t pkts, uint16_t bytes);
-    static void SetFlowTcpFlags(int idx, uint16_t flags);;
+    static void SetFlowTcpFlags(int idx, uint16_t flags);
+    static void SetEvictedFlag(int idx);
+    static void ResetEvictedFlag(int idx);
     static void FlowNatResponse(uint32_t seq_num, vr_flow_req *req);
     static void SetUnderlaySourcePort(int idx, int port);
     friend class MockDumpHandlerBase;
@@ -189,6 +194,12 @@ public:
         return block_msg_processing_;
     }
 
+    void set_is_incremental_index(bool incremental) {
+        is_incremental_index_ = incremental;
+    }
+
+    bool is_incremental_index() { return is_incremental_index_; }
+
     void SetKSyncError(KSyncSockEntryType type, int ksync_error) {
         ksync_error_[type] = ksync_error;
     }
@@ -199,7 +210,7 @@ public:
 
     // Add a response in nl_client into tx_buff_list_
     void AddNetlinkTxBuff(struct nl_client *cl);
-    void InitNetlinkDoneMsg(struct nlmsghdr *nlh, int seq_num);
+    void InitNetlinkDoneMsg(struct nlmsghdr *nlh, uint32_t seq_num);
     void DisableReceiveQueue(bool disable);
 private:
     void PurgeBlockedMsg();
@@ -207,6 +218,7 @@ private:
     udp::endpoint local_ep_;
     int ksync_error_[KSYNC_MAX_ENTRY_TYPE];
     bool block_msg_processing_;
+    bool is_incremental_index_;
     static KSyncSockTypeMap *singleton_;
     static vr_flow_entry *flow_table_;
     static int error_code_;

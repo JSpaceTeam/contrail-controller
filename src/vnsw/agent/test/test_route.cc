@@ -31,7 +31,7 @@
 #include "test_cmn_util.h"
 #include "kstate/test/test_kstate_util.h"
 #include "vr_types.h"
-
+#include "net/bgp_af.h"
 #include <controller/controller_export.h> 
 
 using namespace boost::assign;
@@ -134,7 +134,8 @@ protected:
 
     void AddHostRoute(Ip4Address addr) {
         Agent::GetInstance()->fabric_inet4_unicast_table()->AddHostRoute(
-               vrf_name_, addr, 32, Agent::GetInstance()->fabric_vn_name());
+               vrf_name_, addr, 32, Agent::GetInstance()->fabric_vn_name(),
+               false);
         client->WaitForIdle();
     }
 
@@ -1031,13 +1032,14 @@ TEST_F(RouteTest, RouteToDeletedNH_1) {
     InetUnicastRouteEntry *rt = RouteGet(vrf_name_, local_vm_ip_, 32);
     EXPECT_TRUE(rt->dest_vn_name() == "vn1");
 
+    MacAddress vm_mac = MacAddress::FromString("00:00:00:01:01:01");
     // Add state to NextHop so that entry is not freed on delete
     DBTableBase::ListenerId id = 
         Agent::GetInstance()->nexthop_table()->Register(
                boost::bind(&RouteTest::NhListener, this, _1, _2));
     InterfaceNHKey key(new VmInterfaceKey(AgentKey::ADD_DEL_CHANGE,
                                           MakeUuid(1), ""),
-                       false, InterfaceNHFlags::INET4);
+                       false, InterfaceNHFlags::INET4, vm_mac);
     NextHop *nh = 
         static_cast<NextHop *>(Agent::GetInstance()->nexthop_table()->FindActiveEntry(&key));
     TestNhState *state = new TestNhState();
@@ -1617,7 +1619,8 @@ TEST_F(RouteTest, RouteResync_1) {
     InetInterfaceKey intf_key("vnet1");
     VnListType vn_list;
     vn_list.insert("vn1");
-    req.data.reset(new InetInterfaceRoute(intf_key, 1, TunnelType::GREType(), vn_list));
+    req.data.reset(new InetInterfaceRoute(intf_key, 1, TunnelType::GREType(),
+                          vn_list));
     AgentRouteTable *table =
         agent_->vrf_table()->GetInet4UnicastRouteTable("vrf1");
     table->Enqueue(&req);
@@ -2182,7 +2185,7 @@ TEST_F(RouteTest, verify_channel_delete_results_in_path_delete) {
     FillEvpnNextHop(peer, "vrf1", 1000, TunnelType::MplsType());
     client->WaitForIdle();
     //Get Channel and delete it.
-    AgentXmppChannel *ch = peer->GetBgpXmppPeer();
+    AgentXmppChannel *ch = peer->GetAgentXmppChannel();
     XmppChannelMock *xmpp_channel = static_cast<XmppChannelMock *>
         (ch->GetXmppChannel());
     AgentXmppChannel::HandleAgentXmppClientChannelEvent(ch, xmps::NOT_READY);
@@ -2257,11 +2260,13 @@ TEST_F(RouteTest, EcmpTest_1) {
     DBRequest req;
     req.oper = DBRequest::DB_ENTRY_ADD_CHANGE;
 
+    MacAddress vm_mac = MacAddress::FromString("00:00:01:01:01:10");
     MplsLabelKey *key = new MplsLabelKey(MplsLabel::VPORT_NH, label);
     req.key.reset(key);
 
     MplsLabelData *data = new MplsLabelData("vnet1", false,
-                                            InterfaceNHFlags::INET4);
+                                            InterfaceNHFlags::INET4,
+                                            vm_mac);
     req.data.reset(data);
 
     agent->mpls_table()->Enqueue(&req);
@@ -2282,6 +2287,72 @@ TEST_F(RouteTest, EcmpTest_1) {
     CompositeNHKey comp_key(Composite::ECMP, true, comp_nh_list, vrf_name_);
     EXPECT_FALSE(FindNH(&comp_key));
     DeleteBgpPeer(peer);
+    client->WaitForIdle();
+}
+
+TEST_F(RouteTest, fip_evpn_route_local) {
+    struct PortInfo input[] = {
+        {"vnet1", 1, "1.1.1.10", "00:00:01:01:01:10", 1, 1},
+    };
+
+    client->Reset();
+    //Creation
+    CreateVmportFIpEnv(input, 1);
+    client->WaitForIdle();
+    //Create floating IP pool
+    AddFloatingIpPool("fip-pool1", 1);
+    AddFloatingIp("fip1", 1, "2.2.2.10");
+    AddLink("floating-ip", "fip1", "floating-ip-pool", "fip-pool1");
+    AddLink("floating-ip-pool", "fip-pool1", "virtual-network",
+            "default-project:vn1");
+
+    //Associate vnet1 with floating IP
+    AddLink("virtual-machine-interface", "vnet1", "floating-ip", "fip1");
+    client->WaitForIdle();
+
+    //Add a peer
+    BgpPeer *bgp_peer_ptr = CreateBgpPeer(Ip4Address(1), "BGP Peer1");
+    boost::shared_ptr<BgpPeer> bgp_peer =
+        bgp_peer_ptr->GetAgentXmppChannel()->bgp_peer_id_ref();
+    client->WaitForIdle();
+
+    //Search our evpn route
+    EvpnRouteEntry *rt = EvpnRouteGet("default-project:vn1:vn1",
+                                      MacAddress::FromString(input[0].mac),
+                                      Ip4Address::from_string("2.2.2.10"), 0);
+    EXPECT_TRUE(rt != NULL);
+    AgentPath *path = rt->FindLocalVmPortPath();
+    EXPECT_TRUE(path != NULL);
+    EXPECT_TRUE(rt->GetActivePath() == path);
+    EXPECT_TRUE(rt->GetActiveNextHop()->GetType() == NextHop::L2_RECEIVE);
+
+    //Reflect CN route and see if its added.
+    stringstream ss_node;
+    autogen::EnetItemType item;
+    SecurityGroupList sg;
+
+    item.entry.nlri.af = BgpAf::L2Vpn;
+    item.entry.nlri.safi = BgpAf::Enet;
+    item.entry.nlri.address="2.2.2.10/32";
+    item.entry.nlri.ethernet_tag = 0;
+    autogen::EnetNextHopType nh;
+    nh.af = Address::INET;
+    nh.address = agent_->router_ip_ptr()->to_string();
+    nh.label = rt->GetActiveLabel();
+    item.entry.next_hops.next_hop.push_back(nh);
+    item.entry.med = 0;
+
+
+    bgp_peer_ptr->GetAgentXmppChannel()->AddEvpnRoute("default-project:vn1:vn1",
+                                                 "00:00:01:01:01:10",
+                                                 &item);
+    client->WaitForIdle();
+    EXPECT_TRUE(rt->GetActivePath() != path);
+
+    client->WaitForIdle();
+    DeleteVmportFIpEnv(input, 1, true);
+    client->WaitForIdle();
+    DeleteBgpPeer(bgp_peer.get());
     client->WaitForIdle();
 }
 

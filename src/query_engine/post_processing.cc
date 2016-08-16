@@ -456,6 +456,58 @@ query_status_t PostProcessingQuery::process_query() {
                                 and_check = false;
                               }
                             break;
+                        case LEQ:
+                            if (iter->second.which() ==
+                                QEOpServerProxy::UINT64) {
+                                uint64_t filter_val;
+                                stringToInteger(filter_and[k].value,
+                                                filter_val);
+                                uint64_t col_val =
+                                    boost::get<uint64_t>(iter->second);
+                                if (col_val > filter_val) {
+                                    and_check = false;
+                                }
+                            } else if (iter->second.which() ==
+                                       QEOpServerProxy::DOUBLE) {
+                                double filter_val;
+                                stringToInteger(filter_and[k].value,
+                                                filter_val);
+                                double col_val =
+                                    boost::get<double>(iter->second);
+                                if (col_val > filter_val) {
+                                    and_check = false;
+                                }
+                            }
+                            break;
+                        case GEQ:
+                            if (iter->second.which() ==
+                                QEOpServerProxy::UINT64) {
+                                uint64_t filter_val;
+                                stringToInteger(filter_and[k].value,
+                                                filter_val);
+                                uint64_t col_val =
+                                    boost::get<uint64_t>(iter->second);
+                                if (col_val < filter_val) {
+                                    and_check = false;
+                                }
+                            } else if (iter->second.which() ==
+                                       QEOpServerProxy::DOUBLE) {
+                                double filter_val;
+                                stringToInteger(filter_and[k].value,
+                                                filter_val);
+                                double col_val =
+                                    boost::get<double>(iter->second);
+                                if (col_val < filter_val) {
+                                    and_check = false;
+                                }
+                            }
+                            break;
+                        case REGEX_MATCH:
+                            if (!boost::regex_match(vstream.str(),
+                                                    filter_and[k].match_e)) {
+                                and_check = false;
+                            }
+                            break;
                         default:
                             // upsupported filter operation
                             QE_TRACE(DEBUG, "Unsupported filter operation " << filter_and[k].op);
@@ -607,6 +659,11 @@ query_status_t PostProcessingQuery::process_query() {
         if (raw_result->size() > (size_t)limit) {
             raw_result->resize(limit);
         }
+	if (mresult_->size() > (size_t)limit) {
+	    MapBufT::iterator it = mresult_->begin();
+	    std::advance(it, limit);
+	    mresult_->erase(it, mresult_->end());
+	}
     }
 
     if (IS_TRACE_ENABLED(POSTPROCESS_RESULT_TRACE))

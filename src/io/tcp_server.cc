@@ -2,12 +2,13 @@
  * Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
  */
 
-#include "tcp_server.h"
+#include "io/tcp_server.h"
+
+#include <errno.h>
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/placeholders.hpp>
 #include <boost/bind.hpp>
-#include <errno.h>
 
 #include "base/logging.h"
 #include "io/event_manager.h"
@@ -15,8 +16,15 @@
 #include "io/io_log.h"
 #include "io/io_utils.h"
 
-using namespace boost::asio::ip;
-using namespace std;
+using boost::asio::placeholders::error;
+using boost::asio::socket_base;
+using boost::bind;
+using boost::system::error_code;
+
+using boost::asio::ip::tcp;
+using boost::asio::socket_base;
+using std::ostringstream;
+using std::string;
 
 TcpServer::TcpServer(EventManager *evm)
     : evm_(evm), socket_open_failure_(false) {
@@ -54,7 +62,7 @@ bool TcpServer::Initialize(unsigned short port) {
     }
 
     tcp::endpoint localaddr(tcp::v4(), port);
-    boost::system::error_code ec;
+    error_code ec;
     acceptor_->open(localaddr.protocol(), ec);
     if (ec) {
         TCP_SERVER_LOG_ERROR(this, TCP_DIR_NA, "TCP open: " << ec.message());
@@ -62,7 +70,7 @@ bool TcpServer::Initialize(unsigned short port) {
         return false;
     }
 
-    acceptor_->set_option(boost::asio::socket_base::reuse_address(true), ec);
+    acceptor_->set_option(socket_base::reuse_address(true), ec);
     if (ec) {
         TCP_SERVER_LOG_ERROR(this, TCP_DIR_NA, "TCP reuse_address: "
                                                    << ec.message());
@@ -91,7 +99,7 @@ bool TcpServer::Initialize(unsigned short port) {
     //
     SetName(local_endpoint);
 
-    acceptor_->listen(boost::asio::socket_base::max_connections, ec);
+    acceptor_->listen(socket_base::max_connections, ec);
     if (ec) {
         TCP_SERVER_LOG_ERROR(this, TCP_DIR_NA, "TCP listen(" << port << "): "
                                                    << ec.message());
@@ -107,7 +115,7 @@ bool TcpServer::Initialize(unsigned short port) {
 
 void TcpServer::Shutdown() {
     tbb::mutex::scoped_lock lock(mutex_);
-    boost::system::error_code ec;
+    error_code ec;
 
     if (acceptor_) {
         acceptor_->close(ec);
@@ -215,8 +223,8 @@ void TcpServer::AsyncAccept() {
     }
     set_accept_socket();
     acceptor_->async_accept(*accept_socket(),
-        boost::bind(&TcpServer::AcceptHandlerInternal, this,
-            TcpServerPtr(this), boost::asio::placeholders::error));
+        bind(&TcpServer::AcceptHandlerInternal, this,
+            TcpServerPtr(this), error));
 }
 
 int TcpServer::GetPort() const {
@@ -224,7 +232,7 @@ int TcpServer::GetPort() const {
     if (acceptor_.get() == NULL) {
         return -1;
     }
-    boost::system::error_code ec;
+    error_code ec;
     tcp::endpoint ep = acceptor_->local_endpoint(ec);
     if (ec) {
         return -1;
@@ -239,11 +247,11 @@ bool TcpServer::HasSessions() const {
 
 bool TcpServer::HasSessionReadAvailable() const {
     tbb::mutex::scoped_lock lock(mutex_);
-    boost::system::error_code error;
+    error_code error;
     if (accept_socket()->available(error) > 0) {
         return  true;
     }
-    for (SessionMap::const_iterator iter = session_map_.begin(); 
+    for (SessionMap::const_iterator iter = session_map_.begin();
          iter != session_map_.end();
          ++iter) {
         if (iter->second->socket()->available(error) > 0) {
@@ -258,7 +266,7 @@ TcpServer::Endpoint TcpServer::LocalEndpoint() const {
     if (acceptor_.get() == NULL) {
         return Endpoint();
     }
-    boost::system::error_code ec;
+    error_code ec;
     Endpoint local = acceptor_->local_endpoint(ec);
     if (ec) {
         return Endpoint();
@@ -302,9 +310,9 @@ bool TcpServer::AcceptSession(TcpSession *session) {
 // via AsyncAccept() in order to process future accept calls
 //
 void TcpServer::AcceptHandlerInternal(TcpServerPtr server,
-        const boost::system::error_code& error) {
+        const error_code& error) {
     tcp::endpoint remote;
-    boost::system::error_code ec;
+    error_code ec;
     TcpSessionPtr session;
     bool need_close = false;
 
@@ -352,7 +360,7 @@ done:
     AsyncAccept();
 }
 
-void TcpServer::AcceptHandlerComplete(TcpSessionPtr &session) {
+void TcpServer::AcceptHandlerComplete(TcpSessionPtr session) {
     tcp::endpoint remote = session->remote_endpoint();
     {
         tbb::mutex::scoped_lock lock(mutex_);
@@ -368,7 +376,7 @@ void TcpServer::AcceptHandlerComplete(TcpSessionPtr &session) {
                                      "Rejected session from "
                                          << remote.address().to_string()
                                          << ":" << remote.port());
-            boost::system::error_code ec;
+            error_code ec;
             session->CloseInternal(ec, false, false);
             return;
         }
@@ -387,7 +395,7 @@ TcpSession *TcpServer::GetSession(Endpoint remote) {
 }
 
 void TcpServer::ConnectHandler(TcpServerPtr server, TcpSessionPtr session,
-                               const boost::system::error_code &error) {
+                               const error_code &error) {
     if (error) {
         TCP_SERVER_LOG_UT_DEBUG(server, TCP_DIR_OUT,
                                 "Connect failure: " << error.message());
@@ -398,8 +406,8 @@ void TcpServer::ConnectHandler(TcpServerPtr server, TcpSessionPtr session,
     ConnectHandlerComplete(session);
 }
 
-void TcpServer::ConnectHandlerComplete(TcpSessionPtr &session) {
-    boost::system::error_code ec;
+void TcpServer::ConnectHandlerComplete(TcpSessionPtr session) {
+    error_code ec;
     Endpoint remote = session->socket()->remote_endpoint(ec);
     if (ec) {
         TCP_SERVER_LOG_INFO(this, TCP_DIR_OUT,
@@ -425,12 +433,12 @@ void TcpServer::Connect(TcpSession *session, Endpoint remote) {
     assert(session->refcount_);
     Socket *socket = session->socket();
     socket->async_connect(remote,
-        boost::bind(&TcpServer::ConnectHandler, this, TcpServerPtr(this),
-                    TcpSessionPtr(session), boost::asio::placeholders::error));
+        bind(&TcpServer::ConnectHandler, this, TcpServerPtr(this),
+                    TcpSessionPtr(session), error));
 }
 
 int TcpServer::SetMd5SocketOption(int fd, uint32_t peer_ip,
-                                  const std::string &md5_password) {
+                                  const string &md5_password) {
     assert(md5_password.size() <= TCP_MD5SIG_MAXKEYLEN);
     if (!peer_ip) {
         TCP_SERVER_LOG_ERROR(this, TCP_DIR_NA, "Invalid peer IP");
@@ -465,7 +473,7 @@ int TcpServer::SetMd5SocketOption(int fd, uint32_t peer_ip,
 }
 
 int TcpServer::SetListenSocketMd5Option(uint32_t peer_ip,
-                                        const std::string &md5_password) {
+                                        const string &md5_password) {
     int retval = 0;
     if (acceptor_) {
         retval = SetMd5SocketOption(acceptor_->native_handle(), peer_ip,
@@ -474,11 +482,11 @@ int TcpServer::SetListenSocketMd5Option(uint32_t peer_ip,
     return retval;
 }
 
-void TcpServer::GetRxSocketStats(SocketIOStats &socket_stats) const {
+void TcpServer::GetRxSocketStats(SocketIOStats *socket_stats) const {
     stats_.GetRxStats(socket_stats);
 }
 
-void TcpServer::GetTxSocketStats(SocketIOStats &socket_stats) const {
+void TcpServer::GetTxSocketStats(SocketIOStats *socket_stats) const {
     stats_.GetTxStats(socket_stats);
 }
 

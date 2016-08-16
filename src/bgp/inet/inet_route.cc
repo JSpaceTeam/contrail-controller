@@ -86,7 +86,9 @@ int InetRoute::CompareTo(const Route &rhs) const {
 }
 
 string InetRoute::ToString() const {
-    return prefix_.ToString();
+    if (prefix_str_.empty())
+        prefix_str_ = prefix_.ToString();
+    return prefix_str_;
 }
 
 // Check whether 'this' is more specific than rhs.

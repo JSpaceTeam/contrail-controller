@@ -167,14 +167,15 @@ void MplsLabel::CreateInetInterfaceLabel(const Agent *agent,
                                          uint32_t label,
                                          const string &ifname,
                                          bool policy, 
-                                         InterfaceNHFlags::Type type) {
+                                         InterfaceNHFlags::Type type,
+                                         const MacAddress &mac) {
     DBRequest req;
     req.oper = DBRequest::DB_ENTRY_ADD_CHANGE;
 
     MplsLabelKey *key = new MplsLabelKey(MplsLabel::VPORT_NH, label);
     req.key.reset(key);
 
-    MplsLabelData *data = new MplsLabelData(ifname, policy, type);
+    MplsLabelData *data = new MplsLabelData(ifname, policy, type, mac);
     req.data.reset(data);
 
     agent->mpls_table()->Process(req);
@@ -185,14 +186,15 @@ void MplsLabel::CreateVPortLabel(const Agent *agent,
                                  uint32_t label,
                                  const uuid &intf_uuid,
                                  bool policy,
-                                 InterfaceNHFlags::Type type) {
+                                 InterfaceNHFlags::Type type,
+                                 const MacAddress &mac) {
     DBRequest req;
     req.oper = DBRequest::DB_ENTRY_ADD_CHANGE;
 
     MplsLabelKey *key = new MplsLabelKey(MplsLabel::VPORT_NH, label);
     req.key.reset(key);
 
-    MplsLabelData *data = new MplsLabelData(intf_uuid, policy, type);
+    MplsLabelData *data = new MplsLabelData(intf_uuid, policy, type, mac);
     req.data.reset(data);
 
     agent->mpls_table()->Process(req);
@@ -200,7 +202,7 @@ void MplsLabel::CreateVPortLabel(const Agent *agent,
 }
 
 void MplsLabel::CreateEcmpLabel(const Agent *agent,
-                                uint32_t label, COMPOSITETYPE type,
+                                uint32_t label, COMPOSITETYPE type, bool policy,
                                 ComponentNHKeyList &component_nh_key_list,
                                 const std::string vrf_name) {
     DBRequest req;
@@ -209,7 +211,7 @@ void MplsLabel::CreateEcmpLabel(const Agent *agent,
     MplsLabelKey *key = new MplsLabelKey(MplsLabel::VPORT_NH, label);
     req.key.reset(key);
 
-    MplsLabelData *data = new MplsLabelData(type, true, component_nh_key_list,
+    MplsLabelData *data = new MplsLabelData(type, policy, component_nh_key_list,
                                             vrf_name);
     req.data.reset(data);
 

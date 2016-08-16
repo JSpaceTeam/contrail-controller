@@ -120,7 +120,7 @@ auto_ptr<DBEntry> AgentRouteTable::AllocEntry(const DBRequestKey *k) const {
 // Delete all paths from BGP Peer. Delete route if no path left
 bool AgentRouteTable::DeleteAllBgpPath(DBTablePartBase *part,
                                        DBEntryBase *entry) {
-    AgentRoute *route = static_cast<InetUnicastRouteEntry *>(entry);
+    AgentRoute *route = static_cast<AgentRoute *>(entry);
     if (route && !route->IsDeleted()) {
         std::list<AgentPath *> to_be_deleted_path_list;
         for(Route::PathList::iterator it = route->GetPathList().begin();
@@ -147,7 +147,7 @@ bool AgentRouteTable::DeleteAllBgpPath(DBTablePartBase *part,
             DeletePathFromPeer(part, route, path);
             to_be_deleted_path_list_it++;
         }
-        route->SquashStalePaths(NULL);
+        SquashStalePaths(route, NULL);
     }
     return true;
 }
@@ -239,6 +239,7 @@ void AgentRouteTable::DeletePathFromPeer(DBTablePartBase *part,
         return;
     }
 
+    bool deleted_path_was_active_path = (rt->GetActivePath() == path);
     RouteInfo rt_info;
     rt->FillTrace(rt_info, AgentRoute::DELETE_PATH, path);
     OPER_TRACE_ROUTE(Route, rt_info);
@@ -256,7 +257,10 @@ void AgentRouteTable::DeletePathFromPeer(DBTablePartBase *part,
     // For active peers reflector will remove the route but for 
     // non active peers explicitly squash the paths.
     if (peer && (peer->GetType() != Peer::BGP_PEER)) {
-        rt->SquashStalePaths(NULL);
+        path = rt->FindStalePath();
+        if (path) {
+            rt->RemovePath(path);
+        }
     }
 
     // Delete route if no more paths 
@@ -273,7 +277,7 @@ void AgentRouteTable::DeletePathFromPeer(DBTablePartBase *part,
     } else {
         // Notify deletion of path. 
         part->Notify(rt);
-        UpdateDependants(rt);
+        UpdateDerivedRoutes(rt, NULL, deleted_path_was_active_path);
     }
 }
 
@@ -334,22 +338,17 @@ void AgentRouteTable::Input(DBTablePartition *part, DBClient *client,
 
     AgentPath *path = NULL;
     AgentRoute *rt = static_cast<AgentRoute *>(part->Find(key));
-
-    if (data) {
-        if (data->IsPeerValid(key) == false) {
+    if (req->oper == DBRequest::DB_ENTRY_ADD_CHANGE) {
+        if (key->peer()->SkipAddChangeRequest()) {
             AGENT_ROUTE_LOG(this,
-                            "Route operation ignored. Invalid/Inactive Peer ",
+                            "Route operation ignored. Deleted Peer ",
                             key->ToString(), vrf_name(),
-                            data->InvalidPeerMsg(key));
+                            key->peer()->GetName());
             return;
         }
-    } else {
-        assert(key->peer()->NeedValidityCheck() == false);
-    }
 
-    if (req->oper == DBRequest::DB_ENTRY_ADD_CHANGE) {
-        // Ignore ADD_CHANGE if received on deleted VRF
-        if(vrf->IsDeleted()) {
+        if (vrf->IsDeleted() &&
+            vrf->allow_route_add_on_deleted_vrf() == false) {
             return;
         }
 
@@ -480,7 +479,9 @@ void AgentRouteTable::Input(DBTablePartition *part, DBClient *client,
         part->Notify(rt);
         rt->UpdateDependantRoutes();
         rt->ResyncTunnelNextHop();
-        UpdateDependants(rt);
+        //Since newly added path became active path, send path with path_changed
+        //flag as true. Path can be NULL for route resync requests.
+        UpdateDerivedRoutes(rt, path, (path == rt->GetActivePath()));
     }
 }
 
@@ -501,6 +502,9 @@ void AgentRouteTable::ManagedDelete() {
 void AgentRouteTable::RetryDelete() {
     if (!deleter()->IsDeleted()) {
         return;
+    }
+    if (empty()) {
+        vrf_entry()->RetryDelete();
     }
     deleter()->RetryDelete();
 }
@@ -553,6 +557,23 @@ void AgentRouteTable::NotifyEntry(AgentRoute *e) {
     DBTablePartBase *tpart =
         static_cast<DBTablePartition *>(GetTablePartition(e));
     tpart->Notify(e);
+}
+
+void AgentRouteTable::SquashStalePaths(AgentRoute *route,
+                                       const AgentPath *exception_path) {
+    Route::PathList::iterator it = route->GetPathList().begin();
+    AgentPath *path = NULL;
+    while (it != route->GetPathList().end()) {
+        path = static_cast<AgentPath *>(it.operator->());
+        // Delete all stale path except for the path sent(exception_path)
+        if (path->is_stale() && (path != exception_path)) {
+            // Since we squash stales, at any point of time there should be only
+            // one stale other than exception_path in list
+            DeletePathFromPeer(route->get_table_partition(), route, path);
+            return;
+        }
+        it++;
+    }
 }
 
 uint32_t AgentRoute::GetActiveLabel() const {
@@ -618,6 +639,18 @@ AgentPath *AgentRoute::FindLocalVmPortPath() const {
     return NULL;
 }
 
+AgentPath *AgentRoute::FindStalePath() const {
+    Route::PathList::const_iterator it = GetPathList().begin();
+    while (it != GetPathList().end()) {
+        const AgentPath *path = static_cast<const AgentPath *>(it.operator->());
+        if (path->is_stale()) {
+            return const_cast<AgentPath *>(path);
+        }
+        it++;
+    }
+    return NULL;
+}
+
 void AgentRoute::DeletePathInternal(AgentPath *path) {
     AgentRouteTable *table = static_cast<AgentRouteTable *>(get_table());
     table->DeletePathFromPeer(get_table_partition(), this, path);
@@ -653,25 +686,10 @@ AgentPath *AgentRoute::FindPath(const Peer *peer) const {
     return NULL;
 }
 
-void AgentRoute::SquashStalePaths(const AgentPath *exception_path) {
-    Route::PathList::iterator it = GetPathList().begin();
-
-    while (it != GetPathList().end()) {
-        // Delete all stale path except for the path sent(exception_path)
-        AgentPath *path = static_cast<AgentPath *>(it.operator->());
-        if (path->is_stale() && (path != exception_path)) {
-            // Since we squash stales, at any point of time there should be only
-            // one stale other than exception_path in list
-            RemovePath(path);
-            return;
-        }
-        it++;
-    }
-}
-
 // First path in list is always treated as active path.
 const AgentPath *AgentRoute::GetActivePath() const {
-    return static_cast<const AgentPath *>(front());
+    const AgentPath *path = static_cast<const AgentPath *>(front());
+    return (path ? path->UsablePath() : NULL);
 }
 
 const NextHop *AgentRoute::GetActiveNextHop() const {
@@ -770,33 +788,6 @@ bool AgentRoute::WaitForTraffic() const {
     return false;
 }
 
-void AgentRouteTable::StalePathFromPeer(DBTablePartBase *part, AgentRoute *rt,
-                                        const Peer *peer) {
-    if (rt == NULL) {
-        return;
-    }
-
-    // Find path for the peer
-    AgentPath *path = rt->FindPath(peer);
-
-    RouteInfo rt_info;
-    rt->FillTrace(rt_info, AgentRoute::STALE_PATH, path);
-    OPER_TRACE_ROUTE(Route, rt_info);
-
-    if (path == NULL) {
-        return;
-    }
-
-    if (rt && (rt->IsDeleted() == false)) {
-        path->set_is_stale(true);
-        // Remove all stale path except the path received
-        rt->SquashStalePaths(path);
-        rt->GetPathList().sort(&AgentRouteTable::PathSelection);
-        rt->Sync();
-        part->Notify(rt);
-    }
-}
-
 bool AgentRoute::ProcessPath(Agent *agent, DBTablePartition *part,
                              AgentPath *path, AgentRouteData *data) {
     bool ret = data->AddChangePath(agent, path, this);
@@ -804,16 +795,6 @@ bool AgentRoute::ProcessPath(Agent *agent, DBTablePartition *part,
         ret = true;
     }
     return ret;
-}
-
-bool AgentRouteData::IsPeerValid(const AgentRouteKey *key) const {
-    const Peer *peer = key->peer();
-    assert(peer->NeedValidityCheck() == false);
-    return true;
-}
-
-std::string AgentRouteData::InvalidPeerMsg(const AgentRouteKey *key) const {
-        return "AgentRouteData: Unknown Reason";
 }
 
 AgentPath *AgentRouteData::CreateAgentPath(const Peer *peer,

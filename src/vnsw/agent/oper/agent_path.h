@@ -167,6 +167,13 @@ public:
 
     virtual const NextHop *ComputeNextHop(Agent *agent) const;
     virtual bool IsLess(const AgentPath &right) const;
+    //UsablePath
+    //This happens when a route is dependant on other route to get the path and
+    //in these cases active path of other route will be usable path.
+    //If there is no dependant route then it returns self.
+    virtual const AgentPath *UsablePath() const;
+    //Syncs path parameters. Parent route is also used to pick params.
+    virtual bool Sync(AgentRoute *sync_route);
 
     const SecurityGroupList &sg_list() const {return sg_list_;}
     const CommunityList &communities() const {return communities_;}
@@ -181,12 +188,12 @@ public:
     void GetDestinationVnList(std::vector<std::string> *vn_list) const;
     uint32_t GetActiveLabel() const;
     NextHop *nexthop() const;
-    const Peer *peer() const {return peer_;}
+    const Peer *peer() const {return peer_.get();}
     uint32_t label() const {return label_;}
     uint32_t vxlan_id() const {return vxlan_id_;}
     TunnelType::Type tunnel_type() const {return tunnel_type_;}
     uint32_t tunnel_bmap() const {return tunnel_bmap_;}
-    const Ip4Address& gw_ip() const {return gw_ip_;}
+    const IpAddress& gw_ip() const {return gw_ip_;}
     const std::string &vrf_name() const {return vrf_name_;}
     bool force_policy() const {return force_policy_;}
     const bool unresolved() const {return unresolved_;}
@@ -203,7 +210,7 @@ public:
     void set_label(uint32_t label) {label_ = label;}
     void set_dest_vn_list(const VnListType &dest_vn_list) {dest_vn_list_ = dest_vn_list;}
     void set_unresolved(bool unresolved) {unresolved_ = unresolved;};
-    void set_gw_ip(const Ip4Address &addr) {gw_ip_ = addr;}
+    void set_gw_ip(const IpAddress &addr) {gw_ip_ = addr;}
     void set_force_policy(bool force_policy) {force_policy_ = force_policy;}
     void set_vrf_name(const std::string &vrf_name) {vrf_name_ = vrf_name;}
     void set_tunnel_bmap(TunnelType::TypeBmap bmap) {tunnel_bmap_ = bmap;}
@@ -224,9 +231,10 @@ public:
     void set_local_ecmp_mpls_label(MplsLabel *mpls);
     bool dest_vn_match(const std::string &vn) const;
     const MplsLabel* local_ecmp_mpls_label() const;
+    void ClearDependantRoute() {dependant_rt_.clear();}
     void ResetDependantRoute(AgentRoute *rt) {dependant_rt_.reset(rt);}
+    const AgentRoute *dependant_rt() const {return dependant_rt_.get();}
     bool ChangeNH(Agent *agent, NextHop *nh);
-    bool Sync(AgentRoute *sync_route); //vm_path sync
     void SyncRoute(bool sync) {sync_ = sync;}
     bool RouteNeedsSync() {return sync_;}
     uint32_t GetTunnelBmap() const;
@@ -247,7 +255,8 @@ public:
     CompositeNHKey* composite_nh_key() {
         return composite_nh_key_.get();
     }
-    bool ReorderCompositeNH(Agent *agent, CompositeNHKey *nh);
+    bool ReorderCompositeNH(Agent *agent, CompositeNHKey *nh,
+                            bool &comp_nh_policy);
     bool ChangeCompositeNH(Agent *agent, CompositeNHKey *nh);
     // Get nexthop-ip address to be used for path
     const Ip4Address *NexthopIp(Agent *agent) const;
@@ -278,8 +287,16 @@ public:
         ecmp_load_balance_ = ecmp_load_balance;
     }
 
+    bool is_local() const {
+        return is_local_;
+    }
+
+    void set_is_local(bool is_local) {
+        is_local_ = is_local;
+    }
+
 private:
-    const Peer *peer_;
+    PeerConstPtr peer_;
     // Nexthop for route. Not used for gateway routes
     NextHopRef nh_;
     // MPLS Label sent by control-node
@@ -313,7 +330,7 @@ private:
     // VRF for gw_ip_ in gateway route
     std::string vrf_name_;
     // gateway for the route
-    Ip4Address gw_ip_;
+    IpAddress gw_ip_;
     // gateway route is unresolved if,
     //    - no route present for gw_ip_
     //    - ARP not resolved for gw_ip_
@@ -344,6 +361,9 @@ private:
     // by taking only one of the nexthop from the path
     bool ecmp_suppressed_;
     EcmpLoadBalance ecmp_load_balance_;
+    // if the path is marked local do no export it to BGP and do not
+    // program it to vrouter
+    bool is_local_;
     DISALLOW_COPY_AND_ASSIGN(AgentPath);
 };
 
@@ -450,7 +470,7 @@ public:
                  const CommunityList &communities,
                  const PathPreference &path_preference,
                  const IpAddress &subnet_service_ip,
-                 const EcmpLoadBalance &ecmp_load_balance) :
+                 const EcmpLoadBalance &ecmp_load_balance, bool is_local) :
         AgentRouteData(false), intf_(intf), mpls_label_(mpls_label),
         vxlan_id_(vxlan_id), force_policy_(force_policy),
         dest_vn_list_(vn_list), proxy_arp_(false), sync_route_(false),
@@ -458,7 +478,7 @@ public:
         tunnel_bmap_(TunnelType::MplsType()),
         path_preference_(path_preference),
         subnet_service_ip_(subnet_service_ip),
-        ecmp_load_balance_(ecmp_load_balance) {
+        ecmp_load_balance_(ecmp_load_balance), is_local_(is_local) {
     }
     virtual ~LocalVmRoute() { }
     void DisableProxyArp() {proxy_arp_ = false;}
@@ -491,13 +511,14 @@ private:
     PathPreference path_preference_;
     IpAddress subnet_service_ip_;
     EcmpLoadBalance ecmp_load_balance_;
+    bool is_local_;
     DISALLOW_COPY_AND_ASSIGN(LocalVmRoute);
 };
 
 class InetInterfaceRoute : public AgentRouteData {
 public:
     InetInterfaceRoute(const InetInterfaceKey &intf, uint32_t label,
-                       int tunnel_bmap, const VnListType &dest_vn_list) :
+                       int tunnel_bmap, const VnListType &dest_vn_list):
         AgentRouteData(false), intf_(intf), label_(label),
         tunnel_bmap_(tunnel_bmap), dest_vn_list_(dest_vn_list) {
     }
@@ -517,12 +538,15 @@ private:
 
 class HostRoute : public AgentRouteData {
 public:
-    HostRoute(const PacketInterfaceKey &intf, const std::string &dest_vn_name) :
+    HostRoute(const PacketInterfaceKey &intf, const std::string &dest_vn_name):
         AgentRouteData(false), intf_(intf), dest_vn_name_(dest_vn_name),
-        proxy_arp_(false) {
+        proxy_arp_(false), relaxed_policy_(false) {
     }
     virtual ~HostRoute() { }
     void set_proxy_arp() {proxy_arp_ = true;}
+    void set_relaxed_policy(bool relaxed_policy) {
+        relaxed_policy_ = relaxed_policy;
+    }
     virtual bool AddChangePath(Agent *agent, AgentPath *path,
                                const AgentRoute *rt);
     virtual std::string ToString() const {return "host";}
@@ -532,6 +556,7 @@ private:
     PacketInterfaceKey intf_;
     std::string dest_vn_name_;
     bool proxy_arp_;
+    bool relaxed_policy_;
     DISALLOW_COPY_AND_ASSIGN(HostRoute);
 };
 
@@ -594,7 +619,6 @@ public:
     virtual bool AddChangePath(Agent *agent, AgentPath *path,
                                const AgentRoute *rt);
     virtual std::string ToString() const {return "multicast";}
-    virtual bool UpdateRoute(AgentRoute *rt);
     uint32_t vxlan_id() const {return vxlan_id_;}
     COMPOSITETYPE comp_nh_type() const {return comp_nh_type_;}
     static bool CopyPathParameters(Agent *agent,
@@ -681,7 +705,7 @@ private:
 
 class Inet4UnicastGatewayRoute : public AgentRouteData {
 public:
-    Inet4UnicastGatewayRoute(const Ip4Address &gw_ip,
+    Inet4UnicastGatewayRoute(const IpAddress &gw_ip,
                              const std::string &vrf_name,
                              const std::string &vn_name,
                              uint32_t label, const SecurityGroupList &sg,
@@ -695,7 +719,7 @@ public:
     virtual std::string ToString() const {return "gateway";}
 
 private:
-    Ip4Address gw_ip_;
+    IpAddress gw_ip_;
     std::string vrf_name_;
     std::string vn_name_;
     uint32_t mpls_label_;
@@ -783,4 +807,43 @@ private:
     DISALLOW_COPY_AND_ASSIGN(MacVmBindingPathData);
 };
 
+/*
+ * InetEvpnRoutePath/InetEvpnRouteData
+ *
+ * InetEvpnRoute is derived from evpn route.
+ * Installation of evpn route initiates addition of inet route as well.
+ * This is done inline and request contains parent evpn route.
+ * Nexthop derivation: NH is not picked from EVPN route for this path.
+ * LPM search is done on the inet route prefix and whatever is the supernet
+ * route, NH is picked from there. In case host route is available the path from
+ * same takes higher precedence than InetEvpnRoute path.
+ */
+class InetEvpnRoutePath : public AgentPath {
+public:
+    InetEvpnRoutePath(const Peer *peer, AgentRoute *rt);
+    virtual ~InetEvpnRoutePath() { }
+    virtual std::string ToString() const { return "InetEvpnRoutePath"; }
+    virtual const AgentPath *UsablePath() const;
+    virtual const NextHop *ComputeNextHop(Agent *agent) const;
+    //Syncs path parameters. Parent route is used for setting dependant rt.
+    virtual bool Sync(AgentRoute *sync_route);
+    bool SyncDependantRoute(const AgentRoute *sync_route);
+
+private:
+    DISALLOW_COPY_AND_ASSIGN(InetEvpnRoutePath);
+};
+
+class InetEvpnRouteData : public AgentRouteData {
+public:
+    InetEvpnRouteData() : AgentRouteData(false) {
+    }
+    virtual ~InetEvpnRouteData() { }
+    virtual AgentPath *CreateAgentPath(const Peer *peer, AgentRoute *rt) const;
+    virtual bool AddChangePath(Agent *agent, AgentPath *path,
+                               const AgentRoute *rt);
+    virtual std::string ToString() const {return "Derived Inet route from Evpn";}
+
+private:
+    DISALLOW_COPY_AND_ASSIGN(InetEvpnRouteData);
+};
 #endif // vnsw_agent_path_hpp

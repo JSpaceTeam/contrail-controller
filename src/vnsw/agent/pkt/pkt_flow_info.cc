@@ -143,19 +143,6 @@ static uint32_t NhToVrf(const NextHop *nh) {
     return vrf->vrf_id();
 }
 
-// FIXME : PERF - Copy NextHop instead of creating key and then entry
-static const NextHop* GetPolicyEnabledNH(NextHopTable *nh_table,
-                                         const NextHop *nh) {
-    if (nh->PolicyEnabled()) {
-        return nh;
-    }
-    DBEntryBase::KeyPtr key = nh->GetDBRequestKey();
-    NextHopKey *nh_key = static_cast<NextHopKey *>(key.get());
-    nh_key->SetPolicy(true);
-    return static_cast<const NextHop *>
-        (nh_table->FindActiveEntryNoLock(key.get()));
-}
-
 static const NextHop* GetPolicyDisabledNH(NextHopTable *nh_table,
                                           const NextHop *nh) {
     if (nh->PolicyEnabled() == false) {
@@ -234,7 +221,7 @@ static bool NhDecode(const NextHop *nh, const PktInfo *pkt, PktFlowInfo *info,
             }
             nh = comp_nh->GetNH(info->out_component_nh_idx);
             // TODO: Should we re-hash here?
-            if (nh->IsActive() == false) {
+            if (!nh || nh->IsActive() == false) {
                 return false;
             }
         }
@@ -252,6 +239,18 @@ static bool NhDecode(const NextHop *nh, const PktInfo *pkt, PktFlowInfo *info,
             //nexthop as reverse flow key
             out->nh_ = out->intf_->flow_key_nh()->id();
             out->vrf_ = static_cast<const InterfaceNH*>(nh)->GetVrf();
+            const VmInterface *vm_port =
+                dynamic_cast<const VmInterface *>(out->intf_);
+            if (vm_port != NULL) {
+                VrfEntry *alias_vrf = vm_port->GetAliasIpVrf(pkt->ip_daddr);
+                if (alias_vrf != NULL) {
+                    out->vrf_ = alias_vrf;
+                    // translate to alias ip vrf for destination, unless
+                    // overriden by translation due to NAT or ACL
+                    info->dest_vrf = alias_vrf->vrf_id();
+                    info->alias_ip_flow = true;
+                }
+            }
         } else if (out->intf_->type() == Interface::PACKET) {
             //Packet destined to pkt interface, packet originating
             //from pkt0 interface will use destination interface as key
@@ -302,7 +301,14 @@ static bool NhDecode(const NextHop *nh, const PktInfo *pkt, PktFlowInfo *info,
                     //use policy disabled interface
                     if (local_intf &&
                             local_intf->type() == Interface::VM_INTERFACE) {
-                        out->nh_ = GetPolicyEnabledNH(nh_table, local_nh)->id();
+                        if (local_nh->IsActive()) {
+                            out->nh_ = local_intf->flow_key_nh()->id();
+                        } else {
+                            LogError(pkt, "Invalid or Inactive ifindex");
+                            info->short_flow = true;
+                            info->short_flow_reason =
+                                FlowEntry::SHORT_UNAVIALABLE_INTERFACE;
+                        }
                     }
                 }
             } else {
@@ -518,7 +524,8 @@ static void SetInEcmpIndex(const PktInfo *pkt, PktFlowInfo *flow_info,
                 (agent->nexthop_table()->FindActiveEntryNoLock(&key));
         } else {
             InterfaceNH key(const_cast<VmInterface *>(vm_port), false,
-                            InterfaceNHFlags::INET4);
+                            InterfaceNHFlags::INET4,
+                            vm_port->vm_mac());
             component_nh_ptr = static_cast<NextHop *>
                 (agent->nexthop_table()->FindActiveEntryNoLock(&key));
             label = vm_port->label();
@@ -868,7 +875,15 @@ void PktFlowInfo::FloatingIpDNat(const PktInfo *pkt, PktControlInfo *in,
     UpdateRoute(&out->rt_, it->vrf_.get(), pkt->ip_daddr, pkt->dmac,
                 flow_dest_plen_map);
     out->vn_ = it->vn_.get();
-    dest_vrf = out->intf_->vrf()->vrf_id();
+    VrfEntry *alias_vrf = vm_port->GetAliasIpVrf(it->GetFixedIp(vm_port));
+    if (alias_vrf == NULL) {
+        dest_vrf = out->intf_->vrf()->vrf_id();
+    } else {
+        dest_vrf = alias_vrf->vrf_id();
+    }
+    if (VrfTranslate(pkt, in, out, pkt->ip_saddr, true) == false) {
+        return;
+    }
 
     // Translate the Dest-IP
     if (nat_done == false)
@@ -1002,7 +1017,7 @@ void PktFlowInfo::FloatingIpSNat(const PktInfo *pkt, PktControlInfo *in,
     }
 
     // Dest VRF for reverse flow is In-Port VRF
-    nat_dest_vrf = intf->vrf_id();
+    nat_dest_vrf = in->vrf_->vrf_id();
 
     flow_source_vrf = pkt->vrf;
     if (out->rt_) {
@@ -1110,6 +1125,19 @@ void PktFlowInfo::IngressProcess(const PktInfo *pkt, PktControlInfo *in,
         in->intf_->type() != Interface::INET) {
         LogError(pkt, "Unexpected packet on Non-VM interface");
         return;
+    }
+
+    const VmInterface *vm_port =
+        dynamic_cast<const VmInterface *>(in->intf_);
+    if (vm_port != NULL) {
+        VrfEntry *alias_vrf = vm_port->GetAliasIpVrf(pkt->ip_saddr);
+        if (alias_vrf != NULL) {
+            in->vrf_ = alias_vrf;
+            // translate to alias ip vrf for destination, unless overriden by
+            // translation due to NAT or ACL
+            dest_vrf = alias_vrf->vrf_id();
+            alias_ip_flow = true;
+        }
     }
 
     // We always expect route for source-ip for ingress flows.
@@ -1265,6 +1293,15 @@ void PktFlowInfo::EgressProcess(const PktInfo *pkt, PktControlInfo *in,
         if (vm_intf->IsFloatingIp(pkt->ip_daddr)) {
             pkt->l3_forwarding = true;
             l3_flow = true;
+        } else {
+            VrfEntry *alias_vrf = vm_intf->GetAliasIpVrf(pkt->ip_daddr);
+            if (alias_vrf != NULL) {
+                out->vrf_ = alias_vrf;
+                // translate to alias ip vrf for destination, unless overriden by
+                // translation due to NAT or ACL
+                dest_vrf = alias_vrf->vrf_id();
+                alias_ip_flow = true;
+            }
         }
     }
 
@@ -1372,6 +1409,13 @@ bool PktFlowInfo::Process(const PktInfo *pkt, PktControlInfo *in,
 
     in->intf_ = agent->interface_table()->FindInterface(pkt->agent_hdr.ifindex);
     out->nh_ = in->nh_ = pkt->agent_hdr.nh;
+
+    if (agent->tsn_enabled()) {
+        short_flow = true;
+        short_flow_reason = FlowEntry::SHORT_FLOW_ON_TSN;
+        return false;
+    }
+
     if (in->intf_ == NULL ||
         (pkt->l3_forwarding == true &&
          in->intf_->type() == Interface::VM_INTERFACE &&
@@ -1453,7 +1497,7 @@ bool PktFlowInfo::Process(const PktInfo *pkt, PktControlInfo *in,
     }
 
     if (out->rt_ && out->rt_->GetActiveNextHop() &&
-            out->rt_->GetActiveNextHop()->GetType() == NextHop::COMPOSITE) {
+        out->rt_->GetActiveNextHop()->GetType() == NextHop::COMPOSITE) {
         ecmp = true;
     }
 
@@ -1582,9 +1626,10 @@ void PktFlowInfo::LinkLocalPortBind(const PktInfo *pkt,
 
 void PktFlowInfo::UpdateEvictedFlowStats(const PktInfo *pkt) {
     Agent *agent = flow_table->agent();
-    FlowMgmtManager *mgr = agent->pkt()->flow_mgmt_manager();
     KSyncFlowIndexManager *imgr = agent->ksync()->ksync_flow_index_manager();
     FlowEntryPtr flow = imgr->FindByIndex(pkt->agent_hdr.cmd_param);
+    FlowMgmtManager *mgr = agent->pkt()->flow_mgmt_manager(
+                               flow_table->table_index());
 
     if (flow.get() && flow->deleted() == false) {
         mgr->FlowStatsUpdateEvent(flow.get(), pkt->agent_hdr.cmd_param_2,
@@ -1640,12 +1685,7 @@ void PktFlowInfo::Add(const PktInfo *pkt, PktControlInfo *in,
     }
 
     // Allocate reverse flow
-    if (in->intf_ == out->intf_) {
-        // we are trying to loopback to the same interface,
-        // this is not supported, mark the flow as short flow
-        short_flow = true;
-        short_flow_reason = FlowEntry::SHORT_IPV4_FWD_DIS;
-    } else if (nat_done) {
+    if (nat_done) {
         FlowKey rkey(out->nh_, nat_ip_daddr, nat_ip_saddr, pkt->ip_proto,
                      r_sport, r_dport);
         rflow = FlowEntry::Allocate(rkey, flow_table);

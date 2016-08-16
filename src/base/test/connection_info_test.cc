@@ -5,12 +5,7 @@
 #include "testing/gunit.h"
 
 #include <boost/system/error_code.hpp>
-
-#include <sandesh/sandesh_types.h>
-#include <sandesh/sandesh.h>
-
 #include "base/connection_info.h"
-#include "base/test/connection_info_test_types.h"
 #include "io/event_manager.h"
 
 using process::ConnectionStateManager;
@@ -21,17 +16,21 @@ using process::ConnectionStatus;
 using process::ConnectionType;
 using process::g_process_info_constants;
 using process::GetProcessStateCb;
+using process::ConnectionTypeName;
 
 class ConnectionInfoTest : public ::testing::Test {
  protected:
     static void SetUpTestCase() {
-        ConnectionStateManager<NodeStatusTestUVE, NodeStatusTest>::
+        std::vector<ConnectionTypeName> expected_connections = boost::assign::list_of
+         (ConnectionTypeName("Test", "Test1"))
+         (ConnectionTypeName("Test", "Test2"));
+        ConnectionStateManager::
             GetInstance()->Init(*evm_.io_service(), "Test",
             "ConnectionInfoTest", "0", boost::bind(
-            &process::GetProcessStateCb, _1, _2, _3, 2));
+            &process::GetProcessStateCb, _1, _2, _3, expected_connections), "ObjectTest");
     }
     static void TearDownTestCase() {
-        ConnectionStateManager<NodeStatusTestUVE, NodeStatusTest>::
+        ConnectionStateManager::
             GetInstance()->Shutdown();
     }
     void PopulateConnInfo(ConnectionInfo *cinfo, const std::string &name,
@@ -61,7 +60,7 @@ class ConnectionInfoTest : public ::testing::Test {
         ASSERT_EQ(0, ec.value());
         process::Endpoint ep(addr, 0);
         // Set callback
-        ConnectionStateManager<NodeStatusTestUVE, NodeStatusTest>::
+        ConnectionStateManager::
             GetInstance()->SetProcessStateCb(boost::bind(
                 &ConnectionInfoTest::VerifyProcessStateCb, this, _1, _2, _3,
                 vcinfo));
@@ -85,7 +84,7 @@ class ConnectionInfoTest : public ::testing::Test {
     void DeleteConnState(const std::string &name,
         const std::vector<ConnectionInfo> &vcinfo) {
         // Set callback
-        ConnectionStateManager<NodeStatusTestUVE, NodeStatusTest>::
+        ConnectionStateManager::
             GetInstance()->SetProcessStateCb(boost::bind(
                 &ConnectionInfoTest::VerifyProcessStateCb, this, _1, _2, _3,
                 vcinfo));
@@ -121,23 +120,41 @@ TEST_F(ConnectionInfoTest, Callback) {
     UpdateConnInfo("Test1", ConnectionStatus::UP, "Test1 UP", &vcinfo);
     ProcessState::type pstate;
     std::string message1;
-    GetProcessStateCb(vcinfo, pstate, message1, 1);
+    std::vector<ConnectionTypeName> expected_connections = boost::assign::list_of
+         (ConnectionTypeName("Test", "Test1"));
+    // Expected connection and conn_info are same
+    GetProcessStateCb(vcinfo, pstate, message1, expected_connections);
     EXPECT_EQ(ProcessState::FUNCTIONAL, pstate);
     EXPECT_TRUE(message1.empty());
     std::string message2;
-    GetProcessStateCb(vcinfo, pstate, message2, 2);
+    expected_connections.push_back(ConnectionTypeName("Test","Test2"));
+    // Expected connection more than conn_info
+    GetProcessStateCb(vcinfo, pstate, message2, expected_connections);
     EXPECT_EQ(ProcessState::NON_FUNCTIONAL, pstate);
-    EXPECT_EQ("Number of connections:1, Expected:2", message2);
-    UpdateConnInfo("Test2", ConnectionStatus::DOWN, "Test2 DOWN", &vcinfo);
+    EXPECT_EQ("Number of connections:1, Expected:2 Missing: Test:Test2", message2);
+    // 2 expected connections are more than conn_info
+    expected_connections.push_back(ConnectionTypeName("Test","Test3"));
     std::string message3;
-    GetProcessStateCb(vcinfo, pstate, message3, 2);
+    GetProcessStateCb(vcinfo, pstate, message3, expected_connections);
     EXPECT_EQ(ProcessState::NON_FUNCTIONAL, pstate);
-    EXPECT_EQ("Test:Test2 connection down", message3);
-    UpdateConnInfo("Test3", ConnectionStatus::DOWN, "Test3 DOWN", &vcinfo);
+    EXPECT_EQ("Number of connections:1, Expected:3 Missing: Test:Test2,Test:Test3", message3);
+    expected_connections.pop_back();
+    UpdateConnInfo("Test2", ConnectionStatus::DOWN, "Test2 DOWN", &vcinfo);
     std::string message4;
-    GetProcessStateCb(vcinfo, pstate, message4, 3);
+    GetProcessStateCb(vcinfo, pstate, message4, expected_connections);
     EXPECT_EQ(ProcessState::NON_FUNCTIONAL, pstate);
-    EXPECT_EQ("Test:Test2, Test:Test3 connection down", message4);
+    EXPECT_EQ("Test:Test2 connection down", message4);
+    UpdateConnInfo("Test3", ConnectionStatus::DOWN, "Test3 DOWN", &vcinfo);
+    std::string message5;
+    // More connection in conn_info than expected_connections
+    GetProcessStateCb(vcinfo, pstate, message5, expected_connections);
+    EXPECT_EQ(ProcessState::NON_FUNCTIONAL, pstate);
+    EXPECT_EQ("Number of connections:3, Expected:2 Extra: Test:Test3", message5);
+    std::string message6;
+    expected_connections.push_back(ConnectionTypeName("Test","Test3"));
+    GetProcessStateCb(vcinfo, pstate, message6, expected_connections);
+    EXPECT_EQ(ProcessState::NON_FUNCTIONAL, pstate);
+    EXPECT_EQ("Test:Test2, Test:Test3 connection down", message6);
 }
 
 int main(int argc, char *argv[]) {

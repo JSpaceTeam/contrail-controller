@@ -17,6 +17,7 @@
 #include "route/table.h"
 
 class BgpServer;
+class BgpTableStats;
 class BgpRoute;
 class BgpPath;
 class IPeer;
@@ -27,6 +28,7 @@ class RibPeerSet;
 class Route;
 class RoutingInstance;
 class SchedulingGroupManager;
+class ShowRibOutStatistics;
 class UpdateInfoSList;
 struct UpdateInfo;
 
@@ -114,6 +116,7 @@ public:
     virtual bool MayDelete() const;
     bool IsDeleted() const { return deleter()->IsDeleted(); }
     virtual PathResolver *CreatePathResolver();
+    void LocatePathResolver();
     void DestroyPathResolver();
 
     RoutingInstance *routing_instance() { return rtinstance_; }
@@ -123,15 +126,6 @@ public:
     const BgpServer *server() const;
     PathResolver *path_resolver() { return path_resolver_; }
     const PathResolver *path_resolver() const { return path_resolver_; }
-
-    virtual void Input(DBTablePartition *root, DBClient *client,
-                       DBRequest *req);
-    bool InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
-                     const IPeer *peer, DBRequest *req,
-                     DBRequest::DBOperation oper, BgpAttrPtr attrs,
-                     uint32_t path_id, uint32_t flags, uint32_t label);
-    void InputCommonPostProcess(DBTablePartBase *root, BgpRoute *rt,
-                                bool notify_rt);
 
     LifetimeActor *deleter();
     const LifetimeActor *deleter() const;
@@ -151,15 +145,36 @@ public:
 
     // Check whether the route is contributing route to aggregate route
     bool IsContributingRoute(const BgpRoute *route) const;
+    BgpTableStats *stats() { return stats_.get(); }
+
+    bool DeletePath(DBTablePartBase *root, BgpRoute *rt, BgpPath *path);
+    virtual void Input(DBTablePartition *root, DBClient *client,
+                       DBRequest *req);
+    bool InputCommon(DBTablePartBase *root, BgpRoute *rt, BgpPath *path,
+                     const IPeer *peer, DBRequest *req,
+                     DBRequest::DBOperation oper, BgpAttrPtr attrs,
+                     uint32_t path_id, uint32_t flags, uint32_t label);
+    void InputCommonPostProcess(DBTablePartBase *root, BgpRoute *rt,
+                                bool notify_rt);
+
+    void FillRibOutStatisticsInfo(
+        std::vector<ShowRibOutStatistics> *sros_list) const;
 
 private:
-    class DeleteActor;
     friend class BgpTableTest;
+
+    class DeleteActor;
+
+    void ProcessRemovePrivate(const RibOut *ribout, BgpAttr *attr) const;
+    void ProcessLlgrState(const RibOut *ribout, const BgpPath *path,
+                          BgpAttr *attr);
     virtual BgpRoute *TableFind(DBTablePartition *rtp,
             const DBRequestKey *prefix) = 0;
+
     RoutingInstance *rtinstance_;
     PathResolver *path_resolver_;
     RibOutMap ribout_map_;
+    boost::scoped_ptr<BgpTableStats> stats_;
 
     boost::scoped_ptr<DeleteActor> deleter_;
     LifetimeRef<BgpTable> instance_delete_ref_;

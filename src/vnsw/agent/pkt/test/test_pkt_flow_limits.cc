@@ -39,6 +39,13 @@ struct PortInfo input[] = {
         {"vmi_2", 8, vm3_ip, "00:00:00:01:01:03", 5, 3},
         {"vmi_3", 9, vm4_ip, "00:00:00:01:01:04", 3, 4},
 };
+IpamInfo ipam_info[] = {
+    {"11.1.1.0", 24, "11.1.1.10"},
+    {"12.1.1.0", 24, "12.1.1.10"},
+};
+IpamInfo ipam_info2[] = {
+    {"13.1.1.0", 24, "13.1.1.10"},
+};
 
 typedef enum {
     INGRESS = 0,
@@ -61,7 +68,7 @@ static bool FlowStatsTimerStartStopTrigger (Agent *agent, bool stop) {
 }
 
 static void FlowStatsTimerStartStop (Agent *agent, bool stop) {
-    int task_id = agent->task_scheduler()->GetTaskId(kTaskFlowEvent);
+    int task_id = agent->task_scheduler()->GetTaskId(kTaskFlowStatsCollector);
     std::auto_ptr<TaskTrigger> trigger_
         (new TaskTrigger(boost::bind(FlowStatsTimerStartStopTrigger, agent,
                                      stop), task_id, 0));
@@ -107,7 +114,7 @@ public:
                                intf->GetUuid(), vn_list, label,
                                SecurityGroupList(), CommunityList(), false,
                                PathPreference(), Ip4Address(0),
-                               EcmpLoadBalance());
+                               EcmpLoadBalance(), false);
         client->WaitForIdle();
         EXPECT_TRUE(RouteFind(vrf, addr, 32));
     }
@@ -138,6 +145,7 @@ public:
 
 protected:
     virtual void SetUp() {
+        agent_->flow_stats_manager()->set_delete_short_flow(false);
         Ip4Address rid = Ip4Address::from_string(vhost_ip_addr);
         agent_->set_router_id(rid);
         agent_->set_compute_node_ip(rid);
@@ -147,6 +155,9 @@ protected:
         client->Reset();
         CreateVmportEnv(input, 4, 1);
         client->WaitForIdle(5);
+        AddIPAM("vn5", ipam_info, 2);
+        AddIPAM("vn3", ipam_info2, 1);
+        client->WaitForIdle();
 
         EXPECT_TRUE(VmPortActive(input, 0));
         EXPECT_TRUE(VmPortPolicyEnable(input, 0));
@@ -181,6 +192,9 @@ protected:
 
         DeleteVmportEnv(input, 4, true, 1);
         client->WaitForIdle(3);
+        DelIPAM("vn5");
+        DelIPAM("vn3");
+        client->WaitForIdle();
         EXPECT_FALSE(VmPortFind(input, 0));
         EXPECT_FALSE(VmPortFind(input, 1));
         EXPECT_FALSE(VmPortFind(input, 2));
@@ -603,9 +617,12 @@ TEST_F(FlowTest, FlowLimit_1) {
     FlowStatsTimerStartStop(agent_, true);
     CreateFlow(flow, 4);
     client->WaitForIdle();
-    int nh_id = agent_->interface_table()->FindInterface
-        (vmi_3->id())->flow_key_nh()->id();
+    VmInterface *intf = static_cast<VmInterface*>(agent_->interface_table()->\
+                                                  FindInterface(vmi_3->id()));
+    int nh_id = intf->flow_key_nh()->id();
     EXPECT_EQ(4U, get_flow_proto()->FlowCount());
+    // Validate interface is set to drop new flows after flow limit is reached
+    EXPECT_TRUE(intf->drop_new_flows());
     FlowEntry *fe = FlowGet(VrfGet("vrf3")->vrf_id(), vm4_ip, vm1_ip,
                             IPPROTO_TCP, 300, 200, nh_id);
     EXPECT_TRUE(fe != NULL && fe->is_flags_set(FlowEntry::ShortFlow) == true &&
@@ -617,6 +634,10 @@ TEST_F(FlowTest, FlowLimit_1) {
     DeleteRoute("vrf5", vm4_ip);
     DeleteRoute("vrf3", vm1_ip);
     client->WaitForIdle();
+    FlushFlowTable();
+    client->WaitForIdle();
+    // Validate interface is not dropping new flows after flows age-out
+    EXPECT_FALSE(intf->drop_new_flows());
     client->WaitForIdle();
     agent_->set_max_vm_flows(vm_flows);
 }

@@ -27,13 +27,15 @@ except ImportError:
     from ordereddict import OrderedDict
 from pysandesh.sandesh_base import *
 from pysandesh.connection_info import ConnectionState
-from pysandesh.gen_py.process_info.ttypes import ConnectionType,\
-    ConnectionStatus
+from pysandesh.sandesh_logger import SandeshLogger
 from pysandesh.gen_py.sandesh_alarm.ttypes import SandeshAlarmAckResponseCode
 from sandesh.alarmgen_ctrl.sandesh_alarm_base.ttypes import AlarmTrace, \
-    UVEAlarms, UVEAlarmInfo, AlarmTemplate, AllOf
+    UVEAlarms, UVEAlarmInfo, UVEAlarmConfig, AlarmOperand2, AlarmCondition, \
+    AlarmMatch, AlarmConditionMatch, AlarmAndList, AlarmRules
 from sandesh.analytics.ttypes import *
-from sandesh.analytics.cpuinfo.ttypes import ProcessCpuInfo
+from sandesh.nodeinfo.ttypes import NodeStatusUVE, NodeStatus
+from sandesh.nodeinfo.cpuinfo.ttypes import *
+from sandesh.nodeinfo.process_info.ttypes import *
 from sandesh_common.vns.ttypes import Module, NodeType
 from sandesh_common.vns.constants import ModuleNames, CategoryNames,\
      ModuleCategoryMap, Module2NodeType, NodeTypeNames, ModuleIds,\
@@ -42,6 +44,7 @@ from sandesh_common.vns.constants import ModuleNames, CategoryNames,\
 from alarmgen_cfg import CfgParser
 from uveserver import UVEServer
 from partition_handler import PartitionHandler, UveStreamProc
+from alarmgen_config_handler import AlarmGenConfigHandler
 from sandesh.alarmgen_ctrl.ttypes import PartitionOwnershipReq, \
     PartitionOwnershipResp, PartitionStatusReq, UVECollInfo, UVEGenInfo, \
     PartitionStatusResp, UVETableAlarmReq, UVETableAlarmResp, \
@@ -49,7 +52,9 @@ from sandesh.alarmgen_ctrl.ttypes import PartitionOwnershipReq, \
     AlarmgenStatus, AlarmgenStats, AlarmgenPartitionTrace, \
     AlarmgenPartition, AlarmgenPartionInfo, AlarmgenUpdate, \
     UVETableInfoReq, UVETableInfoResp, UVEObjectInfo, UVEStructInfo, \
-    UVETablePerfReq, UVETablePerfResp, UVETableInfo, UVEKeyCount
+    UVETablePerfReq, UVETablePerfResp, UVETableInfo, UVETableCount, \
+    UVEAlarmStateMachineInfo, UVEAlarmState, UVEAlarmOperState,\
+    AlarmStateChangeTrace, UVEQTrace
 
 from sandesh.discovery.ttypes import CollectorTrace
 from cpuinfo import CpuInfoData
@@ -182,29 +187,575 @@ class AGKeyInfo(object):
         return self.set_unchanged
 
 class AlarmProcessor(object):
+
     def __init__(self, logger):
         self.uve_alarms = {}
         self._logger = logger
+        self.ActiveTimer = {}
+        self.IdleTimer = {}
+        self.FreqExceededCheck = {}
+        self.FreqCheck_Times = {}
+        self.FreqCheck_Seconds = {}
 
-    def process_alarms(self, ext, uv, local_uve):
-        nm = ext.entry_point_target.split(":")[1]
-        sev = ext.obj.severity()
+    def process_alarms(self, alarm_fqname, alarm, uv, local_uve):
+        if not alarm.is_enabled():
+            return
+        alarm_name = alarm_fqname.rsplit(':', 1)[1]
+        sev = alarm.severity()
+        if not uv in self.ActiveTimer:
+            self.ActiveTimer[uv] = {}
+        self.ActiveTimer[uv][alarm_name] = alarm.ActiveTimer()
+        if not uv in self.IdleTimer:
+            self.IdleTimer[uv] = {}
+        self.IdleTimer[uv][alarm_name] = alarm.IdleTimer()
+        if not uv in self.FreqExceededCheck:
+            self.FreqExceededCheck[uv] = {}
+        self.FreqExceededCheck[uv][alarm_name] = alarm.FreqExceededCheck()
+        if not uv in self.FreqCheck_Times:
+            self.FreqCheck_Times[uv] = {}
+        self.FreqCheck_Times[uv][alarm_name] = alarm.FreqCheck_Times()
+        if not uv in self.FreqCheck_Seconds:
+            self.FreqCheck_Seconds[uv] = {}
+        self.FreqCheck_Seconds[uv][alarm_name] = alarm.FreqCheck_Seconds()
 
         try:
-            or_list = ext.obj.__call__(uv, local_uve)
-            self._logger.debug("Alarm[%s] %s: %s" % (uv, nm, str(or_list)))
+            # __call__ method overrides the generic alarm processing code.
+            if hasattr(alarm, '__call__'):
+                or_list = alarm.__call__(uv, local_uve)
+            else:
+                or_list = self._evaluate_uve_for_alarms(
+                    alarm.config(), uv, local_uve)
+            self._logger.debug("Alarm[%s] %s: %s" %
+                (uv, alarm_name, str(or_list)))
             if or_list:
-                self.uve_alarms[nm] = UVEAlarmInfo(type = nm, severity = sev,
-                                       timestamp = 0, token = "",
-                                       any_of = or_list, ack = False)
+                self.uve_alarms[alarm_name] = UVEAlarmInfo(type=alarm_name,
+                    severity=sev, timestamp=0, token="",
+                    alarm_rules=AlarmRules(or_list),
+                    description=alarm.description(), ack=False)
 	except Exception as ex:
 	    template = "Exception {0} in Alarm Processing. Arguments:\n{1!r}"
 	    messag = template.format(type(ex).__name__, ex.args)
 	    self._logger.error("%s : traceback %s" % \
 			      (messag, traceback.format_exc()))
-            self.uve_alarms[nm] = UVEAlarmInfo(type = nm, severity = sev,
-                                   timestamp = 0, token = "",
-                                   any_of = [AllOf(all_of=[])], ack = False)
+            self.uve_alarms[alarm_name] = UVEAlarmInfo(type=alarm_name,
+                    severity=sev, timestamp=0, token="",
+                    alarm_rules=AlarmRules(None),
+                    description=alarm.description(), ack=False)
+    # end process_alarms
+
+    def _get_uve_attribute(self, tuve, puve, attr_list):
+        if tuve is None or not attr_list:
+            return {'value': tuve, 'parent_attr': puve,
+                    'status': False if len(attr_list) else True}
+        if isinstance(tuve, dict):
+            return self._get_uve_attribute(tuve.get(attr_list[0]),
+                                           tuve, attr_list[1:])
+        elif isinstance(tuve, list):
+            return [self._get_uve_attribute(elem, tuve, attr_list) \
+                    for elem in tuve]
+        elif isinstance(tuve, str):
+            try:
+                json_elem = json.loads(tuve)
+            except ValueError:
+                return {'value': None, 'parent_attr': tuve, 'status': False}
+            else:
+                return self._get_uve_attribute(json_elem, tuve, attr_list)
+    # end _get_uve_attribute
+
+    def _get_operand_value(self, uve, operand):
+        attr_list = operand.split('.')
+        return self._get_uve_attribute(uve, uve, attr_list)
+    # end _get_operand_value
+
+    def _get_json_value(self, val):
+        try:
+            tval = json.loads(val)
+        except (ValueError, TypeError):
+            return json.dumps(val)
+        else:
+            return val
+    # end _get_json_value
+
+    def _get_json_variables(self, uve, exp, operand1_val,
+                            operand2_val, is_operand2_json_val):
+        json_vars = {}
+        for var in exp.variables:
+            # If var and operand1/operand2 are at the same hirerarchy in
+            # the uve struture, then get the value of var from parent_attr of
+            # the corresponding operand_val
+            # TODO: Handle the case len(var.rsplit) != len(operand.rsplit)
+            if var.rsplit('.', 1)[0] == exp.operand1.rsplit('.', 1)[0]:
+                var_val = \
+                    operand1_val['parent_attr'].get(var.rsplit('.', 1)[1])
+            elif not is_operand2_json_val and \
+                var.rsplit('.', 1)[0] == exp.operand2.uve_attribute.rsplit(
+                    '.', 1)[0]:
+                var_val = \
+                    operand2_val['parent_attr'].get(var.rsplit('.', 1)[1])
+            else:
+                var_val = self._get_operand_value(uve, var)['value']
+            json_vars[var] = self._get_json_value(var_val)
+        return json_vars
+    # end _get_json_variables
+
+    def _compare_operand_vals(self, val1, val2, operation):
+        try:
+            val1 = json.loads(val1)
+        except (TypeError, ValueError):
+            pass
+        try:
+            val2 = json.loads(val2)
+        except (TypeError, ValueError):
+            pass
+        if operation == '==':
+            return val1 == val2
+        elif operation == '!=':
+            return val1 != val2
+        elif operation == '<=':
+            return val1 <= val2
+        elif operation == '>=':
+            return val1 >= val2
+        elif operation == 'in':
+            if not isinstance(val2, list):
+                return False
+            return val1 in val2
+        elif operation == 'not in':
+            if not isinstance(val2, list):
+                return True
+            return val1 not in val2
+        elif operation == 'size==':
+            if not isinstance(val1, list):
+                return False
+            return len(val1) == val2
+        elif operation == 'size!=':
+            if not isinstance(val1, list):
+                return True
+            return len(val1) != val2
+    # end _compare_operand_vals
+
+    def _get_alarm_match(self, uve, exp, operand1_val, operand2_val,
+                         is_operand2_json_val):
+        json_vars = self._get_json_variables(uve, exp, operand1_val,
+            operand2_val, is_operand2_json_val)
+        json_operand1_val = self._get_json_value(operand1_val['value'])
+        if not is_operand2_json_val:
+            json_operand2_val = self._get_json_value(operand2_val['value'])
+        else:
+            json_operand2_val = None
+        return AlarmMatch(json_operand1_value=json_operand1_val,
+            json_operand2_value=json_operand2_val, json_variables=json_vars)
+    # end _get_alarm_match
+
+    def _get_alarm_condition_match(self, uve, exp, operand1_val, operand2_val,
+                                   is_operand2_json_val, match_list=None):
+        if not match_list:
+            match_list = [self._get_alarm_match(uve, exp, operand1_val,
+                operand2_val, is_operand2_json_val)]
+        return AlarmConditionMatch(
+            condition=AlarmCondition(operation=exp.operation,
+                operand1=exp.operand1, operand2=AlarmOperand2(
+                    uve_attribute=exp.operand2.uve_attribute,
+                    json_value=exp.operand2.json_value),
+                variables=exp.variables),
+            match=match_list)
+    # end _get_alarm_condition_match
+
+    def _evaluate_uve_for_alarms(self, alarm_cfg, uve_key, uve):
+        table, uve_name = uve_key.split(':', 1)
+        # For alarms configured under project, the parent fq_name of the uve
+        # should match with that of the alarm config
+        if alarm_cfg.parent_type == 'project':
+            uve_parent_fqname = uve_name.rsplit(':', 1)[0]
+            if uve_parent_fqname != alarm_cfg.get_parent_fq_name_str():
+                return None
+        or_list = []
+        for cfg_and_list in alarm_cfg.alarm_rules.or_list:
+            and_list = []
+            and_list_fail = False
+            for exp in cfg_and_list.and_list:
+                operand1_val = self._get_operand_value(uve, exp.operand1)
+                if isinstance(operand1_val, dict) and \
+                    operand1_val['status'] is False:
+                    and_list_fail = True
+                    break
+                if exp.operand2.json_value is not None:
+                    operand2_val = json.loads(exp.operand2.json_value)
+                    is_operand2_json_val = True
+                else:
+                    operand2_val = self._get_operand_value(uve,
+                        exp.operand2.uve_attribute)
+                    if isinstance(operand2_val, dict) and \
+                        operand2_val['status'] is False:
+                        and_list_fail = True
+                        break
+                    is_operand2_json_val = False
+                if isinstance(operand1_val, list) or \
+                    (is_operand2_json_val is False and \
+                        isinstance(operand2_val, list)):
+                    match_list = []
+                    # both operand1_val and operand2_val are list
+                    if isinstance(operand1_val, list) and \
+                        (is_operand2_json_val is False and \
+                            isinstance(operand2_val, list)):
+                            if len(operand1_val) != len(operand2_val):
+                                and_list_fail = True
+                                break
+                            for i in range(0, len(operand1_val)):
+                                if self._compare_operand_vals(
+                                    operand1_val[i]['value'],
+                                    operand2_val[i]['value'],
+                                    exp.operation):
+                                    match_list.append(
+                                        self._get_alarm_match(
+                                        uve, exp, operand1_val[i],
+                                        operand2_val[i],
+                                        is_operand2_json_val))
+                    # operand1_val is list and operand2_val is not list
+                    elif isinstance(operand1_val, list):
+                        val2 = operand2_val
+                        if not is_operand2_json_val:
+                            val2 = operand2_val['value']
+                        for val1 in operand1_val:
+                            if self._compare_operand_vals(val1['value'],
+                                val2, exp.operation):
+                                match_list.append(self._get_alarm_match(
+                                    uve, exp, val1, operand2_val,
+                                    is_operand2_json_val))
+                    # operand1_val is not list and operand2_val is list
+                    elif is_operand2_json_val is False and \
+                        isinstance(operand2_val, list):
+                        for val2 in operand2_val:
+                            if self._compare_operand_vals(
+                                operand1_val['value'], val2['value'],
+                                exp.operation):
+                                match_list.append(self._get_alarm_match(
+                                    uve, exp, operand1_val, val2,
+                                    is_operand2_json_val))
+                    if match_list:
+                        and_list.append(self._get_alarm_condition_match(
+                            uve, exp, operand1_val, operand2_val,
+                            is_operand2_json_val, match_list))
+                    else:
+                        and_list_fail = True
+                        break
+                # Neither operand1_val nor operand2_val is a list
+                else:
+                    val1 = operand1_val['value']
+                    val2 = operand2_val
+                    if not is_operand2_json_val:
+                        val2 = operand2_val['value']
+                    if self._compare_operand_vals(val1, val2, exp.operation):
+                        and_list.append(self._get_alarm_condition_match(
+                            uve, exp, operand1_val, operand2_val,
+                            is_operand2_json_val))
+                    else:
+                        and_list_fail = True
+                        break
+            if not and_list_fail:
+                or_list.append(AlarmAndList(and_list))
+        if or_list:
+            return or_list
+        return None
+    # end _evaluate_uve_for_alarms
+
+
+class AlarmStateMachine:
+    tab_alarms_timer = {}
+    def __init__(self, tab, uv, nm, sandesh, activeTimer, idleTimer,
+            freqCheck_Times, freqCheck_Seconds, freqExceededCheck):
+        self._sandesh = sandesh
+        self._logger = sandesh._logger
+        self.tab = tab
+        self.uv = uv
+        self.nm = nm
+        self.uac = UVEAlarmConfig(ActiveTimer = activeTimer, IdleTimer = \
+                idleTimer, FreqCheck_Times = freqCheck_Times, FreqCheck_Seconds
+                = freqCheck_Seconds, FreqExceededCheck = freqExceededCheck)
+        self.uas = UVEAlarmOperState(state = UVEAlarmState.Idle,
+                                head_timestamp = 0, alarm_timestamp = [])
+        self.uai = None
+        self.activeTimeout = None
+        self.deleteTimeout = None
+        self.idleTimeout = None
+
+    def get_uai(self, forced=False):
+        """
+        This functions returns all the alarms which are in Active or
+        Soak_Idle state, all other alarms are not yet asserted or cleared
+        """
+        if forced:
+            return self.uai
+        if self.uas.state == UVEAlarmState.Active or \
+                self.uas.state == UVEAlarmState.Soak_Idle:
+            return self.uai
+        return None
+
+    def get_uac(self):
+        return self.uac
+
+    def get_uas(self):
+        return self.uas
+
+    def set_uai(self, uai):
+        self.uai = uai
+
+    def is_new_alarm_same(self, new_uai):
+        uai2 = copy.deepcopy(self.uai)
+        uai2.timestamp = 0
+        uai2.token = ""
+        uai2.ack = False
+
+        if (uai2 == new_uai) and \
+                self.uas.state == UVEAlarmState.Active:
+            return True
+        return False
+
+    def _remove_timer_from_list(self, index):
+        AlarmStateMachine.tab_alarms_timer[index].discard((self.tab,\
+                                self.uv, self.nm))
+        if len(AlarmStateMachine.tab_alarms_timer[index]) == 0:
+            del AlarmStateMachine.tab_alarms_timer[index]
+
+    def set_alarms(self):
+        """
+        This function runs the state machine code for setting an alarm
+        If a timer becomes Active, caller should send out updated AlarmUVE
+        """
+        old_state = self.uas.state
+        curr_time = int(time.time())
+        if self.uas.state == UVEAlarmState.Soak_Idle:
+            self.uas.state = UVEAlarmState.Active
+            self._remove_timer_from_list(self.idleTimeout)
+        elif self.uas.state == UVEAlarmState.Idle:
+            if self.deleteTimeout and (self.deleteTimeout in \
+                    AlarmStateMachine.tab_alarms_timer):
+                self._remove_timer_from_list(self.deleteTimeout)
+            if self.uac.FreqExceededCheck:
+                # log the timestamp
+                ts = int(self.uai.timestamp/1000000.0)
+                if len(self.uas.alarm_timestamp) <= self.uas.head_timestamp:
+                    self.uas.alarm_timestamp.append(ts)
+                else:
+                    self.uas.alarm_timestamp[self.uas.head_timestamp] = ts
+                self.uas.head_timestamp = (self.uas.head_timestamp + 1) % \
+                                (self.uac.FreqCheck_Times + 1)
+            if not self.uac.ActiveTimer or self.is_alarm_frequency_exceeded():
+                self.uas.state = UVEAlarmState.Active
+            else:
+                # put it on the timer
+                self.uas.state = UVEAlarmState.Soak_Active
+                self.activeTimeout = curr_time + self.uac.ActiveTimer
+                timeout_value = self.activeTimeout
+                if not timeout_value in AlarmStateMachine.tab_alarms_timer:
+                    AlarmStateMachine.tab_alarms_timer[timeout_value] = set()
+                AlarmStateMachine.tab_alarms_timer[timeout_value].add\
+                        ((self.tab, self.uv, self.nm))
+        self.send_state_change_trace(old_state, self.uas.state)
+    #end set_alarms
+
+    def send_state_change_trace(self, os, ns):
+        # No need to send if old and new states are same
+        if os == ns:
+            return
+        state_trace = AlarmStateChangeTrace()
+        state_trace.table = str(self.tab)
+        state_trace.uv = str(self.uv)
+        state_trace.alarm_type = str(self.nm)
+        state_trace.old_state = os
+        state_trace.new_state = ns
+        state_trace.trace_msg(name="AlarmStateChangeTrace", \
+                                    sandesh=self._sandesh)
+
+    def clear_alarms(self):
+        """
+        This function runs the state machine code for clearing an alarm
+        If a timer becomes Idle with no soaking enabled,
+        caller should delete corresponding alarm and send out updated AlarmUVE
+        """
+        cur_time = int(time.time())
+        old_state = self.uas.state
+        delete_alarm = False
+        if self.uas.state == UVEAlarmState.Soak_Active:
+            # stop the active timer and start idle timer
+            self.uas.state = UVEAlarmState.Idle
+            self._remove_timer_from_list(self.activeTimeout)
+            if self.uac.FreqCheck_Seconds:
+                self.deleteTimeout = cur_time + self.uac.FreqCheck_Seconds
+                to_value = self.deleteTimeout
+                if not to_value in AlarmStateMachine.tab_alarms_timer:
+                    AlarmStateMachine.tab_alarms_timer[to_value] = set()
+                AlarmStateMachine.tab_alarms_timer[to_value].add\
+                    ((self.tab, self.uv, self.nm))
+            else:
+                delete_alarm = True
+        elif self.uas.state == UVEAlarmState.Active:
+            if not self.uac.IdleTimer:
+                # Move to Idle state, caller should delete it
+                self.uas.state = UVEAlarmState.Idle
+                if self.uac.FreqCheck_Seconds:
+                    self.deleteTimeout = cur_time + self.uac.FreqCheck_Seconds
+                    to_value = self.deleteTimeout
+                    if not to_value in AlarmStateMachine.tab_alarms_timer:
+                        AlarmStateMachine.tab_alarms_timer[to_value] = set()
+                    AlarmStateMachine.tab_alarms_timer[to_value].add\
+                        ((self.tab, self.uv, self.nm))
+                else:
+                    delete_alarm = True
+            else:
+                self.uas.state = UVEAlarmState.Soak_Idle
+                self.idleTimeout = cur_time + self.uac.IdleTimer
+                to_value = self.idleTimeout
+                if not to_value in AlarmStateMachine.tab_alarms_timer:
+                    AlarmStateMachine.tab_alarms_timer[to_value] = set()
+                AlarmStateMachine.tab_alarms_timer[to_value].add\
+                        ((self.tab, self.uv, self.nm))
+        self.send_state_change_trace(old_state, self.uas.state)
+        return delete_alarm
+
+    def is_alarm_frequency_exceeded(self):
+        if not self.uac.FreqExceededCheck or \
+                not self.uac.FreqCheck_Times or \
+                not self.uac.FreqCheck_Seconds:
+            return False
+        if len(self.uas.alarm_timestamp) < self.uac.FreqCheck_Times + 1:
+            return False
+        freqCheck_times = self.uac.FreqCheck_Times
+        head = self.uas.head_timestamp
+        start = (head + freqCheck_times + 1) % freqCheck_times
+        end = (head + freqCheck_times) % freqCheck_times
+        if (self.uas.alarm_timestamp[end] - self.uas.alarm_timestamp[start]) \
+                <= self.uac.FreqCheck_Seconds:
+            self._logger.info("alarm frequency is exceeded, raising alarm")
+            return True
+        return False
+
+    def run_active_timer(self, curr_time):
+        update_alarm = False
+        timeout_value = None
+        if curr_time >= self.activeTimeout:
+            self.send_state_change_trace(self.uas.state,
+                        UVEAlarmState.Active)
+            self.uas.state = UVEAlarmState.Active
+            timeout_value = -1
+            update_alarm = True
+        return timeout_value, update_alarm
+
+    def run_idle_timer(self, curr_time):
+        """
+        This is the handler function for checking timer in Soak_Idle state. 
+        State Machine should be deleted by the caller if this timer fires
+        """
+        idleTimerExpired = 0
+        update_alarm = False
+        timeout_value = None
+        delete_alarm = False
+        if self.idleTimeout:
+            idleTimerExpired = curr_time - self.idleTimeout
+        if idleTimerExpired >= 0:
+            self.send_state_change_trace(self.uas.state, UVEAlarmState.Idle)
+            self.uas.state = UVEAlarmState.Idle
+            if self.uac.FreqCheck_Seconds:
+                self.deleteTimeout = curr_time + self.uac.FreqCheck_Seconds
+                timeout_value = self.deleteTimeout
+                update_alarm = True
+            else:
+                delete_alarm = True
+        return timeout_value, update_alarm, delete_alarm
+
+    def run_delete_timer(self, curr_time):
+        """
+        This is the handler function for checking timer in Idle state. 
+        State Machine should be deleted by the caller if this timer fires
+        """
+        delete_alarm = False
+        idleTimerExpired = 0
+        if self.deleteTimeout > 0:
+            idleTimerExpired = curr_time - self.deleteTimeout
+        if idleTimerExpired >= 0:
+            delete_alarm = True
+        return delete_alarm
+
+    def run_uve_soaking_timer(self, curr_time):
+        """
+        This function goes through the list of alarms which were raised
+        or set to delete but not soaked yet.
+        If an alarm is soaked for corresponding soak_time then it is asserted
+        or deleted
+        """
+        update_alarm = False
+        delete_alarm = False
+        timeout_value = None
+        if self.uas.state == UVEAlarmState.Soak_Active:
+            timeout_value, update_alarm = self.run_active_timer(curr_time)
+        elif self.uas.state == UVEAlarmState.Soak_Idle:
+            timeout_value, update_alarm, delete_alarm = self.run_idle_timer(curr_time)
+        elif self.uas.state == UVEAlarmState.Idle:
+            delete_alarm = self.run_delete_timer(curr_time)
+        return delete_alarm, update_alarm, timeout_value
+    #end run_uve_soaking_timer
+
+    def delete_timers(self):
+        if self.uas.state == UVEAlarmState.Idle:
+            if self.deleteTimeout and self.deleteTimeout > 0:
+                self._remove_timer_from_list(self.deleteTimeout)
+        elif self.uas.state == UVEAlarmState.Soak_Active:
+            if self.activeTimeout and self.activeTimeout > 0:
+                self._remove_timer_from_list(self.activeTimeout)
+        elif self.uas.state == UVEAlarmState.Soak_Idle:
+            if self.idleTimeout and self.idleTimeout > 0:
+                self._remove_timer_from_list(self.idleTimeout)
+
+    @staticmethod
+    def run_timers(curr_time, tab_alarms):
+        inputs = namedtuple('inputs', ['tab', 'uv', 'nm',
+                            'delete_alarm', 'timeout_val', 'old_to'])
+        delete_alarms = []
+        update_alarms = []
+        if curr_time in AlarmStateMachine.tab_alarms_timer:
+            update_timers = []
+            for (tab, uv, nm) in AlarmStateMachine.tab_alarms_timer[curr_time]:
+                asm = tab_alarms[tab][uv][nm]
+                delete_alarm, update_alarm, timeout_val = \
+                                asm.run_uve_soaking_timer(curr_time)
+                if delete_alarm:
+                    delete_alarms.append((asm.tab, asm.uv, asm.nm))
+                if update_alarm:
+                    update_alarms.append((asm.tab, asm.uv, asm.nm))
+                update_timers.append(inputs(tab=asm.tab, uv=asm.uv, nm=asm.nm,
+                                    delete_alarm=delete_alarm,
+                                    timeout_val=timeout_val, old_to=curr_time))
+            for timer in update_timers:
+                if timer.timeout_val is not None or timer.delete_alarm:
+                    AlarmStateMachine.update_tab_alarms_timer(timer.tab,
+                                    timer.uv, timer.nm, timer.old_to, 
+                                    timer.timeout_val, tab_alarms)
+        return delete_alarms, update_alarms
+
+    @staticmethod
+    def update_tab_alarms_timer(tab, uv, nm, curr_index, timeout_val,
+            tab_alarms):
+        del_timers = []
+        if curr_index is not None and curr_index > 0:
+            timers = AlarmStateMachine.tab_alarms_timer[curr_index]
+            if (tab, uv, nm) in timers:
+                asm = tab_alarms[tab][uv][nm]
+                timers.discard((tab, uv, nm))
+            if len(timers) == 0:
+                del_timers.append(curr_index)
+        for timeout in del_timers:
+            del AlarmStateMachine.tab_alarms_timer[timeout]
+        if timeout_val >= 0:
+            if not timeout_val in AlarmStateMachine.tab_alarms_timer:
+                AlarmStateMachine.tab_alarms_timer[timeout_val] = set()
+            if (tab, uv, nm) in AlarmStateMachine.tab_alarms_timer\
+                    [timeout_val]:
+                self._logger.error("Timer error for (%s,%s,%s)" % \
+                    (tab, uv, nm))
+                raise SystemExit
+            AlarmStateMachine.tab_alarms_timer[timeout_val].add\
+                        ((asm.tab, asm.uv, asm.nm))
+
+
 
 class Controller(object):
 
@@ -225,6 +776,7 @@ class Controller(object):
         self._moduleid = ModuleNames[module]
         node_type = Module2NodeType[module]
         self._node_type_name = NodeTypeNames[node_type]
+        self.table = "ObjectCollectorInfo"
         self._hostname = socket.gethostname()
         self._instance_id = self._conf.worker_id()
 
@@ -237,7 +789,8 @@ class Controller(object):
             self.disc = client.DiscoveryClient(
                 self._conf.discovery()['server'],
                 self._conf.discovery()['port'],
-                ModuleNames[Module.ALARM_GENERATOR])
+                ModuleNames[Module.ALARM_GENERATOR],
+                '%s-%s' % (self._hostname, self._instance_id))
 
         is_collector = True
         if test_logger is not None:
@@ -270,7 +823,9 @@ class Controller(object):
             self._logger = self._sandesh._logger
         # Trace buffer list
         self.trace_buf = [
-            {'name':'DiscoveryMsg', 'size':1000}
+            {'name':'DiscoveryMsg', 'size':1000},
+            {'name':'AlarmStateChangeTrace', 'size':1000},
+            {'name':'UVEQTrace', 'size':10000}
         ]
         # Create trace buffers 
         for buf in self.trace_buf:
@@ -306,7 +861,7 @@ class Controller(object):
         ConnectionState.init(self._sandesh, self._hostname, self._moduleid,
             self._instance_id,
             staticmethod(ConnectionState.get_process_state_cb),
-            NodeStatusUVE, NodeStatus)
+            NodeStatusUVE, NodeStatus, self.table)
 
         self._us = UVEServer(None, self._logger, self._conf.redis_password())
 
@@ -331,12 +886,30 @@ class Controller(object):
         self._uvestats = {}
         self._uveq = {}
         self._uveqf = {}
+        self._alarm_config_change_map = {}
+
+        # Create config handler to read/update alarm config
+        rabbitmq_params = self._conf.rabbitmq_params()
+        self._config_handler = AlarmGenConfigHandler(self._moduleid,
+            self._instance_id, self.config_log, self.disc,
+            self._conf.keystone_params(), rabbitmq_params, self.mgrs,
+            self.alarm_config_change_callback)
+        if rabbitmq_params['servers'] and self.disc:
+            self._config_handler.start()
+        else:
+            self._logger.error('Rabbitmq server and/or Discovery server '
+                'not configured')
 
         PartitionOwnershipReq.handle_request = self.handle_PartitionOwnershipReq
         PartitionStatusReq.handle_request = self.handle_PartitionStatusReq
         UVETableAlarmReq.handle_request = self.handle_UVETableAlarmReq 
         UVETableInfoReq.handle_request = self.handle_UVETableInfoReq
         UVETablePerfReq.handle_request = self.handle_UVETablePerfReq
+
+    def config_log(self, msg, level):
+        self._sandesh.logger().log(
+            SandeshLogger.get_py_logger_level(level), msg)
+    # end config_log
 
     def libpart_cb(self, part_list):
 
@@ -354,7 +927,7 @@ class Controller(object):
         newset = set(part_list)
         oldset = self._partset
         self._partset = newset
-
+        
         self._logger.error('Partition List : new %s old %s' % \
             (str(newset),str(oldset)))
         
@@ -364,7 +937,9 @@ class Controller(object):
         
         for delpart in (oldset-newset):
             self._logger.error('Partition Del : %s' % delpart)
-            self.partition_change(delpart, False)
+            if not self.partition_change(delpart, False):
+                self._logger.error('Partition Del : %s failed!' % delpart)
+                raise SystemExit
 
         self._logger.error('Partition List done : new %s old %s' % \
             (str(newset),str(oldset)))
@@ -409,9 +984,18 @@ class Controller(object):
           <UVE-Key> : { <Struct>: None } # The given struct may have gone
           Our treatment of the 2nd and 3rd case above is the same
         """
+        uveq_trace = UVEQTrace()
+        uveq_trace.uves = uves.keys()
+        uveq_trace.part = part
         if part not in self._uveq:
             self._uveq[part] = {}
             self._logger.error('Created uveQ for part %s' % str(part))
+            uveq_trace.oper = "create"
+        else:
+            uveq_trace.oper = "update"
+        uveq_trace.trace_msg(name="UVEQTrace",\
+                sandesh=self._sandesh)
+
         for uv,types in uves.iteritems():
             if types is None:
                 self._uveq[part][uv] = None
@@ -467,7 +1051,16 @@ class Controller(object):
                 pp,
                 self._workers[pp].acq_time())
             self.stop_uve_partition(pp)
+
         for part in self._uveq.keys():
+            self._logger.info("Clearing part %d uveQ : %s" % \
+                    (part,str(self._uveq[part].keys())))
+	    uveq_trace = UVEQTrace()
+	    uveq_trace.uves = self._uveq[part].keys()
+	    uveq_trace.part = part
+            uveq_trace.oper = "clear"
+	    uveq_trace.trace_msg(name="UVEQTrace",\
+		    sandesh=self._sandesh)
             del self._uveq[part]
 
     def clear_agg_uve(self, redish, inst, part, acq_time):
@@ -496,7 +1089,8 @@ class Controller(object):
         The key and typename information is also published on a redis channel
         """
         if not redish:
-            assert() 
+            self._logger.error("No redis handle")
+            raise SystemExit
         old_acq_time = redish.hget("AGPARTS:%s" % inst, part)
         if old_acq_time is None:
             self._logger.error("Agg %s part %d new" % (inst, part))
@@ -561,8 +1155,36 @@ class Controller(object):
 
         if retry:
             self._logger.error("Agg unexpected rows %s" % str(rows))
-            assert()
+            raise SystemExit
         
+    def send_alarm_update(self, tab, uk):
+        ustruct = None
+        alm_copy = []
+        for nm, asm in self.tab_alarms[tab][uk].iteritems():
+            uai = asm.get_uai()
+            if uai:
+                alm_copy.append(copy.deepcopy(uai))
+        if len(alm_copy) == 0:
+            ustruct = UVEAlarms(name = str(uk).split(':',1)[1], deleted = True)
+            self._logger.info('deleting alarm:')
+        else:
+            ustruct = UVEAlarms(name = str(uk).split(':',1)[1],
+                                    alarms = alm_copy)
+        alarm_msg = AlarmTrace(data=ustruct, table=tab, \
+                                    sandesh=self._sandesh)
+        alarm_msg.send(sandesh=self._sandesh)
+        self._logger.info('raising alarm %s' % (alarm_msg.log()))
+
+    def run_alarm_timers(self, curr_time):
+        delete_alarms, update_alarms = AlarmStateMachine.run_timers\
+                (curr_time, self.tab_alarms)
+
+        for alarm in delete_alarms:
+            del self.tab_alarms[alarm[0]][alarm[1]][alarm[2]]
+            self.send_alarm_update(alarm[0], alarm[1])
+        for alarm in update_alarms:
+            self.send_alarm_update(alarm[0], alarm[1])
+
     def run_uve_processing(self):
         """
         This function runs in its own gevent, and provides state compression
@@ -599,6 +1221,14 @@ class Controller(object):
                 self.stop_uve_partition(part)
                 del self._uveqf[part]
                 if part in self._uveq:
+		    uveq_trace = UVEQTrace()
+		    uveq_trace.uves = self._uveq[part].keys()
+		    uveq_trace.part = part
+		    uveq_trace.oper = "stop"
+		    uveq_trace.trace_msg(name="UVEQTrace",\
+			    sandesh=self._sandesh)
+                    self._logger.info("Stopping part %d uveQ : %s" % \
+                            (part,str(self._uveq[part].keys())))
                     del self._uveq[part]
             prev = time.time()
             try:
@@ -609,29 +1239,54 @@ class Controller(object):
                             password=self._conf.redis_password(),
                             db=7)
                     self.reconnect_agg_uve(lredis)
+                    ConnectionState.update(conn_type = ConnectionType.REDIS_UVE,
+                          name = 'AggregateRedis', status = ConnectionStatus.UP)
                 else:
                     if not lredis.exists(self._moduleid+':'+self._instance_id):
                         self._logger.error('Identified redis restart')
                         self.reconnect_agg_uve(lredis)
                 gevs = {}
                 pendingset = {}
+		kafka_topic_down = False
                 for part in self._uveq.keys():
                     if not len(self._uveq[part]):
                         continue
                     self._logger.info("UVE Process for %d" % part)
+		    kafka_topic_down |= self._workers[part].failed()
 
                     # Allow the partition handlers to queue new UVEs without
                     # interfering with the work of processing the current UVEs
-                    pendingset[part] = copy.deepcopy(self._uveq[part])
-                    self._uveq[part] = {}
-
+                    # Process no more than 200 keys at a time
+                    pendingset[part] = {}
+                    icount = 0
+                    while (len(self._uveq[part]) > 0) and icount < 200:
+                        kp,vp = self._uveq[part].popitem()
+                        pendingset[part][kp] = vp
+                        icount += 1
+                    self._logger.info("UVE Process for %d : %d, %d remain" % \
+                            (part, len(pendingset[part]), len(self._uveq[part])))
+                        
                     gevs[part] = gevent.spawn(self.handle_uve_notif,part,\
                         pendingset[part])
+		if kafka_topic_down:
+                    ConnectionState.update(conn_type = ConnectionType.KAFKA_PUB,
+                        name = 'KafkaTopic', status = ConnectionStatus.DOWN)
+	        else:
+                    ConnectionState.update(conn_type = ConnectionType.KAFKA_PUB,
+                        name = 'KafkaTopic', status = ConnectionStatus.UP)
+
                 if len(gevs):
                     gevent.joinall(gevs.values())
                     for part in gevs.keys():
                         # If UVE processing failed, requeue the working set
-                        outp = gevs[part].get()
+                        try:
+                            outp = gevs[part].get()
+                        except Exception as ex:
+                            template = "Exception {0} in notif worker. Arguments:\n{1!r}"
+                            messag = template.format(type(ex).__name__, ex.args)
+                            self._logger.error("%s : traceback %s" % \
+                                    (messag, traceback.format_exc()))
+                            outp = None
                         if outp is None:
                             self._logger.error("UVE Process failed for %d" % part)
                             self.handle_uve_notifq(part, pendingset[part])
@@ -672,22 +1327,140 @@ class Controller(object):
                                         acq_time,
                                         rows)
                                     rows[:] = []
-
+                # If there are alarm config changes, then start a gevent per
+                # partition to process the alarm config changes
+                if self._alarm_config_change_map:
+                    alarm_config_change_map = copy.deepcopy(
+                        self._alarm_config_change_map)
+                    self._alarm_config_change_map = {}
+                    alarm_workers = {}
+                    for partition in self._workers.keys():
+                        alarm_workers[partition] = gevent.spawn(
+                            self.alarm_config_change_worker, partition,
+                            alarm_config_change_map)
+                    if alarm_workers:
+                        gevent.joinall(alarm_workers.values())
             except Exception as ex:
                 template = "Exception {0} in uve proc. Arguments:\n{1!r}"
                 messag = template.format(type(ex).__name__, ex.args)
                 self._logger.error("%s : traceback %s" % \
                                   (messag, traceback.format_exc()))
                 lredis = None
+                ConnectionState.update(conn_type = ConnectionType.REDIS_UVE,
+                      name = 'AggregateRedis', status = ConnectionStatus.DOWN)
                 gevent.sleep(1)
                         
             curr = time.time()
+            try:
+		self.run_alarm_timers(int(curr))
+            except Exception as ex:
+                template = "Exception {0} in timer proc. Arguments:\n{1!r}"
+                messag = template.format(type(ex).__name__, ex.args)
+                self._logger.error("%s : traceback %s" % \
+                                  (messag, traceback.format_exc()))
+                raise SystemExit
             if (curr - prev) < 0.5:
                 gevent.sleep(0.5 - (curr - prev))
             else:
                 self._logger.info("UVE Process saturated")
                 gevent.sleep(0)
-             
+
+    def examine_uve_for_alarms(self, uve_key, uve):
+        table = uve_key.split(':', 1)[0]
+        alarm_cfg = self._config_handler.alarm_config_db()
+        if not alarm_cfg.has_key(table):
+            new_uve_alarms = {}
+        else:
+            prevt = UTCTimestampUsec()
+            aproc = AlarmProcessor(self._logger)
+            for alarm_fqname, alarm_obj in alarm_cfg[table].iteritems():
+                aproc.process_alarms(alarm_fqname, alarm_obj, uve_key, uve)
+            new_uve_alarms = aproc.uve_alarms
+            self.tab_perf[table].record_call(UTCTimestampUsec() - prevt)
+
+        del_types = []
+        if not self.tab_alarms.has_key(table):
+            self.tab_alarms[table] = {}
+        if self.tab_alarms[table].has_key(uve_key):
+            for nm, asm in self.tab_alarms[table][uve_key].iteritems():
+                # This type was present earlier, but is now gone
+                if not new_uve_alarms.has_key(nm):
+                    del_types.append(nm)
+                else:
+                    # This type has no new information
+                    if asm.is_new_alarm_same(new_uve_alarms[nm]):
+                        del new_uve_alarms[nm]
+
+        if len(del_types) != 0  or len(new_uve_alarms) != 0:
+            self._logger.debug("Alarm[%s] Deleted %s" % \
+                    (table, str(del_types)))
+            self._logger.debug("Alarm[%s] Updated %s" % \
+                    (table, str(new_uve_alarms)))
+            # These alarm types are new or updated
+            for nm, uai2 in new_uve_alarms.iteritems():
+                uai = copy.deepcopy(uai2)
+                uai.timestamp = UTCTimestampUsec()
+                uai.token = Controller.token(self._sandesh, uai.timestamp)
+                if not self.tab_alarms[table].has_key(uve_key):
+                    self.tab_alarms[table][uve_key] = {}
+                if not nm in self.tab_alarms[table][uve_key]:
+                    self.tab_alarms[table][uve_key][nm] = AlarmStateMachine(
+                        tab=table, uv=uve_key, nm=nm, sandesh=self._sandesh,
+                        activeTimer=aproc.ActiveTimer[uve_key][nm],
+                        idleTimer=aproc.IdleTimer[uve_key][nm],
+                        freqCheck_Times=aproc.FreqCheck_Times[uve_key][nm],
+                        freqCheck_Seconds= \
+                            aproc.FreqCheck_Seconds[uve_key][nm],
+                        freqExceededCheck= \
+                            aproc.FreqExceededCheck[uve_key][nm])
+                asm = self.tab_alarms[table][uve_key][nm]
+                asm.set_uai(uai)
+                # go through alarm set statemachine code
+                asm.set_alarms()
+            # These alarm types are now gone
+            for dnm in del_types:
+                if dnm in self.tab_alarms[table][uve_key]:
+                    delete_alarm = \
+                        self.tab_alarms[table][uve_key][dnm].clear_alarms()
+                    if delete_alarm:
+                        del self.tab_alarms[table][uve_key][dnm]
+            self.send_alarm_update(table, uve_key)
+    # end examine_uve_for_alarms
+
+    def alarm_config_change_worker(self, partition, alarm_config_change_map):
+        self._logger.debug('Alarm config change worker for partition %d'
+            % (partition))
+        try:
+            for table, alarm_map in alarm_config_change_map.iteritems():
+                self._logger.debug('Handle alarm config change for '
+                    '[partition:table:{alarms}] -> [%d:%s:%s]' %
+                    (partition, table, str(alarm_map)))
+                try:
+                    uves = self.ptab_info[partition][table]
+                except KeyError:
+                    continue
+                else:
+                    for uve, data in uves.iteritems():
+                        self._logger.debug('process alarm for uve %s' % (uve))
+                        self.examine_uve_for_alarms(table+':'+uve,
+                            data.values())
+                    gevent.sleep(0)
+        except Exception as e:
+            self._logger.error('Error in alarm config change worker for '
+                'partition %d - %s' % (partition, str(e)))
+            self._logger.error('traceback %s' % (traceback.format_exc()))
+    # end alarm_config_change_worker
+
+    def alarm_config_change_callback(self, alarm_config_change_map):
+        for table, alarm_map in alarm_config_change_map.iteritems():
+            try:
+                tamap = self._alarm_config_change_map[table]
+            except KeyError:
+                self._alarm_config_change_map[table] = alarm_map
+            else:
+                tamap.update(alarm_map)
+    # end alarm_config_change_callback
+
     def stop_uve_partition(self, part):
         if not part in self.ptab_info:
             return
@@ -696,6 +1469,7 @@ class Controller(object):
                 uk = tk + ":" + rkey
                 if tk in self.tab_alarms:
                     if uk in self.tab_alarms[tk]:
+                        self.delete_tab_alarms_timer(tk, uk)
                         del self.tab_alarms[tk][uk]
                         ustruct = UVEAlarms(name = rkey, deleted = True)
                         alarm_msg = AlarmTrace(data=ustruct, \
@@ -707,6 +1481,13 @@ class Controller(object):
                 self._logger.error("UVE %s deleted in stop" % (uk))
             del self.ptab_info[part][tk]
         del self.ptab_info[part]
+
+    def delete_tab_alarms_timer(self, tab, uv):
+        """
+        This function deletes all the timers for given tab,uv combination
+        """
+        for ak,av in self.tab_alarms[tab][uv].iteritems():
+            av.delete_timers()
 
     def handle_uve_notif(self, part, uves):
         """
@@ -725,6 +1506,15 @@ class Controller(object):
         self._logger.debug("Changed part %d UVEs : %s" % (part, str(uves)))
         success = True
         output = {}
+
+	uveq_trace = UVEQTrace()
+	uveq_trace.uves = uves.keys()
+	uveq_trace.part = part
+	uveq_trace.oper = "process"
+	uveq_trace.trace_msg(name="UVEQTrace",\
+		sandesh=self._sandesh)
+
+        erruves = []
         for uv,types in uves.iteritems():
             tab = uv.split(':',1)[0]
             if tab not in self.tab_perf:
@@ -748,8 +1538,8 @@ class Controller(object):
                     filters["cfilt"][typ] = set()
 
             failures, uve_data = self._us.get_uve(uv, True, filters)
-
             if failures:
+                erruves.append(uv)
                 success = False
             self.tab_perf[tab].record_get(UTCTimestampUsec() - prevt)
             # Handling Agg UVEs
@@ -769,20 +1559,26 @@ class Controller(object):
                 self.ptab_info[part][tab][uve_name].update(uve_data)
                 if len(self.ptab_info[part][tab][uve_name].removed()):
                     touched = True
-                    self._logger.info("UVE %s removed structs %s" % (uve_name, \
-                            self.ptab_info[part][tab][uve_name].removed()))
+                    rset = self.ptab_info[part][tab][uve_name].removed()
+                    self._logger.info("UVE %s removed structs %s" % (uv, rset))
+		    uveq_trace = UVEQTrace()
+		    uveq_trace.uves = [uv + "-" + str(rset)]
+		    uveq_trace.part = part
+		    uveq_trace.oper = "remove"
+		    uveq_trace.trace_msg(name="UVEQTrace",\
+			    sandesh=self._sandesh)
                     for rems in self.ptab_info[part][tab][uve_name].removed():
                         output[uv][rems] = None
                 if len(self.ptab_info[part][tab][uve_name].changed()):
                     touched = True
-                    self._logger.debug("UVE %s changed structs %s" % (uve_name, \
+                    self._logger.debug("UVE %s changed structs %s" % (uv, \
                             self.ptab_info[part][tab][uve_name].changed()))
                     for chgs in self.ptab_info[part][tab][uve_name].changed():
                         output[uv][chgs] = \
                                 self.ptab_info[part][tab][uve_name].values()[chgs]
                 if len(self.ptab_info[part][tab][uve_name].added()):
                     touched = True
-                    self._logger.debug("UVE %s added structs %s" % (uve_name, \
+                    self._logger.debug("UVE %s added structs %s" % (uv, \
                             self.ptab_info[part][tab][uve_name].added()))
                     for adds in self.ptab_info[part][tab][uve_name].added():
                         output[uv][adds] = \
@@ -795,8 +1591,14 @@ class Controller(object):
                     self.ptab_info[part][tab][uve_name].update_single(typ, val)
                     if len(self.ptab_info[part][tab][uve_name].removed()):
                         touched = True
-                        self._logger.info("UVE %s removed structs %s" % (uve_name, \
-                                self.ptab_info[part][tab][uve_name].removed()))
+                        rset = self.ptab_info[part][tab][uve_name].removed()
+			self._logger.info("UVE %s removed structs %s" % (uv, rset))
+			uveq_trace = UVEQTrace()
+			uveq_trace.uves = [uv + "-" + str(rset)]
+			uveq_trace.part = part
+			uveq_trace.oper = "remove"
+			uveq_trace.trace_msg(name="UVEQTrace",\
+				sandesh=self._sandesh)
                         for rems in self.ptab_info[part][tab][uve_name].removed():
                             output[uv][rems] = None
                     if len(self.ptab_info[part][tab][uve_name].changed()):
@@ -826,12 +1628,15 @@ class Controller(object):
                 
                 if tab in self.tab_alarms:
                     if uv in self.tab_alarms[tab]:
-                        del self.tab_alarms[tab][uv]
-                        ustruct = UVEAlarms(name = uve_name, deleted = True)
-                        alarm_msg = AlarmTrace(data=ustruct, table=tab, \
-                                sandesh=self._sandesh)
-                        self._logger.info('send del alarm: %s' % (alarm_msg.log()))
-                        alarm_msg.send(sandesh=self._sandesh)
+                        del_types = []
+                        for nm, asm in self.tab_alarms[tab][uv].iteritems():
+                            delete_alarm = \
+                                self.tab_alarms[tab][uv][nm].clear_alarms()
+                            if delete_alarm:
+                                del_types.append(nm)
+                        for nm in del_types:
+                            del self.tab_alarms[tab][uv][nm]
+                        self.send_alarm_update(tab, uv)
                 # Both alarm and non-alarm contents are gone.
                 # We do not need to do alarm evaluation
                 continue
@@ -840,77 +1645,34 @@ class Controller(object):
             if len(local_uve.keys()) == 1 and "UVEAlarms" in local_uve:
                 if tab in self.tab_alarms:
                     if uv in self.tab_alarms[tab]:
-                        del self.tab_alarms[tab][uv]
-                        ustruct = UVEAlarms(name = uve_name, deleted = True)
-                        alarm_msg = AlarmTrace(data=ustruct, table=tab, \
-                                sandesh=self._sandesh)
-                        self._logger.info('send del alarm: %s' % (alarm_msg.log()))
-                        alarm_msg.send(sandesh=self._sandesh)
+                        self._logger.info("UVE %s has no non-alarm" % (uv))
+                        del_types = []
+                        for nm, asm in self.tab_alarms[tab][uv].iteritems():
+                            delete_alarm = \
+                                self.tab_alarms[tab][uv][nm].clear_alarms()
+                            if delete_alarm:
+                                del_types.append(nm)
+                        for nm in del_types:
+                            del self.tab_alarms[tab][uv][nm]
+                        self.send_alarm_update(tab, uv)
                 continue
- 
-            # Handing Alarms
-            if not self.mgrs.has_key(tab):
-                continue
-            prevt = UTCTimestampUsec()
-
-            #TODO: We may need to remove alarm from local_uve before 
-            #      alarm evaluation
-            # if "UVEAlarms" in uve_data:
-            #     del uve_data["UVEAlarms"]
-            prevt = UTCTimestampUsec()
-            aproc = AlarmProcessor(self._logger)
-            self.mgrs[tab].map(aproc.process_alarms, uv, local_uve)
-            new_uve_alarms = aproc.uve_alarms
-            self.tab_perf[tab].record_call(UTCTimestampUsec() - prevt)
-
-            del_types = []
-            if self.tab_alarms[tab].has_key(uv):
-                for nm, uai in self.tab_alarms[tab][uv].iteritems():
-                    uai2 = copy.deepcopy(uai)
-                    uai2.timestamp = 0
-                    uai2.token = ""
-                    uai2.ack = False
-                    # This type was present earlier, but is now gone
-                    if not new_uve_alarms.has_key(nm):
-                        del_types.append(nm)
-                    else:
-                        # This type has no new information
-                        if uai2 == new_uve_alarms[nm]:
-                            del new_uve_alarms[nm]
-            if len(del_types) != 0  or \
-                    len(new_uve_alarms) != 0:
-                self._logger.debug("Alarm[%s] Deleted %s" % \
-                        (tab, str(del_types))) 
-                self._logger.debug("Alarm[%s] Updated %s" % \
-                        (tab, str(new_uve_alarms))) 
-                # These alarm types are new or updated
-                for nm, uai2 in new_uve_alarms.iteritems():
-                    uai = copy.deepcopy(uai2)
-                    uai.timestamp = UTCTimestampUsec()
-                    uai.token = Controller.token(self._sandesh, uai.timestamp)
-                    if not self.tab_alarms[tab].has_key(uv):
-                        self.tab_alarms[tab][uv] = {}
-                    self.tab_alarms[tab][uv][nm] = uai
-                # These alarm types are now gone
-                for dnm in del_types:
-                    del self.tab_alarms[tab][uv][dnm]
-                    
-                ustruct = None
-                if len(self.tab_alarms[tab][uv]) == 0:
-                    ustruct = UVEAlarms(name = uve_name,
-                            deleted = True)
-                    del self.tab_alarms[tab][uv]
-                else:
-                    alm_copy = copy.deepcopy(self.tab_alarms[tab][uv])
-                    ustruct = UVEAlarms(name = uve_name,
-                            alarms = alm_copy.values())
-                alarm_msg = AlarmTrace(data=ustruct, table=tab, \
-                        sandesh=self._sandesh)
-                self._logger.info('send alarm: %s' % (alarm_msg.log()))
-                alarm_msg.send(sandesh=self._sandesh)
+            # Examine UVE to check if alarm need to be raised/deleted
+            self.examine_uve_for_alarms(uv, local_uve)
         if success:
+	    uveq_trace = UVEQTrace()
+	    uveq_trace.uves = output.keys()
+	    uveq_trace.part = part
+	    uveq_trace.oper = "proc-output"
+	    uveq_trace.trace_msg(name="UVEQTrace",\
+		    sandesh=self._sandesh)
             return output
         else:
+	    uveq_trace = UVEQTrace()
+	    uveq_trace.uves = erruves
+	    uveq_trace.part = part
+	    uveq_trace.oper = "proc-error"
+	    uveq_trace.trace_msg(name="UVEQTrace",\
+		    sandesh=self._sandesh)
             return None
  
     def handle_UVETableInfoReq(self, req):
@@ -957,10 +1719,14 @@ class Controller(object):
             resp = UVETableAlarmResp(table = pt)
             uves = []
             for uk,uv in self.tab_alarms[pt].iteritems():
-                alms = []
                 for ak,av in uv.iteritems():
-                    alms.append(av)
-                uves.append(UVEAlarms(name = uk, alarms = alms))
+                    alm_copy = []
+                    uai = av.get_uai(forced=True)
+                    if uai:
+                        alm_copy.append(copy.deepcopy(uai))
+                        uves.append(UVEAlarmStateMachineInfo(
+                            uai = UVEAlarms(name = uk, alarms = alm_copy),
+                            uac = av.get_uac(), uas = av.get_uas()))
             resp.uves = uves 
             if np == len(parts):
                 mr = False
@@ -1025,7 +1791,7 @@ class Controller(object):
                 ph.start()
                 self._workers[partno] = ph
                 self._uvestats[partno] = {}
-                tout = 600
+                tout = 1200
                 idx = 0
                 while idx < tout:
                     # When this partitions starts,
@@ -1047,14 +1813,19 @@ class Controller(object):
             if partno in self._workers:
                 ph = self._workers[partno]
                 self._logger.error("Kill part %s" % str(partno))
-                ph.kill()
-                res,db = ph.get(False)
+                ph.kill(timeout=60)
+                try:
+                    res,db = ph.get(False)
+                except gevent.Timeout:
+                    self._logger.error("Unable to kill partition %d" % partno)
+                    return False
+                    
                 self._logger.error("Returned " + str(res))
                 self._uveqf[partno] = self._workers[partno].acq_time()
                 del self._workers[partno]
                 del self._uvestats[partno]
 
-                tout = 600
+                tout = 1200
                 idx = 0
                 while idx < tout:
                     # When this partitions stop.s
@@ -1104,21 +1875,21 @@ class Controller(object):
             dout = copy.deepcopy(self._uvestats[pk])
             self._uvestats[pk] = {}
             for ktab,tab in dout.iteritems():
-                au_keys = []
+                utct = UVETableCount()
+                utct.keys = 0
+                utct.count = 0
                 for uk,uc in tab.iteritems():
                     s_keys.add(uk)
                     n_updates += uc
-                    ukc = UVEKeyCount()
-                    ukc.key = uk
-                    ukc.count = uc
-                    au_keys.append(ukc)
+                    utct.keys += 1
+                    utct.count += uc
                 au_obj = AlarmgenUpdate(name=self._sandesh._source + ':' + \
                         self._sandesh._node_type + ':' + \
                         self._sandesh._module + ':' + \
                         self._sandesh._instance_id,
                         partition = pk,
                         table = ktab,
-                        o = au_keys,
+                        o = utct,
                         i = None,
                         sandesh=self._sandesh)
                 self._logger.debug('send output stats: %s' % (au_obj.log()))
@@ -1232,10 +2003,15 @@ class Controller(object):
         uname = alarm_req.table+':'+alarm_req.name
         atype = alarm_req.type
         try:
-            alarm_type = self.tab_alarms[table][uname][atype]
+            alarm_type = \
+                self.tab_alarms[table][uname][atype].get_uai()
         except KeyError:
             return SandeshAlarmAckResponseCode.ALARM_NOT_PRESENT
         else:
+            # Either alarm is not present ot it is not in Active or Soak_Idle
+            # state
+            if alarm_type is None:
+                return SandeshAlarmAckResponseCode.ALARM_NOT_PRESENT
             # Either the timestamp sent by the client is invalid or
             # the alarm is updated.
             if alarm_type.timestamp != alarm_req.timestamp:
@@ -1245,8 +2021,12 @@ class Controller(object):
                 return SandeshAlarmAckResponseCode.SUCCESS
             # All sanity checks passed. Acknowledge the alarm.
             alarm_type.ack = True
-            alarm = copy.deepcopy(self.tab_alarms[table][uname])
-            alarm_data = UVEAlarms(name=alarm_req.name, alarms=alarm.values())
+            alarm = []
+            for nm, asm in self.tab_alarms[table][uname].iteritems():
+                uai = asm.get_uai()
+                if uai:
+                    alarm.append(copy.deepcopy(uai))
+            alarm_data = UVEAlarms(name=alarm_req.name, alarms=alarm)
             alarm_sandesh = AlarmTrace(data=alarm_data, table=table,
                                        sandesh=self._sandesh)
             alarm_sandesh.send(sandesh=self._sandesh)
@@ -1364,10 +2144,13 @@ class Controller(object):
         finally:
             self._logger.error('AlarmGen stopping everything')
             self.stop()
+            exit()
 
     def stop(self):
         self._sandesh._client._connection.set_admin_state(down=True)
         self._sandesh.uninit()
+        if self._config_handler:
+            self._config_handler.stop()
         l = len(self.gevs)
         for idx in range(0,l):
             self._logger.error('AlarmGen killing %d of %d' % (idx+1, l))

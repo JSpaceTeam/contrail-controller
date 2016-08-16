@@ -8,6 +8,7 @@
 #include <boost/function.hpp>
 #include <boost/system/error_code.hpp>
 #include <boost/scoped_ptr.hpp>
+#include <tbb/mutex.h>
 
 #include <map>
 #include <set>
@@ -25,6 +26,8 @@ namespace pugi {
 class xml_node;
 }
 
+class BgpGlobalSystemConfig;
+class BgpRouterState;
 class BgpServer;
 struct DBRequest;
 class IPeer;
@@ -33,11 +36,14 @@ class XmppServer;
 class BgpXmppChannelMock;
 class BgpXmppChannelManager;
 class BgpXmppChannelManagerMock;
+class Timer;
+class XmppConfigUpdater;
 class XmppPeerInfoData;
 class XmppSession;
 
 class BgpXmppChannel {
 public:
+    static const int kEndOfRibTime = 30; // seconds
     enum StatsIndex {
         RX,
         TX,
@@ -93,7 +99,10 @@ public:
 
     void set_peer_closed(bool flag);
     bool peer_deleted() const;
+    bool membership_unavailable() const { return membership_unavailable_; }
     uint64_t peer_closed_at() const;
+    bool routingtable_membership_request_map_empty() const;
+    size_t GetMembershipRequestQueueSize() const;
 
     const XmppSession *GetSession() const;
     const Stats &rx_stats() const { return stats_[RX]; }
@@ -109,10 +118,11 @@ public:
     void FillTableMembershipInfo(BgpNeighborResp *resp) const;
     void FillCloseInfo(BgpNeighborResp *resp) const;
     void StaleCurrentSubscriptions();
+    void LlgrStaleCurrentSubscriptions();
     void SweepCurrentSubscriptions();
     void XMPPPeerInfoSend(const XmppPeerInfoData &peer_info) const;
-
     const XmppChannel *channel() const { return channel_; }
+    void StartEndOfRibTimer();
 
     uint64_t get_rx_route_reach() const { return stats_[RX].reach; }
     uint64_t get_rx_route_unreach() const { return stats_[RX].unreach; }
@@ -121,6 +131,7 @@ public:
     uint64_t get_tx_route_reach() const { return stats_[TX].reach; }
     uint64_t get_tx_route_unreach() const { return stats_[TX].unreach; }
     uint64_t get_tx_update() const { return stats_[TX].rt_updates; }
+    bool SkipUpdateSend();
 
 protected:
     XmppChannel *channel_;
@@ -217,10 +228,11 @@ private:
                                     const XmppStanza::XmppMessageIq *iq,
                                     bool add_change);
 
-    void RegisterTable(BgpTable *table, int instance_id);
-    void UnregisterTable(BgpTable *table);
+    void RegisterTable(int line, BgpTable *table, int instance_id);
+    void UnregisterTable(int line, BgpTable *table);
     bool MembershipResponseHandler(std::string table_name);
-    void MembershipRequestCallback(IPeer *ipeer, BgpTable *table);
+    void MembershipRequestCallback(BgpTable *table);
+    void ProcessPendingSubscriptions();
     void DequeueRequest(const std::string &table_name, DBRequest *request);
     bool XmppDecodeAddress(int af, const std::string &address,
                            IpAddress *addrp, bool zero_ok = false);
@@ -229,7 +241,18 @@ private:
     void FlushDeferQ(std::string vrf_name, std::string table_name);
     void ProcessDeferredSubscribeRequest(RoutingInstance *rt_instance,
                                          int instance_id);
-    void ClearStaledSubscription(SubscriptionState &sub_state);
+    void ClearStaledSubscription(BgpTable *rtarget_table,
+            RoutingInstance *rt_instance, BgpAttrPtr attr,
+            SubscriptionState *sub_state);
+    void UpdateRouteTargetRouteFlag(const SubscriptionState *sub_state,
+        bool llgr);
+    const BgpXmppChannelManager *manager() const { return manager_; }
+    bool ProcessMembershipResponse(std::string table_name,
+             RoutingTableMembershipRequestMap::iterator loc);
+    void ReceiveEndOfRIB(Address::Family family);
+    void EndOfRibTimerErrorHandler(std::string error_name,
+                                   std::string error_message);
+    bool EndOfRibTimerExpired();
 
     xmps::PeerId peer_id_;
     BgpServer *bgp_server_;
@@ -247,6 +270,10 @@ private:
     bool delete_in_progress_;
     bool deleted_;
     bool defer_peer_close_;
+    bool membership_unavailable_;
+    bool skip_update_send_;
+    bool skip_update_send_cached_;
+    Timer *end_of_rib_timer_;
     WorkQueue<std::string> membership_response_worker_;
     SubscribedRoutingInstanceList routing_instances_;
     PublishedRTargetRoutes rtarget_routes_;
@@ -283,6 +310,7 @@ public:
     }
 
     void VisitChannels(BgpXmppChannelManager::VisitorFn);
+    void VisitChannels(BgpXmppChannelManager::VisitorFn) const;
     BgpXmppChannel *FindChannel(const XmppChannel *channel);
     BgpXmppChannel *FindChannel(std::string client);
     void RemoveChannel(XmppChannel *channel);
@@ -303,21 +331,28 @@ public:
     void IdentifierUpdateCallback(Ip4Address old_identifier);
 
     uint32_t count() const {
+        tbb::mutex::scoped_lock lock(mutex_);
         return channel_map_.size();
     }
     uint32_t NumUpPeer() const {
+        tbb::mutex::scoped_lock lock(mutex_);
         return channel_map_.size();
     }
 
-    uint32_t deleting_count() const { return deleting_count_; }
+    int32_t deleting_count() const { return deleting_count_; }
     void increment_deleting_count() { deleting_count_++; }
-    void decrement_deleting_count() { deleting_count_--; }
+    void decrement_deleting_count() {
+        assert(deleting_count_);
+        deleting_count_--;
+    }
 
     BgpServer *bgp_server() { return bgp_server_; }
     XmppServer *xmpp_server() { return xmpp_server_; }
+    const XmppServer *xmpp_server() const { return xmpp_server_; }
     uint64_t get_subscription_gen_id() {
         return subscription_gen_id_.fetch_and_increment();
     }
+    bool CollectStats(BgpRouterState *state, bool first) const;
 
 protected:
     virtual BgpXmppChannel *CreateChannel(XmppChannel *channel);
@@ -326,16 +361,19 @@ private:
     friend class BgpXmppChannelManagerMock;
     friend class BgpXmppUnitTest;
 
+    void FillPeerInfo(const BgpXmppChannel *channel) const;
+
     XmppServer *xmpp_server_;
-    BgpServer  *bgp_server_;
+    BgpServer *bgp_server_;
     WorkQueue<BgpXmppChannel *> queue_;
+    mutable tbb::mutex mutex_;
     XmppChannelMap channel_map_;
     XmppChannelNameMap channel_name_map_;
     int id_;
     int admin_down_listener_id_;
     int asn_listener_id_;
     int identifier_listener_id_;
-    uint32_t deleting_count_;
+    tbb::atomic<int32_t> deleting_count_;
     // Generation number for subscription tracking
     tbb::atomic<uint64_t> subscription_gen_id_;
 

@@ -34,10 +34,6 @@ AgentProfile::AgentProfile(Agent *agent, bool enable) :
     timer_ = TimerManager::CreateTimer
         (*(agent_->event_manager())->io_service(), "Agent Profile",
          task->GetTaskId("Agent::Profile"), 0);
-    if (enable) {
-        timer_->Start(kProfileTimeout, boost::bind(&AgentProfile::TimerRun,
-                                                   this));
-    }
     time(&start_time_);
 }
 
@@ -45,11 +41,28 @@ AgentProfile::~AgentProfile() {
     TimerManager::DeleteTimer(timer_);
 }
 
+void AgentProfile::Shutdown() {
+    timer_->Cancel();
+}
+
+void AgentProfile::InitDone() {
+    if (enable_) {
+        timer_->Start(kProfileTimeout, boost::bind(&AgentProfile::TimerRun,
+                                                   this));
+    }
+}
+
 bool AgentProfile::TimerRun() {
     ProfileData *data = GetLastProfileData();
     data->Get(agent_);
     if (pkt_flow_stats_cb_.empty() == false) {
         pkt_flow_stats_cb_(data);
+    }
+    if (ksync_stats_cb_.empty() == false) {
+        ksync_stats_cb_(data);
+    }
+    if (flow_stats_cb_.empty() == false) {
+        flow_stats_cb_(data);
     }
     Log();
     return true;
@@ -107,17 +120,55 @@ void ProfileData::DBTableStats::Accumulate(const DBTableBase *table) {
 void ProfileData::WorkQueueStats::Reset() {
     queue_count_ = 0;
     enqueue_count_ = 0;
+    dequeue_count_ = 0;
     max_queue_count_ = 0;
-    task_start_count_ = 0;
+    start_count_ = 0;
+    busy_time_ = 0;
+}
+
+void ProfileData::FlowTokenStats::Reset() {
+    add_tokens_ = 0;
+    add_failures_ = 0;
+    add_restarts_ = 0;
+    ksync_tokens_ = 0;
+    ksync_failures_ = 0;
+    ksync_restarts_ = 0;
+    update_tokens_ = 0;
+    update_failures_ = 0;
+    update_restarts_ = 0;
+    del_tokens_ = 0;
+    del_failures_ = 0;
+    del_restarts_ = 0;
 }
 
 void ProfileData::FlowStats::Reset() {
-     flow_count_ = 0;
-     add_count_ = 0;
-     del_count_= 0;
-     audit_count_ = 0;
-     reval_count_ = 0;
-     pkt_flow_queue_count_.Reset();
+    flow_count_ = 0;
+    add_count_ = 0;
+    del_count_= 0;
+    audit_count_ = 0;
+    reval_count_ = 0;
+    recompute_count_ = 0;
+    pkt_handler_queue_.Reset();
+    flow_mgmt_queue_.Reset();
+    flow_update_queue_.Reset();
+    for (uint16_t i = 0; i < flow_event_queue_.size(); i++) {
+        flow_event_queue_[i].Reset();
+    }
+    for (uint16_t i = 0; i < flow_tokenless_queue_.size(); i++) {
+        flow_tokenless_queue_[i].Reset();
+    }
+    for (uint16_t i = 0; i < flow_delete_queue_.size(); i++) {
+        flow_delete_queue_[i].Reset();
+    }
+
+    for (uint16_t i = 0; i < flow_ksync_queue_.size(); i++) {
+        flow_ksync_queue_[i].Reset();
+    }
+
+    for (uint16_t i = 0; i < flow_stats_queue_.size(); i++) {
+        flow_stats_queue_[i].Reset();
+    }
+    token_stats_.Reset();
 }
 
 void ProfileData::PktStats::Reset() {
@@ -149,7 +200,6 @@ ProfileData::ProfileData():time_() {
     tx_stats_.Reset();
     ksync_tx_queue_count_.Reset();
     ksync_rx_queue_count_.Reset();
-
 }
 
 void ProfileData::Get(Agent *agent) {
@@ -235,10 +285,6 @@ static void GetDBTableStats(SandeshDBTableStatsInfo *stats, int index,
         } else if (itr->first.find(kMplsDbTablePrefix) != std::string::npos) {
            DBStatsToSandesh(&db_stats, "Mpls", itr->second);
            db_stats_list.push_back(db_stats);
-        } else if (itr->first.find(kLoadBalnceDbTablePrefix) !=
-                   std::string::npos) {
-           DBStatsToSandesh(&db_stats, "Loadbalancer", itr->second);
-           db_stats_list.push_back(db_stats);
         } else if (itr->first.find(kVnDbTablePrefix) != std::string::npos) {
            DBStatsToSandesh(&db_stats, "Vn", itr->second);
            db_stats_list.push_back(db_stats);
@@ -289,8 +335,9 @@ static void GetFlowStats(SandeshFlowStats *stats, int index,
     stats->set_add_count(data->flow_.add_count_);
     stats->set_del_count(data->flow_.del_count_);
     stats->set_reval_count(data->flow_.reval_count_);
+    stats->set_recompute_count(data->flow_.recompute_count_);
     stats->set_audit_count(data->flow_.audit_count_);
-    stats->set_handle_update(data->flow_.handle_update_);
+    stats->set_vrouter_responses(data->flow_.vrouter_responses_);
     stats->set_vrouter_error(data->flow_.vrouter_error_);
 }
 
@@ -388,5 +435,235 @@ void SandeshTaskStatsRequest::HandleRequest() const {
         stats_list.push_back(stats);
     }
     resp->set_stats(stats_list);
+    resp->Response();
+}
+
+static void GetOneQueueSummary(SandeshFlowQueueSummaryOneInfo *one,
+                               ProfileData::WorkQueueStats *stats) {
+    one->set_qcount(stats->queue_count_);
+    one->set_enqueues(stats->enqueue_count_);
+    one->set_dequeues(stats->dequeue_count_);
+    one->set_max_qlen(stats->max_queue_count_);
+    one->set_starts(stats->start_count_);
+    one->set_busy_msec(stats->busy_time_);
+}
+
+static void GetQueueSummaryInfo(SandeshFlowQueueSummaryInfo *info, int index,
+                                ProfileData *data) {
+    ProfileData::FlowStats *flow_stats = &data->flow_;
+
+    info->set_index(index);
+    info->set_time_str(data->time_);
+    // flow_event_queue
+    uint64_t qcount = 0;
+    uint64_t enqueues = 0;
+    uint64_t dequeues = 0;
+    uint64_t max_qlen = 0;
+    uint64_t busy_time = 0;
+    uint64_t starts = 0;
+    std::vector<ProfileData::WorkQueueStats>::const_iterator it =
+        flow_stats->flow_event_queue_.begin();
+    while (it != flow_stats->flow_event_queue_.end()) {
+        qcount += it->queue_count_;
+        enqueues += it->enqueue_count_;
+        dequeues += it->dequeue_count_;
+        busy_time += it->busy_time_;
+        starts += it->start_count_;
+        if (it->max_queue_count_ > max_qlen) {
+            max_qlen = it->max_queue_count_;
+        }
+        it++;
+    }
+    SandeshFlowQueueSummaryOneInfo one;
+    one.set_qcount(qcount);
+    one.set_enqueues(enqueues);
+    one.set_dequeues(dequeues);
+    one.set_max_qlen(max_qlen);
+    one.set_starts(starts);
+    one.set_busy_msec(busy_time);
+    info->set_flow_event_queue(one);
+
+    // flow_tokenless_queue
+    qcount = 0;
+    enqueues = 0;
+    dequeues = 0;
+    max_qlen = 0;
+    busy_time = 0;
+    starts = 0;
+    it = flow_stats->flow_tokenless_queue_.begin();
+    while (it != flow_stats->flow_tokenless_queue_.end()) {
+        qcount += it->queue_count_;
+        enqueues += it->enqueue_count_;
+        dequeues += it->dequeue_count_;
+        busy_time += it->busy_time_;
+        starts += it->start_count_;
+        if (it->max_queue_count_ > max_qlen) {
+            max_qlen = it->max_queue_count_;
+        }
+        it++;
+    }
+    one.set_qcount(qcount);
+    one.set_enqueues(enqueues);
+    one.set_dequeues(dequeues);
+    one.set_max_qlen(max_qlen);
+    one.set_starts(starts);
+    one.set_busy_msec(busy_time);
+    info->set_flow_tokenless_queue(one);
+
+    // flow_delete_queue
+    qcount = 0;
+    enqueues = 0;
+    dequeues = 0;
+    max_qlen = 0;
+    busy_time = 0;
+    starts = 0;
+    it = flow_stats->flow_delete_queue_.begin();
+    while (it != flow_stats->flow_delete_queue_.end()) {
+        qcount += it->queue_count_;
+        enqueues += it->enqueue_count_;
+        dequeues += it->dequeue_count_;
+        busy_time += it->busy_time_;
+        starts += it->start_count_;
+        if (it->max_queue_count_ > max_qlen) {
+            max_qlen = it->max_queue_count_;
+        }
+        it++;
+    }
+    one.set_qcount(qcount);
+    one.set_enqueues(enqueues);
+    one.set_dequeues(dequeues);
+    one.set_max_qlen(max_qlen);
+    one.set_starts(starts);
+    one.set_busy_msec(busy_time);
+    info->set_flow_delete_queue(one);
+
+    // flow_ksync_queue
+    qcount = 0;
+    enqueues = 0;
+    dequeues = 0;
+    max_qlen = 0;
+    busy_time = 0;
+    starts = 0;
+    it = flow_stats->flow_ksync_queue_.begin();
+    while (it != flow_stats->flow_ksync_queue_.end()) {
+        qcount += it->queue_count_;
+        enqueues += it->enqueue_count_;
+        dequeues += it->dequeue_count_;
+        busy_time += it->busy_time_;
+        starts += it->start_count_;
+        if (it->max_queue_count_ > max_qlen) {
+            max_qlen = it->max_queue_count_;
+        }
+        it++;
+    }
+    one.set_qcount(qcount);
+    one.set_enqueues(enqueues);
+    one.set_dequeues(dequeues);
+    one.set_max_qlen(max_qlen);
+    one.set_starts(starts);
+    one.set_busy_msec(busy_time);
+    info->set_flow_ksync_queue(one);
+
+    // flow_mgmt_queue
+    GetOneQueueSummary(&one, &flow_stats->flow_mgmt_queue_);
+    info->set_flow_mgmt_queue(one);
+
+    // flow_update_queue
+    GetOneQueueSummary(&one, &flow_stats->flow_update_queue_);
+    info->set_flow_update_queue(one);
+
+    // flow_stats_queue
+    qcount = 0;
+    enqueues = 0;
+    dequeues = 0;
+    max_qlen = 0;
+    busy_time = 0;
+    starts = 0;
+    it = flow_stats->flow_stats_queue_.begin();
+    while (it != flow_stats->flow_stats_queue_.end()) {
+        qcount += it->queue_count_;
+        enqueues += it->enqueue_count_;
+        dequeues += it->dequeue_count_;
+        busy_time += it->busy_time_;
+        starts += it->start_count_;
+        if (it->max_queue_count_ > max_qlen) {
+            max_qlen = it->max_queue_count_;
+        }
+        it++;
+    }
+    one.set_qcount(qcount);
+    one.set_enqueues(enqueues);
+    one.set_dequeues(dequeues);
+    one.set_max_qlen(max_qlen);
+    one.set_starts(starts);
+    one.set_busy_msec(busy_time);
+    info->set_flow_stats_queue(one);
+
+    // pkt_handler queue
+    GetOneQueueSummary(&one, &flow_stats->pkt_handler_queue_);
+    info->set_pkt_handler_queue(one);
+
+    // ksync_tx_queue
+    GetOneQueueSummary(&one, &data->ksync_tx_queue_count_);
+    info->set_ksync_tx_queue(one);
+
+    // ksync_rx_queue
+    GetOneQueueSummary(&one, &data->ksync_rx_queue_count_);
+    info->set_ksync_rx_queue(one);
+
+    SandeshFlowTokenInfo token_info;
+    ProfileData::FlowTokenStats *token_stats = &flow_stats->token_stats_;
+    token_info.set_add_tokens(token_stats->add_tokens_);
+    token_info.set_add_token_full(token_stats->add_failures_);
+    token_info.set_add_token_restarts(token_stats->add_restarts_);
+    token_info.set_ksync_tokens(token_stats->ksync_tokens_);
+    token_info.set_ksync_token_full(token_stats->ksync_failures_);
+    token_info.set_ksync_token_restarts(token_stats->ksync_restarts_);
+    token_info.set_update_tokens(token_stats->update_tokens_);
+    token_info.set_update_token_full(token_stats->update_failures_);
+    token_info.set_update_token_restarts(token_stats->update_restarts_);
+    token_info.set_delete_tokens(token_stats->del_tokens_);
+    token_info.set_delete_token_full(token_stats->del_failures_);
+    token_info.set_delete_token_restarts(token_stats->del_restarts_);
+    info->set_token_stats(token_info);
+}
+
+void SandeshFlowQueueSummaryRequest::HandleRequest() const {
+    SandeshFlowQueueSummaryResp *resp = new SandeshFlowQueueSummaryResp();
+
+    Agent *agent = Agent::GetInstance();
+    AgentProfile *profile = agent->oper_db()->agent_profile();
+    uint16_t end = profile->seconds_history_index();
+    uint16_t start = 0;
+    if (end > AgentProfile::kSecondsHistoryCount)
+        start = end - AgentProfile::kSecondsHistoryCount;
+
+    std::vector<SandeshFlowQueueSummaryInfo> info_list;
+    for (uint16_t i = start; i < end; i++) {
+        uint16_t index = i % AgentProfile::kSecondsHistoryCount;
+        ProfileData *data = profile->GetProfileData(index);
+        SandeshFlowQueueSummaryInfo info;
+        GetQueueSummaryInfo(&info, index, data);
+        info_list.push_back(info);
+    }
+
+    resp->set_summary(info_list);
+    resp->set_context(context());
+    resp->Response();
+}
+
+void SandeshSetProfileParams::HandleRequest() const {
+    SandeshProfileParams *resp = new SandeshProfileParams();
+    Agent *agent = Agent::GetInstance();
+    TaskScheduler *scheduler = agent->task_scheduler();
+
+    scheduler->EnableLatencyThresholds(get_task_exec_threshold() * 1000,
+                                       get_task_schedule_threshold() * 1000);
+    agent->SetMeasureQueueDelay(get_measure_queue_run_time());
+
+    resp->set_task_exec_threshold(scheduler->execute_delay()/1000);
+    resp->set_task_schedule_threshold(scheduler->schedule_delay()/1000);
+    resp->set_measure_queue_run_time(agent->MeasureQueueDelay());
+    resp->set_context(context());
     resp->Response();
 }

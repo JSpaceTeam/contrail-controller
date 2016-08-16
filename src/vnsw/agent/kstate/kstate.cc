@@ -15,6 +15,8 @@
 #include "drop_stats_kstate.h"
 #include "vxlan_kstate.h"
 #include "kstate_io_context.h"
+#include "forwarding_class_kstate.h"
+#include "qos_config_kstate.h"
 #include "vr_nexthop.h"
 #include "vr_message.h"
 #include <net/if.h>
@@ -114,6 +116,7 @@ void KState::IfMsgHandler(vr_interface_req *r) {
     data.set_duplexity(r->get_vifr_duplex());
 
     data.set_mac(ist->MacToString(r->get_vifr_mac()));
+    data.set_qos_map_index(r->get_vifr_qos_map_index());
     list.push_back(data);
 
     UpdateContext(reinterpret_cast<void *>(r->get_vifr_idx()));
@@ -376,7 +379,6 @@ void KState::DropStatsMsgHandler(vr_drop_stats_req *req) {
     resp->set_ds_pcow_fail(req->get_vds_pcow_fail());
     resp->set_ds_flood(req->get_vds_flood());
     resp->set_ds_mcast_clone_fail(req->get_vds_mcast_clone_fail());
-    resp->set_ds_composite_invalid_interface(req->get_vds_composite_invalid_interface());
     resp->set_ds_rewrite_fail(req->get_vds_rewrite_fail());
     resp->set_ds_misc(req->get_vds_misc());
     resp->set_ds_invalid_packet(req->get_vds_invalid_packet());
@@ -386,5 +388,90 @@ void KState::DropStatsMsgHandler(vr_drop_stats_req *req) {
     resp->set_ds_cloned_original(req->get_vds_cloned_original());
     resp->set_ds_invalid_vnid(req->get_vds_invalid_vnid());
     resp->set_ds_frag_err(req->get_vds_frag_err());
+    resp->set_ds_invalid_source(req->get_vds_invalid_source());
+    resp->set_ds_mcast_df_bit(req->get_vds_mcast_df_bit());
+    resp->set_ds_arp_no_where_to_go(req->get_vds_arp_no_where_to_go());
+    resp->set_ds_arp_no_route(req->get_vds_arp_no_route());
+    resp->set_ds_l2_no_route(req->get_vds_l2_no_route());
+    resp->set_ds_vlan_fwd_tx(req->get_vds_vlan_fwd_tx());
+    resp->set_ds_vlan_fwd_enq(req->get_vds_vlan_fwd_enq());
 }
 
+void KState::ForwardingClassMsgHandler(vr_fc_map_req *r) {
+    KForwardingClass data;
+    ForwardingClassKState *mst;
+
+    mst = static_cast<ForwardingClassKState *>(this);
+    KForwardingClassResp *resp =
+        static_cast<KForwardingClassResp *>(mst->response_object());
+
+    vector<KForwardingClass> &list =
+         const_cast<std::vector<KForwardingClass>&>(
+                 resp->get_forwarding_class_list());
+
+    data.set_id(r->get_fmr_id()[0]);
+    data.set_dscp(r->get_fmr_dscp()[0]);
+    data.set_mpls_exp(r->get_fmr_mpls_qos()[0]);
+    data.set_vlan_priority(r->get_fmr_dotonep()[0]);
+    data.set_qos_queue(r->get_fmr_queue_id()[0]);
+    list.push_back(data);
+
+    uint32_t index = r->get_fmr_id()[0];
+    UpdateContext(reinterpret_cast<void *>(index));
+}
+
+void KState::QosConfigMsgHandler(vr_qos_map_req *r) {
+    KQosConfig data;
+    QosConfigKState *mst;
+
+    mst = static_cast<QosConfigKState *>(this);
+    KQosConfigResp *resp = static_cast<KQosConfigResp *>(mst->response_object());
+
+    vector<KQosConfig> &list =
+       const_cast<std::vector<KQosConfig>&>(resp->get_qos_config_list());
+    data.set_id(r->get_qmr_id());
+
+    std::vector<int8_t>::const_iterator qos_it =
+        r->get_qmr_dscp().begin();
+    std::vector<int8_t>::const_iterator fc_it =
+        r->get_qmr_dscp_fc_id().begin();
+    std::vector<kQosIdFowardingClassPair> dscp_list;
+    for(;qos_it != r->get_qmr_dscp().end() &&
+         fc_it != r->get_qmr_dscp_fc_id().end();
+         qos_it++, fc_it++) {
+        kQosIdFowardingClassPair pair;
+        pair.set_qos(*qos_it);
+        pair.set_fc_id(*fc_it);
+        dscp_list.push_back(pair);
+    }
+    data.set_dscp_map(dscp_list);
+
+    qos_it = r->get_qmr_mpls_qos().begin();
+    fc_it = r->get_qmr_mpls_qos_fc_id().begin();
+    std::vector<kQosIdFowardingClassPair> mpls_list;
+    for(;qos_it != r->get_qmr_mpls_qos().end() &&
+         fc_it != r->get_qmr_mpls_qos_fc_id().end(); qos_it++, fc_it++) {
+        kQosIdFowardingClassPair pair;
+        pair.set_qos(*qos_it);
+        pair.set_fc_id(*fc_it);
+        mpls_list.push_back(pair);
+    }
+    data.set_mpls_exp_map(mpls_list);
+
+    qos_it = r->get_qmr_dotonep().begin();
+    fc_it = r->get_qmr_dotonep_fc_id().begin();
+    std::vector<kQosIdFowardingClassPair> vlan_priority_list;
+    for(;qos_it != r->get_qmr_dotonep().end() &&
+         fc_it != r->get_qmr_dotonep_fc_id().end();
+         qos_it++, fc_it++) {
+        kQosIdFowardingClassPair pair;
+        pair.set_qos(*qos_it);
+        pair.set_fc_id(*fc_it);
+        vlan_priority_list.push_back(pair);
+    }
+    data.set_vlan_priority_map(vlan_priority_list);
+    list.push_back(data);
+
+    uint32_t id = r->get_qmr_id();
+    UpdateContext(reinterpret_cast<void *>(id));
+}

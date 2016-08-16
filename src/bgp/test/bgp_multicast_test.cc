@@ -68,25 +68,26 @@ public:
     virtual std::string ToString() const { return address_str_; }
     virtual std::string ToUVEKey() const { return address_str_; }
     virtual BgpServer *server() { return server_; }
+    virtual BgpServer *server() const { return server_; }
     virtual IPeerClose *peer_close() { return NULL; }
     virtual IPeerDebugStats *peer_stats() { return NULL; }
     virtual const IPeerDebugStats *peer_stats() const { return NULL; }
     virtual bool IsReady() const { return true; }
     virtual bool IsXmppPeer() const { return true; }
     virtual bool IsRegistrationRequired() const { return false; }
-    virtual void Close() { }
+    virtual void Close(bool non_graceful) { }
     virtual BgpProto::BgpPeerType PeerType() const { return BgpProto::IBGP; }
     virtual uint32_t bgp_identifier() const { return address_.to_ulong(); }
     virtual const std::string GetStateName() const { return ""; }
     virtual bool SendUpdate(const uint8_t *msg, size_t msgsize) { return true; }
-    virtual void UpdateRefCount(int count) const { }
-    virtual tbb::atomic<int> GetRefCount() const {
-        tbb::atomic<int> count;
-        count = 0;
-        return count;
-    }
+    virtual void UpdateTotalPathCount(int count) const { }
+    virtual int GetTotalPathCount() const { return 0; }
     virtual void UpdatePrimaryPathCount(int count) const { }
     virtual int GetPrimaryPathCount() const { return 0; }
+    virtual void MembershipRequestCallback(BgpTable *table) { }
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+        BgpRoute *route, BgpPath *path) { return false; }
+    virtual bool CanUseMembershipManager() const { return true; }
 
 private:
     BgpServer *server_;
@@ -126,7 +127,7 @@ protected:
             server_.database()->FindTable("red.ermvpn.0"));
         red_tm_ = red_table_->tree_manager_;
         TASK_UTIL_EXPECT_EQ(red_table_, red_tm_->table_);
-        TASK_UTIL_EXPECT_EQ(DB::PartitionCount(),
+        TASK_UTIL_EXPECT_EQ(red_table_->PartitionCount(),
                             (int)red_tm_->partitions_.size());
         TASK_UTIL_EXPECT_NE(-1, red_tm_->listener_id_);
 
@@ -134,7 +135,7 @@ protected:
             server_.database()->FindTable("green.ermvpn.0"));
         green_tm_ = green_table_->tree_manager_;
         TASK_UTIL_EXPECT_EQ(green_table_, green_tm_->table_);
-        TASK_UTIL_EXPECT_EQ(DB::PartitionCount(),
+        TASK_UTIL_EXPECT_EQ(green_table_->PartitionCount(),
                             (int)green_tm_->partitions_.size());
         TASK_UTIL_EXPECT_NE(-1, green_tm_->listener_id_);
 
@@ -328,7 +329,7 @@ protected:
 
     size_t VerifyTreeUpdateCount(McastTreeManager *tm) {
         size_t total = 0;
-        for (int idx = 0; idx < DB::PartitionCount(); idx++) {
+        for (int idx = 0; idx < ErmVpnTable::kPartitionCount; idx++) {
             total += tm->partitions_[idx]->update_count_;
         }
 

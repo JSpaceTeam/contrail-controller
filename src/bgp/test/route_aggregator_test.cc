@@ -67,6 +67,7 @@ public:
     virtual BgpServer *server() {
         return NULL;
     }
+    virtual BgpServer *server() const { return NULL; }
     virtual IPeerClose *peer_close() {
         return NULL;
     }
@@ -80,8 +81,7 @@ public:
         return true;
     }
     virtual bool IsXmppPeer() const { return false; }
-    virtual void Close() {
-    }
+    virtual void Close(bool non_graceful) { }
     BgpProto::BgpPeerType PeerType() const {
         return BgpProto::IBGP;
     }
@@ -91,14 +91,15 @@ public:
     virtual const std::string GetStateName() const {
         return "";
     }
-    virtual void UpdateRefCount(int count) const { }
-    virtual tbb::atomic<int> GetRefCount() const {
-        tbb::atomic<int> count;
-        count = 0;
-        return count;
-    }
+    virtual void UpdateTotalPathCount(int count) const { }
+    virtual int GetTotalPathCount() const { return 0; }
     virtual void UpdatePrimaryPathCount(int count) const { }
     virtual int GetPrimaryPathCount() const { return 0; }
+    virtual bool IsRegistrationRequired() const { return true; }
+    virtual void MembershipRequestCallback(BgpTable *table) { }
+    virtual bool MembershipPathCallback(DBTablePartBase *tpart,
+        BgpRoute *route, BgpPath *path) { return false; }
+    virtual bool CanUseMembershipManager() const { return true; }
 
 private:
     Ip4Address address_;
@@ -119,7 +120,9 @@ static const char *bgp_server_config = "\
 
 class RouteAggregatorTest : public ::testing::Test {
 protected:
-    RouteAggregatorTest() : bgp_server_(new BgpServer(&evm_)),
+    RouteAggregatorTest()
+      : config_db_(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable")),
+        bgp_server_(new BgpServer(&evm_)),
         parser_(&config_db_),
         validate_done_(false) {
         IFMapLinkTable_Init(&config_db_, &config_graph_);
@@ -148,6 +151,7 @@ protected:
         task_util::WaitForIdle();
         bgp_server_->Shutdown();
         task_util::WaitForIdle();
+        TASK_UTIL_ASSERT_EQ(0, bgp_server_->routing_instance_mgr()->count());
         db_util::Clear(&config_db_);
         IFMapServerParser *parser = IFMapServerParser::GetInstance("schema");
         parser->MetadataClear("schema");
@@ -2360,6 +2364,200 @@ TEST_F(RouteAggregatorTest, BasicInet6_1) {
                                  "2002:db8:85a3::8a2e:370:7334/128");
     DeleteRoute<Inet6Definition>(peers_[0], "test.inet6.0",
                                  "2002:db8:85a3::8a2e:370:7335/128");
+    task_util::WaitForIdle();
+}
+
+//
+// Validate route aggregation functionality got multiple routing instances
+// Add nexthop route and more specific for aggregate prefix in each instance
+// Verify that aggregate route is published
+//
+TEST_F(RouteAggregatorTest, MultipleInstances1) {
+    static const int kInstanceCount = 32;
+
+    ostringstream oss;
+    oss << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss << "<virtual-network name=\"test-vn" << idx << "\">\n";
+        oss << "  <network-id>" << idx << "</network-id>\n";
+        oss << "</virtual-network>\n";
+        oss << "<routing-instance name=\"test" << idx << "\">\n";
+        oss << "  <virtual-network>test-vn" << idx << "</virtual-network>\n";
+        oss << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss << "  <route-aggregate to=\"test-aggregate" << idx << "\"/>\n";
+        oss << "</routing-instance>\n";
+        oss << "<route-aggregate name=\"test-aggregate" << idx << "\">\n";
+        oss << "  <aggregate-route-entries>\n";
+        oss << "    <route>2.2.0.0/16</route>\n";
+        oss << "  </aggregate-route-entries>\n";
+        oss << "  <nexthop>1.1.1.1</nexthop>\n";
+        oss << "</route-aggregate>\n";
+    }
+    oss << "</config>\n";
+
+    string content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    BgpPeerMock *peer =
+        new BgpPeerMock(Ip4Address::from_string("10.1.1.1", ec));
+    peers_.push_back(peer);
+
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string instance = string("test") + integerToString(idx);
+        string table = instance + ".inet.0";
+        AddRoute<InetDefinition>(peer, table, "1.1.1.1/32", 100);
+        AddRoute<InetDefinition>(peer, table, "2.2.1.1/32", 100);
+    }
+    task_util::WaitForIdle();
+
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string instance = string("test") + integerToString(idx);
+        string table = instance + ".inet.0";
+        TASK_UTIL_EXPECT_EQ(3, RouteCount(table));
+        TASK_UTIL_EXPECT_TRUE(
+            RouteLookup<InetDefinition>(table, "2.2.0.0/16") != NULL);
+        BgpRoute *rt = RouteLookup<InetDefinition>(table, "2.2.0.0/16");
+        TASK_UTIL_EXPECT_EQ(2, rt->count());
+        TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+        TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+        TASK_UTIL_EXPECT_TRUE(
+            IsAggregateRoute<InetDefinition>(instance, table, "2.2.0.0/16"));
+        TASK_UTIL_EXPECT_FALSE(
+            IsAggregateRoute<InetDefinition>(instance, table, "1.1.1.1/32"));
+        TASK_UTIL_EXPECT_TRUE(
+            IsContributingRoute<InetDefinition>(instance, table, "2.2.1.1/32"));
+        TASK_UTIL_EXPECT_FALSE(
+            IsContributingRoute<InetDefinition>(instance, table, "1.1.1.1/32"));
+    }
+
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string instance = string("test") + integerToString(idx);
+        string table = instance + ".inet.0";
+        DeleteRoute<InetDefinition>(peer, table, "1.1.1.1/32");
+        DeleteRoute<InetDefinition>(peer, table, "2.2.1.1/32");
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+}
+
+//
+// Validate route aggregation functionality got multiple routing instances
+// Add nexthop route and more specific for aggregate prefix in each instance
+// Verify that aggregate route is published
+// Change nexthop for aggregate and verify that aggregate route is updated
+//
+TEST_F(RouteAggregatorTest, MultipleInstances2) {
+    static const int kInstanceCount = 32;
+
+    ostringstream oss;
+    oss << "<?xml version=\"1.0\" encoding\"utf-\"?>\n";
+    oss << "<config>\n";
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        oss << "<virtual-network name=\"test-vn" << idx << "\">\n";
+        oss << "  <network-id>" << idx << "</network-id>\n";
+        oss << "</virtual-network>\n";
+        oss << "<routing-instance name=\"test" << idx << "\">\n";
+        oss << "  <virtual-network>test-vn" << idx << "</virtual-network>\n";
+        oss << "  <vrf-target>target:1:" << idx << "</vrf-target>\n";
+        oss << "  <route-aggregate to=\"test-aggregate" << idx << "\"/>\n";
+        oss << "</routing-instance>\n";
+        oss << "<route-aggregate name=\"test-aggregate" << idx << "\">\n";
+        oss << "  <aggregate-route-entries>\n";
+        oss << "    <route>2.2.0.0/16</route>\n";
+        oss << "  </aggregate-route-entries>\n";
+        oss << "  <nexthop>1.1.1.1</nexthop>\n";
+        oss << "</route-aggregate>\n";
+    }
+    oss << "</config>\n";
+
+    string content = oss.str();
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    boost::system::error_code ec;
+    BgpPeerMock *peer =
+        new BgpPeerMock(Ip4Address::from_string("10.1.1.1", ec));
+    peers_.push_back(peer);
+
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string instance = string("test") + integerToString(idx);
+        string table = instance + ".inet.0";
+        AddRoute<InetDefinition>(peer, table, "1.1.1.1/32", 100);
+        AddRoute<InetDefinition>(peer, table, "2.2.1.1/32", 100);
+    }
+    task_util::WaitForIdle();
+
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string instance = string("test") + integerToString(idx);
+        string table = instance + ".inet.0";
+        TASK_UTIL_EXPECT_EQ(3, RouteCount(table));
+        TASK_UTIL_EXPECT_TRUE(
+            RouteLookup<InetDefinition>(table, "2.2.0.0/16") != NULL);
+        BgpRoute *rt = RouteLookup<InetDefinition>(table, "2.2.0.0/16");
+        TASK_UTIL_EXPECT_EQ(2, rt->count());
+        TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+        TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+        TASK_UTIL_EXPECT_TRUE(
+            IsAggregateRoute<InetDefinition>(instance, table, "2.2.0.0/16"));
+        TASK_UTIL_EXPECT_FALSE(
+            IsAggregateRoute<InetDefinition>(instance, table, "1.1.1.1/32"));
+        TASK_UTIL_EXPECT_TRUE(
+            IsContributingRoute<InetDefinition>(instance, table, "2.2.1.1/32"));
+        TASK_UTIL_EXPECT_FALSE(
+            IsContributingRoute<InetDefinition>(instance, table, "1.1.1.1/32"));
+    }
+
+    boost::replace_all(content, "1.1.1.1", "1.1.1.2");
+    EXPECT_TRUE(parser_.Parse(content));
+    task_util::WaitForIdle();
+
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string instance = string("test") + integerToString(idx);
+        string table = instance + ".inet.0";
+        DeleteRoute<InetDefinition>(peer, table, "1.1.1.1/32");
+        AddRoute<InetDefinition>(peer, table, "1.1.1.2/32", 100);
+    }
+    task_util::WaitForIdle();
+
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string instance = string("test") + integerToString(idx);
+        string table = instance + ".inet.0";
+        TASK_UTIL_EXPECT_EQ(3, RouteCount(table));
+        TASK_UTIL_EXPECT_TRUE(
+            RouteLookup<InetDefinition>(table, "2.2.0.0/16") != NULL);
+        BgpRoute *rt = RouteLookup<InetDefinition>(table, "2.2.0.0/16");
+        TASK_UTIL_EXPECT_EQ(2, rt->count());
+        TASK_UTIL_EXPECT_TRUE(rt->BestPath() != NULL);
+        TASK_UTIL_EXPECT_TRUE(rt->BestPath()->IsFeasible());
+
+        TASK_UTIL_EXPECT_TRUE(
+            IsAggregateRoute<InetDefinition>(instance, table, "2.2.0.0/16"));
+        TASK_UTIL_EXPECT_FALSE(
+            IsAggregateRoute<InetDefinition>(instance, table, "1.1.1.2/32"));
+        TASK_UTIL_EXPECT_TRUE(
+            IsContributingRoute<InetDefinition>(instance, table, "2.2.1.1/32"));
+        TASK_UTIL_EXPECT_FALSE(
+            IsContributingRoute<InetDefinition>(instance, table, "1.1.1.2/32"));
+    }
+
+    for (int idx = 1; idx <= kInstanceCount; ++idx) {
+        string instance = string("test") + integerToString(idx);
+        string table = instance + ".inet.0";
+        DeleteRoute<InetDefinition>(peer, table, "1.1.1.2/32");
+        DeleteRoute<InetDefinition>(peer, table, "2.2.1.1/32");
+    }
+
+    boost::replace_all(content, "<config>", "<delete>");
+    boost::replace_all(content, "</config>", "</delete>");
+    EXPECT_TRUE(parser_.Parse(content));
     task_util::WaitForIdle();
 }
 

@@ -63,7 +63,7 @@ VrfEntry::VrfEntry(const string &name, uint32_t flags, Agent *agent) :
         table_label_(MplsTable::kInvalidLabel),
         vxlan_id_(VxLanTable::kInvalidvxlan_id),
         rt_table_delete_bmap_(0),
-        route_resync_walker_(NULL) {
+        route_resync_walker_(NULL), allow_route_add_on_deleted_vrf_(false) {
 }
 
 VrfEntry::~VrfEntry() {
@@ -294,6 +294,10 @@ bool VrfEntry::DBEntrySandesh(Sandesh *sresp, std::string &name) const {
             data.set_vn("N/A");
         }
         data.set_table_label(table_label());
+        VrfTable *table = static_cast<VrfTable *>(get_table());
+        stringstream rd;
+        rd << table->agent()->compute_node_ip().to_string() << ":" << vrf_id();
+        data.set_RD(rd.str());
 
         std::vector<VrfSandeshData> &list = 
                 const_cast<std::vector<VrfSandeshData>&>(resp->get_vrf_list());
@@ -361,6 +365,37 @@ void VrfEntry::CancelDeleteTimer() {
 
 void VrfEntry::ResyncRoutes() {
     route_resync_walker_.get()->UpdateRoutesInVrf(this);
+}
+
+void VrfEntry::RetryDelete() {
+    if (AllRouteTablesEmpty() == false)
+        return;
+
+    // Enqueue a DB Request to notify the entry, entry should always be
+    // notified in db::DBTable task context
+    DBRequest req(DBRequest::DB_ENTRY_NOTIFY);
+    req.key = GetDBRequestKey();
+    (static_cast<VrfTable *>(get_table()))->Enqueue(&req);
+}
+
+bool VrfEntry::AllRouteTablesEmpty() const {
+    for (uint8_t type = (Agent::INVALID + 1);
+         type < Agent::ROUTE_TABLE_MAX;
+         type++) {
+        if (rt_table_db_[type]->empty() == false) {
+            return false;
+        }
+    }
+    return true;
+}
+
+InetUnicastAgentRouteTable *
+VrfEntry::GetInetUnicastRouteTable(const IpAddress &addr) const {
+    if (addr.is_v4())
+        return static_cast<InetUnicastAgentRouteTable *>
+            (GetInet4UnicastRouteTable());
+    return static_cast<InetUnicastAgentRouteTable *>
+        (GetInet6UnicastRouteTable());
 }
 
 std::auto_ptr<DBEntry> VrfTable::AllocEntry(const DBRequestKey *k) const {
@@ -613,9 +648,16 @@ void VrfTable::Input(DBTablePartition *partition, DBClient *client,
     VrfEntry *entry = static_cast<VrfEntry *>(partition->Find(key));
 
     if (entry && entry->IsDeleted()) {
-        OPER_TRACE(Vrf, "VRF pending delete, Ignoring DB operation for ",
-                   entry->GetName());
-        return;
+        if (req->oper != DBRequest::DB_ENTRY_NOTIFY) {
+            OPER_TRACE(Vrf, "VRF pending delete, Ignoring DB operation for ",
+                       entry->GetName());
+            return;
+        } else {
+            // Allow DB Operation for DB Entry Notify, along with
+            // validation for sub op as ADD_DEL_CHANGE
+            AgentKey *key = static_cast<AgentKey *>(req->key.get());
+            assert(key->sub_op_ == AgentKey::ADD_DEL_CHANGE);
+        }
     }
 
     AgentDBTable::Input(partition, client, req);

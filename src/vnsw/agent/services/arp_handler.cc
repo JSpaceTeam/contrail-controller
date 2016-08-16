@@ -75,7 +75,7 @@ bool ArpHandler::HandlePacket() {
             return true;
         }
 
-        if (tpa == spa) {
+        if (tpa == spa || spa == 0) {
             arp_cmd = GRATUITOUS_ARP;
         }
     } else {
@@ -148,7 +148,10 @@ bool ArpHandler::HandlePacket() {
             } else {
                 entry = new ArpEntry(io_, this, key, nh_vrf, ArpEntry::INITING,
                                      itf);
-                arp_proto->AddArpEntry(entry);
+                if (arp_proto->AddArpEntry(entry) == false) {
+                    delete entry;
+                    return true;
+                }
                 entry->HandleArpRequest();
                 return false;
             }
@@ -177,7 +180,10 @@ bool ArpHandler::HandlePacket() {
             } else { 
                 entry = new ArpEntry(io_, this, key, nh_vrf, ArpEntry::INITING,
                                      itf);
-                arp_proto->AddArpEntry(entry);
+                if (arp_proto->AddArpEntry(entry) == false) {
+                    delete entry;
+                    return true;
+                }
                 entry->HandleArpReply(MacAddress(arp_->arp_sha));
                 arp_ = NULL;
                 return false;
@@ -200,11 +206,8 @@ bool ArpHandler::HandlePacket() {
                 entry->HandleArpReply(MacAddress(arp_->arp_sha));
                 return true;
             } else {
-                entry = new ArpEntry(io_, this, key, key.vrf, ArpEntry::INITING, itf);
-                entry->HandleArpReply(MacAddress(arp_->arp_sha));
-                arp_proto->AddArpEntry(entry);
-                arp_ = NULL;
-                return false;
+                // ignore gratuitous ARP when entry is not present in cache
+                return true;
             }
         }
 
@@ -232,7 +235,10 @@ bool ArpHandler::HandleMessage() {
             if (!entry) {
                 entry = new ArpEntry(io_, this, ipc->key, ipc->key.vrf,
                                      ArpEntry::INITING, ipc->interface);
-                arp_proto->AddArpEntry(entry);
+                if (arp_proto->AddArpEntry(entry) == false) {
+                    delete entry;
+                    break;
+                }
                 ret = false;
             }
             arp_proto->IncrementStatsArpReq();

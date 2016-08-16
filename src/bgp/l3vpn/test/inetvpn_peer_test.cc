@@ -7,7 +7,7 @@
 
 #include "base/task_annotations.h"
 #include "bgp/bgp_factory.h"
-#include "bgp/bgp_peer_membership.h"
+#include "bgp/bgp_membership.h"
 #include "bgp/bgp_session_manager.h"
 #include "bgp/inet/inet_table.h"
 #include "bgp/l3vpn/inetvpn_table.h"
@@ -158,9 +158,13 @@ protected:
                                 "Is peer ready");
 
         a_red_ = a_->routing_instance_mgr()->GetRoutingInstance("red");
+        a_red_->LocatePeerManager();
         a_blue_ = a_->routing_instance_mgr()->GetRoutingInstance("blue");
+        a_blue_->LocatePeerManager();
         b_blue_ = b_->routing_instance_mgr()->GetRoutingInstance("blue");
+        b_blue_->LocatePeerManager();
         b_red_ = b_->routing_instance_mgr()->GetRoutingInstance("red");
+        b_red_->LocatePeerManager();
 
         a_vpn_ =
             static_cast<BgpTable *>(a_->database()->FindTable("bgp.l3vpn.0"));
@@ -298,7 +302,7 @@ protected:
             a_red->peer_manager()->PeerLocate(
                 a_.get(), a_peer_red_config_.get()));
         a_peer_red_->IsReady_fnc_ = boost::bind(&L3VPNPeerTest::IsReady, this);
-        a_->membership_mgr()->Register(a_peer_red_, a_red_inet_, policy, -1);
+        a_peer_red_->Register(a_red_inet_, policy);
 
         a_peer_blue_config_.reset(new BgpNeighborConfig());
         a_peer_blue_config_->set_name("a_blue");
@@ -312,7 +316,7 @@ protected:
             a_blue->peer_manager()->PeerLocate(
                 a_.get(), a_peer_blue_config_.get()));
         a_peer_blue_->IsReady_fnc_ = boost::bind(&L3VPNPeerTest::IsReady, this);
-        a_->membership_mgr()->Register(a_peer_blue_, a_blue_inet_, policy, -1);
+        a_peer_blue_->Register(a_blue_inet_, policy);
 
         b_peer_blue_config_.reset(new BgpNeighborConfig());
         b_peer_blue_config_->set_name("b_blue");
@@ -326,7 +330,7 @@ protected:
             b_blue->peer_manager()->PeerLocate(
                 b_.get(), b_peer_blue_config_.get()));
         b_peer_blue_->IsReady_fnc_ = boost::bind(&L3VPNPeerTest::IsReady, this);
-        b_->membership_mgr()->Register(b_peer_blue_, b_blue_inet_, policy, -1);
+        b_peer_blue_->Register(b_blue_inet_, policy);
 
         WaitForIdle();
     }

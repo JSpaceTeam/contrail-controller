@@ -176,6 +176,24 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
     </xsd:restriction>
 </xsd:simpleType>
 
+<xsd:simpleType name="NHModeType" default="dynamic">
+    <xsd:restriction base='xsd:string'>
+        <xsd:enumeration value="dynamic"/>
+        <xsd:enumeration value="static"/>
+    </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="StaticMirrorNhType">
+    <xsd:all>
+    <xsd:element name="vtep-dst-ip-address" type="smi:IpAddress" required='true'
+        description='ip address of destination vtep'/>
+    <xsd:element name="vtep-dst-mac-address" type="xsd:string" required='optional'
+        description='mac address of destination vtep'/>
+    <xsd:element name="vni" type="xsd:integer" required='true'
+        description='Vni of vtep'/>
+    </xsd:all>
+</xsd:complexType>
+
 <xsd:complexType name="MirrorActionType">
     <xsd:all>
         <xsd:element name="analyzer-name" type="xsd:string"          required='optional'
@@ -184,10 +202,18 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
              description='Encapsulation for Mirrored packet, not used currently'/>
         <xsd:element name="analyzer-ip-address" type="smi:IpAddress" required='true'
              description='ip address of interface to which mirrored packets are sent'/>
+        <xsd:element name="analyzer-mac-address" type="xsd:string"  required='optional'
+            description='mac address of interface to which mirrored packets are sent '/>
         <xsd:element name="routing-instance" type="xsd:string"       required='true'
              description='Internal use only, should be set to -1'/>
         <xsd:element name="udp-port" type="xsd:integer"              required='optional'
              description='ip udp port used in contrail default encapsulation for mirroring'/>
+        <xsd:element name="juniper-header" type="xsd:boolean"  default="true"      required='optional'
+            description='This flag is used to determine with/without juniper-header'/>
+        <xsd:element name="nh-mode" type="NHModeType"   required='optional'
+            description='This mode used to determine static or dynamic nh '/>
+        <xsd:element name="static-nh-header" type="StaticMirrorNhType"             required='optional'
+            description='vtep details required if static nh enabled'/>
     </xsd:all>
 </xsd:complexType>
 
@@ -207,6 +233,8 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
              description='Flow records for traffic matching this rule are sent at higher priority'/>
         <xsd:element name="alert" type="xsd:boolean" default="false"              required='optional'
              description='For internal use only'/>
+        <xsd:element name="qos-action" type="xsd:string" required='optional'
+             description='FQN of Qos configuration object for QoS marking'/>
         <!-- More actions can come here. e.g. policer, QOS etc-->
     </xsd:all>
 </xsd:complexType>
@@ -349,6 +377,17 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
              description='In case of virtual DNS server, name of virtual DNS server'/>
     </xsd:choice>
 </xsd:complexType>
+
+<xsd:simpleType name="SubnetMethodType" default="user-defined-subnet">
+    <xsd:restriction base="xsd:string">
+        <xsd:enumeration value="user-defined-subnet"
+             description='Subnet scope is within a network, not shared across different networks in ipam'/>
+        <xsd:enumeration value="flat-subnet"
+             description='Subnet scope is within a ipam, shared acrossed all networks in the ipam'/>
+        <xsd:enumeration value="auto-subnet"
+             description='Subnet scope is within a network, assigned by ipam'/>
+    </xsd:restriction>
+</xsd:simpleType>
 
 <xsd:complexType name="IpamType">
     <xsd:all>
@@ -517,6 +556,8 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
              description='Host routes to be sent via DHCP for VM(s) in this subnet, Next hop for these routes is always default gateway'/>
         <xsd:element name="subnet-name" type="xsd:string" required='optional'
              description='User provided name for this subnet'/>
+        <xsd:element name="alloc-unit"   type="xsd:integer" default='1' required='optional' operation='CRD'
+             description='allocation unit for this subnet to allocate bulk ip addresses'/>
     </xsd:all>
 </xsd:complexType>
 
@@ -747,6 +788,70 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
     </xsd:all>
 </xsd:complexType>
 
+<xsd:simpleType name="DscpValueType">
+    <xsd:restriction base="xsd:integer">
+        <xsd:minInclusive value="0"/>
+        <xsd:maxInclusive value="63"/>
+    </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="VlanPriorityType">
+    <xsd:restriction base="xsd:integer">
+        <xsd:minInclusive value="0"/>
+        <xsd:maxInclusive value="7"/>
+    </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="MplsExpType">
+    <xsd:restriction base="xsd:integer">
+        <xsd:minInclusive value="0"/>
+        <xsd:maxInclusive value="7"/>
+    </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="ForwardingClassId">
+    <xsd:restriction base="xsd:integer">
+        <xsd:minInclusive value="0"/>
+        <xsd:maxInclusive value="255"/>
+    </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="QosIdForwardingClassPair">
+    <xsd:all>
+        <xsd:element name="key" type="xsd:integer"
+            description="QoS bit value (DSCP or Vlan priority or EXP bit value"/>
+        <xsd:element name="forwarding-class-id" type="ForwardingClassId"/>
+    </xsd:all>
+</xsd:complexType>
+
+<xsd:complexType name="QosIdForwardingClassPairs">
+    <xsd:all>
+        <xsd:element name="qos-id-forwarding-class-pair" type="QosIdForwardingClassPair"
+            maxOccurs="unbounded"/>
+    </xsd:all>
+</xsd:complexType>
+
+<xsd:simpleType name="GracefulRestartTimeType">
+     <xsd:restriction base="xsd:integer">
+         <xsd:minInclusive value="0"/>
+         <xsd:maxInclusive value="4095"/>
+     </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:simpleType name="LongLivedGracefulRestartTimeType">
+     <xsd:restriction base="xsd:integer">
+         <xsd:minInclusive value="0"/>
+         <xsd:maxInclusive value="16777215"/>
+     </xsd:restriction>
+</xsd:simpleType>
+
+<xsd:complexType name="GracefulRestartType">
+    <xsd:all>
+        <xsd:element name="graceful-restart-time" type="GracefulRestartTimeType" default="0"/>
+        <xsd:element name="long-lived-graceful-restart-time" type="LongLivedGracefulRestartTimeType" default="0"/>
+    </xsd:all>
+</xsd:complexType>
+
 <xsd:element name="display-name" type="xsd:string"/>
 <!--#IFMAP-SEMANTICS-IDL Property('display-name', 'all', 'optional', 'CRUD',
                                   'Display name user configured string(name) that can be updated any time. Used as openstack name.') -->
@@ -776,6 +881,11 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <!--#IFMAP-SEMANTICS-IDL 
      Property('config-version', 'global-system-config', 'system-only', 'R',
               'Version of OpenContrail software that generated this config.') -->
+
+<xsd:element name="graceful-restart-params" type="GracefulRestartType"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('graceful-restart-params', 'global-system-config', 'optional',
+              'CRUD', 'Graceful Restart parameters') -->
 
 <xsd:element name="plugin-tuning" type="PluginProperties"/>
 <!--#IFMAP-SEMANTICS-IDL 
@@ -817,6 +927,14 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
              description='When false, do not use destination port in the ECMP hash calculation'/>
     </xsd:all>
 </xsd:complexType>
+
+<xsd:simpleType name="QosConfigType">
+    <xsd:restriction base="xsd:string">
+        <xsd:enumeration value="vhost"/>
+        <xsd:enumeration value="fabric"/>
+        <xsd:enumeration value="project"/>
+    </xsd:restriction>
+</xsd:simpleType>
 
 <xsd:element name="global-vrouter-config"        type="ifmap:IdentityType"/>
 <xsd:element name="global-system-config-global-vrouter-config"/>
@@ -864,6 +982,21 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <!--#IFMAP-SEMANTICS-IDL
      Property('flow-aging-timeout-list', 'global-vrouter-config', 'optional', 'CRUD',
               'Flow aging timeout per application (protocol, port) list.') -->
+
+<xsd:element name="global-qos-config" type="ifmap:IdentityType"/>
+<!--Identifier "global-qos-config" is used to hang global QoS properties
+    for vhost interface and fabric traffic
+  -->
+<xsd:element name="global-system-config-global-qos-config"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('global-system-config-global-qos-config',
+          'global-system-config', 'global-qos-config', ['has'], 'required', 'R',
+          'Global QoS system config is object where all global system QoS configuration is present.') -->
+<xsd:element name="global-qos-config-qos-config"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('global-qos-config-qos-config',
+          'global-qos-config', 'qos-config', ['has'], 'optional', 'CRUD',
+          'Global system QoS config for vhost and fabric traffic .') -->
 
 <xsd:element name="domain"        type="ifmap:IdentityType"/>
 <xsd:element name="config-root-domain"/>
@@ -923,11 +1056,39 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
           'project', 'virtual-network', ['has'], 'optional', 'CRUD',
           'Virtual network is collection of end points (interface or ip(s) or MAC(s)) that can talk to each other by default. It is collection of subnets connected by implicit router which default gateway in each subnet.') -->
 
+<xsd:element name="forwarding-class" type="ifmap:IdentityType"/>
+<xsd:element name="forwarding-class-id" type="ForwardingClassId" required='true' default="0"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('forwarding-class-id', 'forwarding-class', 'required', 'CRUD',
+              'Unique ID for this forwarding class.') -->
+<xsd:element name="forwarding-class-dscp" type="DscpValueType"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('forwarding-class-dscp', 'forwarding-class', 'required', 'CRUD',
+              'DSCP value to be written on outgoing packet for this forwarding-class.') -->
+<xsd:element name="forwarding-class-vlan-priority" type="VlanPriorityType"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('forwarding-class-vlan-priority', 'forwarding-class', 'required', 'CRUD',
+              '802.1p value to be written on outgoing packet for this forwarding-class.') -->
+<xsd:element name="forwarding-class-mpls-exp" type="MplsExpType"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('forwarding-class-mpls-exp', 'forwarding-class', 'required', 'CRUD',
+              'MPLS exp value to be written on outgoing packet for this forwarding-class.') -->
+<xsd:element name="forwarding-class-qos-queue"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('forwarding-class-qos-queue',
+          'forwarding-class', 'qos-queue', ['ref'], 'required', 'CRUD',
+          'Qos queue to be used for this forwarding class.') -->
+<xsd:element name="global-qos-config-forwarding-class"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('global-qos-config-forwarding-class',
+          'global-qos-config', 'forwarding-class', ['has'], 'optional', 'CRUD',
+          'Link to global-qos config.') -->
+
 <xsd:element name="qos-queue" type="ifmap:IdentityType"/>
-<xsd:element name="project-qos-queue"/>
+<xsd:element name="global-qos-config-qos-queue"/>
 <!--#IFMAP-SEMANTICS-IDL 
-     Link('project-qos-queue',
-          'project', 'qos-queue', ['has'], 'optional', 'CRUD',
+     Link('global-qos-config-qos-queue',
+          'global-qos-config', 'qos-queue', ['has'], 'optional', 'CRUD',
           'QOS queue config object in this project.') -->
 <xsd:element name="min-bandwidth" type="xsd:integer"/>
 <!--#IFMAP-SEMANTICS-IDL 
@@ -938,35 +1099,49 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
      Property('max-bandwidth', 'qos-queue', 'required', 'CRUD',
               'Maximum bandwidth for this queue.') -->
 
-<xsd:element name="qos-forwarding-class" type="ifmap:IdentityType"/>
-<xsd:element name="project-qos-forwarding-class"/>
-<!--#IFMAP-SEMANTICS-IDL 
-     Link('project-qos-forwarding-class',
-          'project', 'qos-forwarding-class', ['has'], 'optional', 'CRUD'
-          'QOS forwarding class is object which represent Marking rules and queueing rules. It is modeled after JUNOS qos forwarding class.') -->
-<xsd:element name="dscp" type="xsd:integer"/>
-<!--#IFMAP-SEMANTICS-IDL 
-     Property('dscp', 'qos-forwarding-class', 'optional', 'CRUD',
-              'DSCP value for this qos forwding class.') -->
-<xsd:element name="trusted" type="xsd:boolean"/>
-<!--#IFMAP-SEMANTICS-IDL 
-     Property('trusted', 'qos-forwarding-class', 'optional', 'CRUD',
-              'When trusted is true, original DSCP value is copied to overlay header.') -->
-<xsd:element name="qos-forwarding-class-qos-queue"/>
-<!--#IFMAP-SEMANTICS-IDL 
-     Link('qos-forwarding-class-qos-queue',
-          'qos-forwarding-class', 'qos-queue', ['ref'], 'optional', 'CRUD',
-          'Refernce to queue(qos-queue) used by this forwarding class.') -->
-<xsd:element name="virtual-network-qos-forwarding-class"/>
-<!--#IFMAP-SEMANTICS-IDL 
-     Link('virtual-network-qos-forwarding-class',
-          'virtual-network', 'qos-forwarding-class', ['ref'], 'optional', 'CRUD',
-          'Reference to qos-forwarding-class for this virtual network.') -->
-<xsd:element name="virtual-machine-interface-qos-forwarding-class"/>
-<!--#IFMAP-SEMANTICS-IDL 
-     Link('virtual-machine-interface-qos-forwarding-class',
-          'virtual-machine-interface', 'qos-forwarding-class', ['ref'], 'optional', 'CRUD',
-          'Reference to qos-forwarding-class for this virtual machine interface.') -->
+<xsd:element name="qos-config" type="ifmap:IdentityType"/>
+<xsd:element name="project-qos-config"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('project-qos-config',
+          'project', 'qos-config', ['has'], 'optional', 'CRUD'
+          'QOS configuration specifying marking and queueing value for various QoS values') -->
+
+<xsd:element name="qos-config-global-system-config"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('qos-config-global-system-config',
+          'qos-config', 'global-system-config', ['ref'], 'system-only', 'CR',
+          'This link is internally created and may be removed in future. End users should not set this link or assume it to be there') -->
+<xsd:element name="qos-config-type" type="QosConfigType"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('qos-config-type', 'qos-config', 'CRUD',
+              'Specifies if qos-config is for vhost, fabric or for project.') -->
+<xsd:element name="dscp-entries" type="QosIdForwardingClassPairs"/>
+<!--#IFMAP-SEMANTICS-IDL
+     MapProperty('dscp-entries', 'qos-config', 'key', 'CRUD',
+                 'Map of DSCP match condition and applicable forwarding class for packet.') -->
+<xsd:element name="vlan-priority-entries" type="QosIdForwardingClassPairs"/>
+<!--#IFMAP-SEMANTICS-IDL
+     MapProperty('vlan-priority-entries', 'qos-config', 'key', 'CRUD',
+                 'Map of .1p priority code to applicable forwarding class for packet.') -->
+<xsd:element name="mpls-exp-entries" type="QosIdForwardingClassPairs"/>
+<!--#IFMAP-SEMANTICS-IDL
+     MapProperty('mpls-exp-entries', 'qos-config', 'key', 'CRUD',
+                 'Map of MPLS EXP values to applicable forwarding class for packet.') -->
+<xsd:element name="default-forwarding-class-id" type="ForwardingClassId" required='true' default="0"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('default-forwarding-class-id', 'qos-config', 'CRUD',
+              'Default forwarding class used for all non-specified QOS bits') -->
+
+<xsd:element name="virtual-network-qos-config"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('virtual-network-qos-config',
+          'virtual-network', 'qos-config', ['ref'], 'optional', 'CRUD',
+          'Reference to QoS configuration for this virtual network.') -->
+<xsd:element name="virtual-machine-interface-qos-config"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('virtual-machine-interface-qos-config',
+          'virtual-machine-interface', 'qos-config', ['ref'], 'optional', 'CRUD',
+          'Reference to QoS config for this virtual machine interface.') -->
 
 <xsd:simpleType name="VxlanNetworkIdentifierType">
      <xsd:restriction base="xsd:integer">
@@ -993,6 +1168,19 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
      </xsd:restriction>
 </xsd:simpleType>
 
+<xsd:simpleType name="AddressAllocationModeType" default="user-defined-subnet-preferred">
+    <xsd:restriction base='xsd:string'>
+        <xsd:enumeration value="user-defined-subnet-preferred"
+             description='Allocation will use user-defined-subnets, if not available or exhausted use flat-subnets'/>
+        <xsd:enumeration value="user-defined-subnet-only"
+             description='Allocation will use user-defined-subnets only, if not available or exhausted igonre flat-subnets'/>
+        <xsd:enumeration value="flat-subnet-preferred"
+             description='Allocation will use flat-subnets, if not available or exhausted use user-defined-subnets'/>
+        <xsd:enumeration value="flat-subnet-only"
+             description='Allocation will use flat-subnets only, if not available or exhausted igonre user-defined-subnets'/>
+    </xsd:restriction>
+</xsd:simpleType>
+
 <xsd:complexType name='VirtualNetworkType'>
     <xsd:all>
         <xsd:element name='allow-transit' type="xsd:boolean" required='optional'
@@ -1012,6 +1200,9 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
         <!-- Enable or disable unicast RPF for virtual-network -->
         <xsd:element name='rpf' type='RpfModeType' required='optional'
              description='Flag used to diable Reverse Path Forwarding(RPF) check for this network'/>
+         <!-- Enable or disable Mirroring for virtual-network -->
+         <xsd:element name='mirror-destination' type="xsd:boolean" default="false" required='optional'
+             description='Flag to mark the virtual network as mirror destination network'/>
     </xsd:all>
 </xsd:complexType>
 
@@ -1138,11 +1329,30 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
              ['Allow multiple service chains within same two networks based on network policy.',
               'Current limitation is that both networks must reside within cluster, except when right most service is NAT.']) -->
 
+<xsd:element name="address-allocation-mode" type="AddressAllocationModeType"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('address-allocation-mode', 'virtual-network', 'optional', 'CRUD',
+               'Address allocation mode for virtual network.') -->
+
+<xsd:complexType name="IpamSubnets">
+    <xsd:all>
+        <xsd:element name="subnets" type="IpamSubnetType" maxOccurs="unbounded"/>
+    </xsd:all>
+</xsd:complexType>
+
 <xsd:element name="network-ipam" type="ifmap:IdentityType"/>
 <xsd:element name="network-ipam-mgmt" type="IpamType"/>
 <!--#IFMAP-SEMANTICS-IDL
      Property('network-ipam-mgmt', 'network-ipam', 'optional', 'CRUD',
               'Network IP Address Management configuration.') -->
+<xsd:element name="ipam-subnets" type="IpamSubnets"/>
+<!--#IFMAP-SEMANTICS-IDL
+     ListProperty('ipam-subnets', 'network-ipam', 'optional', 'CRD',
+             'List of subnets for this ipam.') -->
+<xsd:element name='ipam-subnet-method' type='SubnetMethodType'/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('ipam-subnet-method', 'network-ipam', 'optional', 'CRD',
+              'Subnet method configuration for ipam, user can configure user-defined, flat or auto.') -->
 <xsd:element name="project-network-ipam"/>
 <!--#IFMAP-SEMANTICS-IDL 
      Link('project-network-ipam',
@@ -1354,8 +1564,6 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
         <xsd:element name="fat-flow-protocol" type="ProtocolType" maxOccurs="unbounded"/>
     </xsd:all>
 </xsd:complexType>
-  
-  
 
 <!--
     The protocols for which flows on the virtual-machine-interface fall
@@ -1451,16 +1659,24 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
               'When this instance ip is secondary ip, it can track activeness of another ip.') -->
 <xsd:element name="subnet-uuid" type="xsd:string"/>
 <!--#IFMAP-SEMANTICS-IDL 
-     Property('subnet-uuid', 'instance-ip', 'system-only', 'R', 
+     Property('subnet-uuid', 'instance-ip', 'optional', 'CR',
               'This instance ip was allocated from this Subnet(UUID).') -->
 <xsd:element name="instance-ip-secondary" type="xsd:boolean" default='false'/>
 <!--#IFMAP-SEMANTICS-IDL
      Property('instance-ip-secondary', 'instance-ip', 'optional', 'CRUD',
               'This instance ip is secondary ip of the interface.') -->
+<xsd:element name="instance-ip-local-ip" type="xsd:boolean" default='false'/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('instance-ip-local-ip', 'instance-ip', 'optional', 'CRUD',
+              'This instance ip is local to compute and will not be exported to other nodes.') -->
 <xsd:element name="service-instance-ip" type="xsd:boolean" default='false'/>
 <!--#IFMAP-SEMANTICS-IDL
      Property('service-instance-ip', 'instance-ip', 'system-only', 'CRUD',
               'This instance ip is used as service chain next hop',) -->
+<xsd:element name="service-health-check-ip" type="xsd:boolean" default='false'/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('service-health-check-ip', 'instance-ip', 'system-only', 'CRUD',
+              'This instance ip is used as service health check source ip',) -->
 <xsd:element name="instance-ip-virtual-network"/>
 <!--#IFMAP-SEMANTICS-IDL 
      Link('instance-ip-virtual-network',
@@ -1543,6 +1759,48 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
      Link('floating-ip-virtual-machine-interface',
           'floating-ip', 'virtual-machine-interface', ['ref'], 'optional', 'CRUD',
           'Reference to virtual machine interface to which this floating ip is attached.') -->
+
+<xsd:element name="alias-ip-pool" type="ifmap:IdentityType"/>
+<xsd:element name="virtual-network-alias-ip-pool"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Exclude('virtual-network-alias-ip-pool', ['backend']);
+     Link('virtual-network-alias-ip-pool',
+          'virtual-network', 'alias-ip-pool', ['has'], 'optional', 'CRUD',
+          'Alias ip pool is set of addresses that are carved out of a given network. Ip(s) from this set can be assigned to virtual-machine-interface so that they become members of this network') -->
+<xsd:element name="project-alias-ip-pool"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Exclude('project-alias-ip-pool', ['backend']);
+     Link('project-alias-ip-pool',
+          'project', 'alias-ip-pool', ['ref'], 'optional', 'CRUD',
+          'Reference to alias ip pool in this project.') -->
+
+<xsd:element name="alias-ip" type="ifmap:IdentityType"/>
+<xsd:element name="alias-ip-address" type="IpAddressType"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('alias-ip-address', 'alias-ip', 'required', 'CR',
+              'Alias ip address.') -->
+<xsd:element name="alias-ip-address-family" type="IpAddressFamilyType"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Property('alias-ip-address-family', 'alias-ip', 'optional', 'CRUD',
+              'Ip address family of the alias ip, IpV4 or IpV6') -->
+<xsd:element name="alias-ip-project"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('alias-ip-project',
+          'alias-ip', 'project', ['ref'], 'required', 'CRUD',
+          'Reference to project from which this alias ip was allocated.') -->
+<xsd:element name="alias-ip-pool-alias-ip"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Exclude('alias-ip-pool-alias-ip', ['backend']);
+     Link('alias-ip-pool-alias-ip',
+          'alias-ip-pool', 'alias-ip', ['has'], 'optional', 'CRUD',
+          'alias ip is a ip that can be assigned to virtual-machine-interface(VMI), By doing so VMI can now be part of the alias ip network. packets originating with alias-ip as the source-ip belongs to alias-ip-network') -->
+<xsd:element name="alias-ip-virtual-machine-interface"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Exclude('alias-ip-virtual-machine-interface', ['backend']);
+     Link('alias-ip-virtual-machine-interface',
+          'alias-ip', 'virtual-machine-interface', ['ref'], 'optional', 'CRUD',
+          'Reference to virtual machine interface to which this alias ip is attached.') -->
+
 <xsd:element name="physical-router" type="ifmap:IdentityType"/>
 <xsd:element name="global-system-config-physical-router"/>
 <!--#IFMAP-SEMANTICS-IDL 
@@ -1970,13 +2228,13 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
 <xsd:element name="service-health-check-service-instance" type="ServiceInterfaceTag"/>
 <!--#IFMAP-SEMANTICS-IDL
      Link('service-health-check-service-instance',
-          'service-health-check', 'service-instance', ['ref'], 'optional', 'CRUD',
+          'service-health-check', 'service-instance', ['ref', 'derived'], 'optional', 'CRUD',
           'Reference to service instance using this service health check.') -->
 
 <xsd:element name="interface-route-table-service-instance" type="ServiceInterfaceTag"/>
 <!--#IFMAP-SEMANTICS-IDL
      Link('interface-route-table-service-instance',
-          'interface-route-table', 'service-instance', ['ref'], 'optional', 'CRUD',
+          'interface-route-table', 'service-instance', ['ref', 'derived'], 'optional', 'CRUD',
           'Reference to interface route table attached to (service instance, interface), This is used to add interface static routes to service instance interface.') -->
 
 <xsd:element name="routing-policy-service-instance" type="RoutingPolicyServiceInstanceType"/>
@@ -2037,7 +2295,7 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
      Link('network-ipam-virtual-DNS', 'network-ipam', 'virtual-DNS', ['ref'], 'optional', 'CRUD',
           'Reference to virtual DNS used by this IPAM.') -->
 
-<xsd:complexType name="CommunityAttributes">
+<xsd:simpleType name="CommunityAttribute">
     <xsd:annotation>
         <xsd:documentation>
           List of Community attributes
@@ -2053,14 +2311,18 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
                  "no-reoriginate"
         </xsd:documentation>
     </xsd:annotation>
-    <xsd:all>
-        <xsd:element name="community-attribute" type="xsd:string" maxOccurs="unbounded" 
+    <xsd:restriction base="xsd:string"
              description_1='List of Community attributes, it indicates the attributes with which the routes are tagged while publishing.'
              description_2='The attributes will be represented as bgp community in the path attribute.'
              description_3='Each attribute is indicated as string.'
              description_4='    1. String with two integers separated by ":". E.g. "64512:123"'
              description_5='    2. Well-known community as string.'
              description_6='       Possible values are "no-export" "accept-own" "no-advertise" "no-export-subconfed" "no-reoriginate"'/>
+</xsd:simpleType>
+
+<xsd:complexType name="CommunityAttributes">
+    <xsd:all>
+        <xsd:element name="community-attribute" type="CommunityAttribute" maxOccurs="unbounded"/>
     </xsd:all>
 </xsd:complexType>
 
@@ -2098,10 +2360,19 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
     </xsd:restriction>
 </xsd:simpleType>
 
+<xsd:simpleType name="HealthCheckType" default="link-local">
+    <xsd:restriction base="xsd:string">
+        <xsd:enumeration value="link-local"/>
+        <xsd:enumeration value="end-to-end"/>
+    </xsd:restriction>
+</xsd:simpleType>
+
 <xsd:complexType name='ServiceHealthCheckType'>
     <xsd:sequence>
         <xsd:element name='enabled' type='xsd:boolean' default='false' required='optional' operations='CRUD'
              description='Administratively enable or disable this health check.'/>
+        <xsd:element name='health-check-type' type='HealthCheckType' required='true' operations='CRUD'
+             description='Health check type, currently only link-local and end-to-end are supported'/>
         <xsd:element name='monitor-type' type='HealthCheckProtocolType' required='true' operations='CRUD'
              description='Protocol used to monitor health, currently only HTTP and ICMP(ping) is supported'/>
         <xsd:element name='delay' type='xsd:integer' required='true' operations='CRUD'
@@ -2188,6 +2459,12 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
           'logical-router', 'route-target', ['ref'], 'system-only', 'CRUD',
           'Route target that represent this logical router.') -->
 
+<xsd:element name="logical-router-route-table"/>
+<!--#IFMAP-SEMANTICS-IDL 
+     Link('logical-router-route-table',
+          'logical-router', 'route-table', ['ref'], 'optional', 'CRUD',
+          'Reference to the route table attached to this logical router. By attaching route table, system will create static routes with the route target only of route targets linked to this logical router') -->
+
 <!-- 
     Link a virtual network used as the external gateway for source NAT support
     (aka external gateway in OpenStack Neutron API).
@@ -2252,6 +2529,7 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
         <xsd:element name="key-value-pair" type="KeyValuePair" maxOccurs="unbounded"/>
     </xsd:all>
 </xsd:complexType>
+
 <!--
     Service appliance Set
         This is the collection of service appliances.
@@ -2380,6 +2658,11 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
      Link('project-api-access-list',
                'project', 'api-access-list', ['has'], 'optional', 'CRUD',
                'API access list is list of rules that define role based access to each API and its properties at project level.') -->
+<xsd:element name="global-system-config-api-access-list"/>
+<!--#IFMAP-SEMANTICS-IDL
+     Link('global-system-config-api-access-list',
+             'global-system-config', 'api-access-list', ['has'], 'required', 'CRUD',
+             'Global API access list applicable to all domain and projects') -->
 
 <!-- network.* => admin:CRUD (admin can perform all ops on networks) -->
 <xsd:element name="api-access-list-entries" type="RbacRuleEntriesType"/>
@@ -2422,5 +2705,11 @@ targetNamespace="http://www.contrailsystems.com/2012/VNC-CONFIG/0">
      Link('discovery-service-assignment-dsa-rule',
               'discovery-service-assignment', 'dsa-rule', ['has'], 'optional', 'CRUD',
               'Discovery service rule for assigning subscriber to publisher. (set of subscriber) can be assigned to (set of publisher).') -->
+
+<!-- Alarm config -->
+<xsd:include schemaLocation='alarm.xsd'/>
+
+<!-- Userdefined Counter Config -->
+<xsd:include schemaLocation='usr_def_cntr.xsd'/>
 
 </xsd:schema>

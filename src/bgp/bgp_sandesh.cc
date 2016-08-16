@@ -40,15 +40,17 @@ size_t ShowNeighborStatisticsHandler::FillBgpNeighborStatistics(
         RoutingInstanceMgr *rim = bgp_server->routing_instance_mgr();
         if (!req->get_domain().empty()) {
             RoutingInstance *ri = rim->GetRoutingInstance(req->get_domain());
-            if (ri) {
-                count +=
-                    ri->peer_manager()->GetNeighborCount(req->get_up_or_down());
+            PeerManager *pmgr = ri ? ri->peer_manager() : NULL;
+            if (pmgr) {
+                count += pmgr->GetNeighborCount(req->get_up_or_down());
             }
         } else {
             RoutingInstanceMgr::RoutingInstanceIterator it = rim->begin();
             for (; it != rim->end(); it++) {
-                count +=
-                    it->peer_manager()->GetNeighborCount(req->get_up_or_down());
+                PeerManager *pmgr = it->peer_manager();
+                if (pmgr) {
+                    count += pmgr->GetNeighborCount(req->get_up_or_down());
+                }
             }
         }
     }
@@ -235,11 +237,11 @@ public:
 
     static void CombineMulticastPartitionInfo(
             const RequestPipeline::StageData *sd,
-            vector<ShowMulticastTree> &tree_list) {
+            vector<ShowMulticastTree> *tree_list) {
         for (size_t idx = 0; idx < sd->size(); idx++) {
             const MulticastManagerDetailData &data =
                 static_cast<const MulticastManagerDetailData &>(sd->at(idx));
-            tree_list.insert(tree_list.end(),
+            tree_list->insert(tree_list->end(),
                              data.tree_list.begin(), data.tree_list.end());
         }
     }
@@ -252,7 +254,7 @@ public:
             static_cast<const ShowMulticastManagerReq *>(ps.snhRequest_.get());
         const RequestPipeline::StageData *sd = ps.GetStageData(0);
         vector<ShowMulticastTree> tree_list;
-        CombineMulticastPartitionInfo(sd, tree_list);
+        CombineMulticastPartitionInfo(sd, &tree_list);
 
         ShowMulticastManagerDetailResp *resp =
             new ShowMulticastManagerDetailResp;
@@ -266,7 +268,6 @@ public:
 
 void ShowMulticastManagerDetailReq::HandleRequest() const {
     RequestPipeline::PipeSpec ps(this);
-    BgpSandeshContext *bsc = static_cast<BgpSandeshContext *>(client_context());
 
     // Request pipeline has 2 stages.
     // First stage to collect multicast manager stats.
@@ -277,7 +278,7 @@ void ShowMulticastManagerDetailReq::HandleRequest() const {
     s1.taskId_ = scheduler->GetTaskId("db::DBTable");
     s1.allocFn_ = ShowMulticastManagerDetailHandler::CreateData;
     s1.cbFn_ = ShowMulticastManagerDetailHandler::CallbackS1;
-    for (int i = 0; i < bsc->bgp_server->database()->PartitionCount(); i++) {
+    for (int i = 0; i < ErmVpnTable::kPartitionCount; i++) {
         s1.instances_.push_back(i);
     }
 
@@ -406,10 +407,10 @@ public:
 
         ShowBgpServerResp *resp = new ShowBgpServerResp;
         SocketIOStats peer_socket_stats;
-        bsc->bgp_server->session_manager()->GetRxSocketStats(peer_socket_stats);
+        bsc->bgp_server->session_manager()->GetRxSocketStats(&peer_socket_stats);
         resp->set_rx_socket_stats(peer_socket_stats);
 
-        bsc->bgp_server->session_manager()->GetTxSocketStats(peer_socket_stats);
+        bsc->bgp_server->session_manager()->GetTxSocketStats(&peer_socket_stats);
         resp->set_tx_socket_stats(peer_socket_stats);
 
         resp->set_context(req->context());

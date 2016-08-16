@@ -43,6 +43,8 @@ class CqlIf : public GenDb::GenDbIf {
     virtual bool Db_UseColumnfamily(const GenDb::NewCf &cf);
     // Column
     virtual bool Db_AddColumn(std::auto_ptr<GenDb::ColList> cl);
+    virtual bool Db_AddColumn(std::auto_ptr<GenDb::ColList> cl,
+        GenDb::GenDbIf::DbAddColumnCb cb);
     virtual bool Db_AddColumnSync(std::auto_ptr<GenDb::ColList> cl);
     // Read
     virtual bool Db_GetRow(GenDb::ColList *out, const std::string &cfname,
@@ -63,18 +65,24 @@ class CqlIf : public GenDb::GenDbIf {
     // Stats
     virtual bool Db_GetStats(std::vector<GenDb::DbTableInfo> *vdbti,
         GenDb::DbErrors *dbe);
+    virtual bool Db_GetCumulativeStats(std::vector<GenDb::DbTableInfo> *vdbti,
+        GenDb::DbErrors *dbe) const;
     virtual void Db_GetCqlMetrics(Metrics *metrics) const;
     virtual void Db_GetCqlStats(cass::cql::DbStats *db_stats) const;
     // Connection
     virtual std::vector<GenDb::Endpoint> Db_GetEndpoints() const;
 
  private:
+    void OnAsyncColumnAddCompletion(GenDb::DbOpResult::type drc,
+        std::string cfname, GenDb::GenDbIf::DbAddColumnCb cb);
     void IncrementTableWriteStats(const std::string &table_name);
     void IncrementTableWriteStats(const std::string &table_name,
         uint64_t num_writes);
     void IncrementTableWriteFailStats(const std::string &table_name);
     void IncrementTableWriteFailStats(const std::string &table_name,
         uint64_t num_writes);
+    void IncrementTableWriteBackPressureFailStats(
+        const std::string &table_name);
     void IncrementTableReadStats(const std::string &table_name);
     void IncrementTableReadStats(const std::string &table_name,
         uint64_t num_reads);
@@ -87,8 +95,9 @@ class CqlIf : public GenDb::GenDbIf {
     CqlIfImpl *impl_;
     tbb::atomic<bool> initialized_;
     std::vector<GenDb::Endpoint> endpoints_;
-    tbb::mutex stats_mutex_;
+    mutable tbb::mutex stats_mutex_;
     GenDb::GenDbIfStats stats_;
+    bool use_prepared_for_insert_;
 };
 
 } // namespace cql

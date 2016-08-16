@@ -35,11 +35,11 @@ AgentPath::AgentPath(const Peer *peer, AgentRoute *rt):
     sync_(false), force_policy_(false), sg_list_(),
     tunnel_dest_(0), tunnel_bmap_(TunnelType::AllType()),
     tunnel_type_(TunnelType::ComputeType(TunnelType::AllType())),
-    vrf_name_(""), gw_ip_(0), unresolved_(true), is_stale_(false),
+    vrf_name_(""), gw_ip_(), unresolved_(true), is_stale_(false),
     is_subnet_discard_(false), dependant_rt_(rt), path_preference_(),
     local_ecmp_mpls_label_(rt), composite_nh_key_(NULL), subnet_service_ip_(),
     arp_mac_(), arp_interface_(NULL), arp_valid_(false),
-    ecmp_suppressed_(false) {
+    ecmp_suppressed_(false), is_local_(false) {
 }
 
 AgentPath::~AgentPath() {
@@ -175,7 +175,8 @@ bool AgentPath::UpdateNHPolicy(Agent *agent) {
         //Make path point to policy enabled interface
         InterfaceNHKey key(new VmInterfaceKey(AgentKey::ADD_DEL_CHANGE,
                                               vm_port->GetUuid(), ""),
-                           policy, intf_nh->GetFlags());
+                           policy, intf_nh->GetFlags(),
+                           intf_nh->GetDMac());
         nh = static_cast<NextHop *>
             (agent->nexthop_table()->FindActiveEntry(&key));
         // If NH is not found, point route to discard NH
@@ -252,7 +253,9 @@ bool AgentPath::Sync(AgentRoute *sync_route) {
         composite_nh_key_.get() != NULL &&
         local_ecmp_mpls_label_.get() != NULL) {
         boost::scoped_ptr<CompositeNHKey> composite_nh_key(composite_nh_key_->Clone());
-        if (ReorderCompositeNH(agent, composite_nh_key.get())) {
+        bool comp_nh_policy = false;
+        if (ReorderCompositeNH(agent, composite_nh_key.get(), comp_nh_policy)) {
+            composite_nh_key->SetPolicy(comp_nh_policy);
             if (ChangeCompositeNH(agent, composite_nh_key.get())) {
                 ret = true;
             }
@@ -271,10 +274,9 @@ bool AgentPath::Sync(AgentRoute *sync_route) {
 
     InetUnicastAgentRouteTable *table = NULL;
     InetUnicastRouteEntry *rt = NULL;
-    table = agent->vrf_table()->GetInet4UnicastRouteTable(vrf_name_);
-    if (table)
-        rt = table->FindRoute(gw_ip_);
+    table = sync_route->vrf()->GetInetUnicastRouteTable(gw_ip_);
 
+    rt = table ? table->FindRoute(gw_ip_) : NULL;
     if (rt == sync_route) {
         rt = NULL;
     }
@@ -283,7 +285,8 @@ bool AgentPath::Sync(AgentRoute *sync_route) {
        if (agent->params()->subnet_hosts_resolvable() == false &&
             agent->fabric_vrf_name() == vrf_name_) {
             unresolved = false;
-            table->AddArpReq(vrf_name_, gw_ip_, vrf_name_,
+            assert(gw_ip_.is_v4());
+            table->AddArpReq(vrf_name_, gw_ip_.to_v4(), vrf_name_,
                              agent->vhost_interface(), false,
                              dest_vn_list_, sg_list_);
         } else {
@@ -292,7 +295,8 @@ bool AgentPath::Sync(AgentRoute *sync_route) {
     } else if (rt->GetActiveNextHop()->GetType() == NextHop::RESOLVE) {
         const ResolveNH *nh =
             static_cast<const ResolveNH *>(rt->GetActiveNextHop());
-        table->AddArpReq(vrf_name_, gw_ip_, nh->interface()->vrf()->GetName(),
+        assert(gw_ip_.is_v4());
+        table->AddArpReq(vrf_name_, gw_ip_.to_v4(), nh->interface()->vrf()->GetName(),
                          nh->interface(), nh->PolicyEnabled(), dest_vn_list_,
                          sg_list_);
         unresolved = true;
@@ -324,6 +328,10 @@ bool AgentPath::IsLess(const AgentPath &r_path) const {
     }
 
     return peer()->IsLess(r_path.peer());
+}
+
+const AgentPath *AgentPath::UsablePath() const {
+    return this;
 }
 
 void AgentPath::set_nexthop(NextHop *nh) {
@@ -466,7 +474,9 @@ bool HostRoute::AddChangePath(Agent *agent, AgentPath *path,
                               const AgentRoute *rt) {
     bool ret = false;
     NextHop *nh = NULL;
-    InterfaceNHKey key(intf_.Clone(), false, InterfaceNHFlags::INET4);
+
+    InterfaceNHKey key(intf_.Clone(), relaxed_policy_, InterfaceNHFlags::INET4,
+                       agent->pkt_interface_mac());
     nh = static_cast<NextHop *>(agent->nexthop_table()->FindActiveEntry(&key));
     VnListType dest_vn_list;
     dest_vn_list.insert(dest_vn_name_);
@@ -526,11 +536,21 @@ bool L2ReceiveRoute::AddChangePath(Agent *agent, AgentPath *path,
         ret = true;
     }
 
+    if (path->peer() && path->peer()->GetType() == Peer::BGP_PEER) {
+        //Copy entire path preference for BGP peer path,
+        //since allowed-address pair config doesn't modify
+        //preference on BGP path
+        if (path->path_preference() != path_preference_) {
+            path->set_path_preference(path_preference_);
+            ret = true;
+        }
+    }
+
     if (path->ChangeNH(agent, agent->nexthop_table()->l2_receive_nh()) == true)
         ret = true;
 
     return ret;
-} 
+}
 
 bool InetInterfaceRoute::UpdateRoute(AgentRoute *rt) {
     bool ret = false;
@@ -558,7 +578,8 @@ bool InetInterfaceRoute::AddChangePath(Agent *agent, AgentPath *path,
                                        const AgentRoute *rt) {
     bool ret = false;
     NextHop *nh = NULL;
-    InterfaceNHKey key(intf_.Clone(), false, InterfaceNHFlags::INET4);
+    InterfaceNHKey key(intf_.Clone(), false, InterfaceNHFlags::INET4,
+                       agent->pkt_interface_mac());
     nh = static_cast<NextHop *>(agent->nexthop_table()->FindActiveEntry(&key));
     if (path->dest_vn_list() != dest_vn_list_) {
         path->set_dest_vn_list(dest_vn_list_);
@@ -642,7 +663,18 @@ bool LocalVmRoute::AddChangePath(Agent *agent, AgentPath *path,
     if (force_policy_) {
         policy = true;
     }
-    InterfaceNHKey key(intf_.Clone(), policy, flags_);
+
+    MacAddress mac = MacAddress::ZeroMac();
+    if (vm_port) {
+        mac = vm_port->vm_mac();
+        const InetUnicastRouteEntry *ip_rt =
+            dynamic_cast<const InetUnicastRouteEntry *>(rt);
+        if (ip_rt) {
+            mac = vm_port->GetIpMac(ip_rt->addr(), ip_rt->plen());
+        }
+    }
+
+    InterfaceNHKey key(intf_.Clone(), policy, flags_, mac);
     nh = static_cast<NextHop *>(agent->nexthop_table()->FindActiveEntry(&key));
 
     if (path->label() != mpls_label_) {
@@ -728,6 +760,11 @@ bool LocalVmRoute::AddChangePath(Agent *agent, AgentPath *path,
 
     if (path->ChangeNH(agent, nh) == true)
         ret = true;
+
+    if (is_local_ != path->is_local()) {
+        path->set_is_local(is_local_);
+        ret = true;
+    }
 
     return ret;
 }
@@ -869,22 +906,6 @@ bool ReceiveRoute::UpdateRoute(AgentRoute *rt) {
     return ret;
 }
 
-bool MulticastRoute::UpdateRoute(AgentRoute *rt) {
-    bool ret = false;
-    EvpnRouteEntry *evpn_rt = dynamic_cast<EvpnRouteEntry *>(rt);
-    if (evpn_rt) {
-        if (evpn_rt->publish_to_inet_route_table()) {
-            evpn_rt->set_publish_to_inet_route_table(false);
-            ret = true;
-        }
-        if (evpn_rt->publish_to_bridge_route_table()) {
-            evpn_rt->set_publish_to_bridge_route_table(false);
-            ret = true;
-        }
-    }
-    return ret;
-}
-
 bool MulticastRoute::AddChangePath(Agent *agent, AgentPath *path,
                                    const AgentRoute *rt) {
     bool ret = false;
@@ -950,6 +971,7 @@ bool PathPreferenceData::AddChangePath(Agent *agent, AgentPath *path,
     }
 
     path_preference_.set_ecmp(path->path_preference().ecmp());
+    path_preference_.set_dependent_ip(path->path_preference().dependent_ip());
     if (path &&
         path->path_preference() != path_preference_) {
         path->set_path_preference(path_preference_);
@@ -1209,6 +1231,10 @@ void AgentPath::SetSandeshData(PathSandeshData &pdata) const {
     path_preference_data.set_ecmp(path_preference_.ecmp());
     path_preference_data.set_wait_for_traffic(
          path_preference_.wait_for_traffic());
+    if (path_preference_.dependent_ip().is_unspecified() == false) {
+        path_preference_data.set_dependent_ip(
+                path_preference_.dependent_ip().to_string());
+    }
     pdata.set_path_preference_data(path_preference_data);
     pdata.set_active_label(GetActiveLabel());
     if (peer()->GetType() == Peer::MAC_VM_BINDING_PEER) {
@@ -1245,7 +1271,8 @@ const MplsLabel* AgentPath::local_ecmp_mpls_label() const {
 }
 
 bool AgentPath::ReorderCompositeNH(Agent *agent,
-                                   CompositeNHKey *composite_nh_key) {
+                                   CompositeNHKey *composite_nh_key,
+                                   bool &comp_nh_policy) {
     //Find local composite mpls label, if present
     //This has to be done, before expanding component NH
     BOOST_FOREACH(ComponentNHKeyPtr component_nh_key,
@@ -1293,7 +1320,8 @@ bool AgentPath::ReorderCompositeNH(Agent *agent,
     //in that exact order,If B gets deleted,
     //the new composite NH created should be A <NULL> C in that order,
     //irrespective of the order user passed it in
-    composite_nh_key->Reorder(agent, label_, ComputeNextHop(agent));
+    comp_nh_policy = composite_nh_key->Reorder(agent, label_,
+                                               ComputeNextHop(agent));
     //Copy the unchanged component NH list to path data
     set_composite_nh_key(comp_key);
     return true;

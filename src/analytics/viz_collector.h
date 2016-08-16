@@ -24,6 +24,8 @@ class Ruleeng;
 class ProtobufCollector;
 class SFlowCollector;
 class IpfixCollector;
+class Options;
+class DiscoveryServiceClient;
 
 class VizCollector {
 public:
@@ -40,7 +42,6 @@ public:
             const std::string &kafka_prefix, const TtlMap &ttlmap,
             const std::string& cassandra_user,
             const std::string& cassandra_password,
-            bool use_cql,
             const std::string &zookeeper_server_list,
             bool use_zookeeper);
     VizCollector(EventManager *evm, DbHandlerPtr db_handler,
@@ -65,6 +66,9 @@ public:
     OpServerProxy *GetOsp() const {
         return osp_.get();
     }
+    DbHandlerPtr GetDbHandler() const {
+        return db_initializer_->GetDbHandler();
+    }
     bool SendRemote(const std::string& destination, const std::string& dec_sandesh);
     void RedisUpdate(bool rsc) {
         collector_->RedisUpdate(rsc);
@@ -76,7 +80,6 @@ public:
     void SendDbStatistics();
     void SendProtobufCollectorStatistics();
     void SendGeneratorStatistics();
-    void TestDatabaseConnection();
     void CollectorPublish();
     bool GetCqlMetrics(cass::cql::Metrics *metrics);
 
@@ -122,6 +125,9 @@ public:
             break;
         }
         return std::make_pair(bpart, npart);
+    }
+    void UpdateUdc(Options *o, DiscoveryServiceClient *c) {
+        GetDbHandler()->UpdateUdc(o, c);
     }
 private:
     std::string DbGlobalName(bool dup=false);

@@ -6,7 +6,11 @@
 
 #include <algorithm>
 
+#include "sandesh/sandesh_types.h"
+#include "sandesh/sandesh.h"
+#include "sandesh/sandesh_trace.h"
 #include "base/string_util.h"
+#include "bgp/bgp_peer_types.h"
 #include "bgp/bgp_ribout.h"
 #include "bgp/bgp_ribout_updates.h"
 #include "bgp/bgp_export.h"
@@ -59,9 +63,21 @@ bool RibOutAttr::NextHop::operator!=(const NextHop &rhs) const {
     return CompareTo(rhs) != 0;
 }
 
+//
+// Copy constructor.
+// Do not copy the string representation;
+//
+RibOutAttr::RibOutAttr(const RibOutAttr &rhs) {
+    attr_out_ = rhs.attr_out_;
+    nexthop_list_ = rhs.nexthop_list_;
+    is_xmpp_ = rhs.is_xmpp_;
+    vrf_originated_ = rhs.vrf_originated_;
+}
+
 RibOutAttr::RibOutAttr(const BgpTable *table, const BgpAttr *attr,
     uint32_t label)
     : attr_out_(attr),
+      is_xmpp_(false),
       vrf_originated_(false) {
     if (attr) {
         nexthop_list_.push_back(NextHop(table, attr->nexthop(), label,
@@ -70,8 +86,9 @@ RibOutAttr::RibOutAttr(const BgpTable *table, const BgpAttr *attr,
 }
 
 RibOutAttr::RibOutAttr(const BgpTable *table, const BgpRoute *route,
-    const BgpAttr *attr, uint32_t label, bool include_nh)
+    const BgpAttr *attr, uint32_t label, bool include_nh, bool is_xmpp)
     : attr_out_(attr),
+      is_xmpp_(is_xmpp),
       vrf_originated_(route->BestPath()->IsVrfOriginated()) {
     if (attr && include_nh) {
         nexthop_list_.push_back(NextHop(table, attr->nexthop(), label,
@@ -80,7 +97,7 @@ RibOutAttr::RibOutAttr(const BgpTable *table, const BgpRoute *route,
 }
 
 RibOutAttr::RibOutAttr(const BgpRoute *route, const BgpAttr *attr,
-    bool is_xmpp) : vrf_originated_(false) {
+    bool is_xmpp) : is_xmpp_(is_xmpp), vrf_originated_(false) {
     // Attribute should not be set already
     assert(!attr_out_);
 
@@ -125,6 +142,18 @@ RibOutAttr::RibOutAttr(const BgpRoute *route, const BgpAttr *attr,
         }
         nexthop_list_.push_back(nexthop);
     }
+}
+
+//
+// Assignment operator.
+// Do not copy the string representation;
+//
+RibOutAttr &RibOutAttr::operator=(const RibOutAttr &rhs) {
+    attr_out_ = rhs.attr_out_;
+    nexthop_list_ = rhs.nexthop_list_;
+    is_xmpp_ = rhs.is_xmpp_;
+    vrf_originated_ = rhs.vrf_originated_;
+    return *this;
 }
 
 //
@@ -432,4 +461,20 @@ IPeerUpdate *RibOut::GetPeer(int index) const {
 int RibOut::GetPeerIndex(IPeerUpdate *peer) const {
     PeerState *ps = state_map_.Find(peer);
     return (ps ? ps->index : -1);
+}
+
+//
+// Fill introspect information.
+//
+void RibOut::FillStatisticsInfo(vector<ShowRibOutStatistics> *sros_list) const {
+    for (int qid = RibOutUpdates::QFIRST; qid < RibOutUpdates::QCOUNT; ++qid) {
+        ShowRibOutStatistics sros;
+        sros.set_table(table_->name());
+        sros.set_encoding(EncodingString());
+        sros.set_peer_type(BgpProto::BgpPeerTypeString(peer_type()));
+        sros.set_peer_as(peer_as());
+        sros.set_peers(state_map_.size());
+        updates_->FillStatisticsInfo(qid, &sros);
+        sros_list->push_back(sros);
+    }
 }

@@ -44,10 +44,10 @@ struct AgentRouteKey : public AgentKey {
     virtual AgentRouteKey *Clone() const = 0;
 
     const std::string &vrf_name() const { return vrf_name_; }
-    const Peer *peer() const { return peer_; }
+    const Peer *peer() const { return peer_.get(); }
     void set_peer(const Peer *peer) {peer_ = peer;}
 
-    const Peer *peer_;
+    PeerConstPtr peer_;
     std::string vrf_name_;
     DISALLOW_COPY_AND_ASSIGN(AgentRouteKey);
 };
@@ -68,8 +68,6 @@ struct AgentRouteData : public AgentData {
     virtual AgentPath *CreateAgentPath(const Peer *peer, AgentRoute *rt) const;
     virtual bool AddChangePath(Agent *agent, AgentPath *path,
                                const AgentRoute *rt) = 0;
-    virtual bool IsPeerValid(const AgentRouteKey *key) const;
-    virtual std::string InvalidPeerMsg(const AgentRouteKey *key) const;
     virtual bool UpdateRoute(AgentRoute *rt) {return false;}
 
     bool is_multicast() const {return is_multicast_;}
@@ -123,7 +121,9 @@ public:
     //Entry notification
     virtual void NotifyEntry(AgentRoute *entry);
     //Can be used for operations related to updation of route.
-    virtual void UpdateDependants(AgentRoute *entry) { }
+    virtual void UpdateDerivedRoutes(AgentRoute *entry,
+                                     const AgentPath *path,
+                                     bool active_path_changed) { }
     //Can be used for operations resulting from deletion of route.
     virtual void PreRouteDelete(AgentRoute *entry) { }
 
@@ -183,14 +183,13 @@ public:
                             AgentPath *path);
                             //const Peer *peer);
     //Stale path handling
-    void StalePathFromPeer(DBTablePartBase *part, AgentRoute *rt,
-                           const Peer *peer);
+    void SquashStalePaths(AgentRoute *rt, const AgentPath *path);
+    void EvaluateUnresolvedRoutes(void);
 
 private:
     class DeleteActor;
     void AddUnresolvedRoute(const AgentRoute *rt);
     void RemoveUnresolvedRoute(const AgentRoute *rt);
-    void EvaluateUnresolvedRoutes(void);
     void DeleteRouteDone(DBTableBase *base, RouteTableWalkerState *state);
 
     void Input(DBTablePartition *part, DBClient *client, DBRequest *req);
@@ -269,6 +268,7 @@ public:
     uint32_t vrf_id() const;
 
     AgentPath *FindLocalVmPortPath() const;
+    AgentPath *FindStalePath() const;
     const AgentPath *GetActivePath() const;
     const NextHop *GetActiveNextHop() const; 
     const std::string &dest_vn_name() const;
@@ -278,7 +278,6 @@ public:
     void ResyncTunnelNextHop();
     bool HasUnresolvedPath();
     bool Sync(void);
-    void SquashStalePaths(const AgentPath *path);
 
     //TODO Move dependantroutes and nh  to inet4
     void UpdateDependantRoutes();// analogous to updategatewayroutes
@@ -288,6 +287,7 @@ public:
     void FillTrace(RouteInfo &route, Trace event, const AgentPath *path);
     bool WaitForTraffic() const;
     virtual uint8_t plen() const { return 0; }
+
 protected:
     void SetVrf(VrfEntry *vrf) { vrf_ = vrf; }
     void RemovePathInternal(AgentPath *path);

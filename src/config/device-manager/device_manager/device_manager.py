@@ -33,7 +33,7 @@ from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
 import discoveryclient.client as client
 from cfgm_common.exceptions import ResourceExhaustionError
 from vnc_api.vnc_api import VncApi
-from cfgm_common.uve.cfgm_cpuinfo.ttypes import NodeStatusUVE, \
+from cfgm_common.uve.nodeinfo.ttypes import NodeStatusUVE, \
     NodeStatus
 from db import DBBaseDM, BgpRouterDM, PhysicalRouterDM, PhysicalInterfaceDM,\
     ServiceInstanceDM, LogicalInterfaceDM, VirtualMachineInterfaceDM, \
@@ -158,6 +158,7 @@ class DeviceManager(object):
         module_name = ModuleNames[module]
         node_type = Module2NodeType[module]
         node_type_name = NodeTypeNames[node_type]
+        self.table = "ObjectConfigNode"
         instance_id = INSTANCE_ID_DEFAULT
         hostname = socket.gethostname()
         self._sandesh.init_generator(
@@ -175,7 +176,7 @@ class DeviceManager(object):
         ConnectionState.init(
             self._sandesh, hostname, module_name, instance_id,
             staticmethod(ConnectionState.get_process_state_cb),
-            NodeStatusUVE, NodeStatus)
+            NodeStatusUVE, NodeStatus, self.table)
 
         # Retry till API server is up
         connected = False
@@ -210,7 +211,16 @@ class DeviceManager(object):
                                          rabbit_user, rabbit_password,
                                          rabbit_vhost, rabbit_ha_mode,
                                          q_name, self._vnc_subscribe_callback,
-                                         self.config_log)
+                                         self.config_log, rabbit_use_ssl =
+                                         self._args.rabbit_use_ssl,
+                                         kombu_ssl_version =
+                                         self._args.kombu_ssl_version,
+                                         kombu_ssl_keyfile =
+                                         self._args.kombu_ssl_keyfile,
+                                         kombu_ssl_certfile =
+                                         self._args.kombu_ssl_certfile,
+                                         kombu_ssl_ca_certs =
+                                         self._args.kombu_ssl_ca_certs)
 
         self._cassandra = DMCassandraDB.getInstance(self, _zookeeper_client)
 
@@ -302,6 +312,8 @@ class DeviceManager(object):
             if oper_info['oper'] == 'CREATE':
                 obj_dict = oper_info['obj_dict']
                 obj_id = obj_dict['uuid']
+                self._cassandra.cache_uuid_to_fq_name_add(
+                    obj_id, obj_dict['fq_name'], obj_type)
                 obj = obj_class.locate(obj_id, obj_dict)
                 dependency_tracker = DependencyTracker(
                     DBBaseDM.get_obj_type_map(), self._REACTION_MAP)
@@ -330,6 +342,7 @@ class DeviceManager(object):
                                 set(ids))
             elif oper_info['oper'] == 'DELETE':
                 obj_id = oper_info['uuid']
+                self._cassandra.cache_uuid_to_fq_name_del(obj_id)
                 obj = obj_class.get(obj_id)
                 if obj is None:
                     return
@@ -438,6 +451,11 @@ def parse_args(args_str):
         'push_delay_max': '100',
         'push_delay_enable': 'True',
         'sandesh_send_rate_limit': SandeshSystem.get_sandesh_send_rate_limit(),
+        'rabbit_use_ssl': False,
+        'kombu_ssl_version': '',
+        'kombu_ssl_keyfile': '',
+        'kombu_ssl_certfile': '',
+        'kombu_ssl_ca_certs': '',
     }
     secopts = {
         'use_certs': False,

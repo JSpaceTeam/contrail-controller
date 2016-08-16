@@ -18,6 +18,7 @@ import ConfigParser
 import yaml
 
 from nodemgr.common.event_manager import EventManager
+from nodemgr.database_nodemgr.common import CassandraManager
 
 from ConfigParser import NoOptionError
 
@@ -31,19 +32,18 @@ from pysandesh.gen_py.sandesh_trace.ttypes import SandeshTraceRequest
 from sandesh_common.vns.ttypes import Module, NodeType
 from sandesh_common.vns.constants import ModuleNames, NodeTypeNames,\
     Module2NodeType, INSTANCE_ID_DEFAULT, SERVICE_CONTRAIL_DATABASE, \
-    RepairNeededKeyspaces
+    RepairNeededKeyspaces, ThreadPoolNames
 from subprocess import Popen, PIPE
 from StringIO import StringIO
 
+from nodemgr.common.sandesh.nodeinfo.ttypes import *
+from nodemgr.common.sandesh.nodeinfo.cpuinfo.ttypes import *
+from nodemgr.common.sandesh.nodeinfo.process_info.ttypes import *
+from nodemgr.common.sandesh.nodeinfo.process_info.constants import *
 from database.sandesh.database.ttypes import \
-    NodeStatusUVE, NodeStatus, DatabaseUsageStats,\
-    DatabaseUsageInfo, DatabaseUsage
+    DatabaseUsageStats, DatabaseUsageInfo, DatabaseUsage, CassandraStatusUVE,\
+    CassandraStatusData,CassandraThreadPoolStats, CassandraCompactionTask
 from pysandesh.connection_info import ConnectionState
-from database.sandesh.database.process_info.ttypes import \
-    ProcessStatus, ProcessState, ProcessInfo, DiskPartitionUsageStats
-from database.sandesh.database.process_info.constants import \
-    ProcessStateNames
-
 
 class DatabaseEventManager(EventManager):
     def __init__(self, rule_file, discovery_server,
@@ -52,6 +52,7 @@ class DatabaseEventManager(EventManager):
                  cassandra_repair_interval,
                  cassandra_repair_logdir):
         self.node_type = "contrail-database"
+        self.table = "ObjectDatabaseInfo"
         self.module = Module.DATABASE_NODE_MGR
         self.module_id = ModuleNames[self.module]
         self.hostip = hostip
@@ -59,7 +60,8 @@ class DatabaseEventManager(EventManager):
         self.contrail_databases = contrail_databases
         self.cassandra_repair_interval = cassandra_repair_interval
         self.cassandra_repair_logdir = cassandra_repair_logdir
-        self.supervisor_serverurl = "unix:///tmp/supervisord_database.sock"
+        self.cassandra_mgr = CassandraManager(cassandra_repair_logdir)
+        self.supervisor_serverurl = "unix:///var/run/supervisord_database.sock"
         self.add_current_process()
         node_type = Module2NodeType[self.module]
         node_type_name = NodeTypeNames[node_type]
@@ -77,12 +79,16 @@ class DatabaseEventManager(EventManager):
         sandesh_global.init_generator(
             self.module_id, socket.gethostname(), node_type_name,
             self.instance_id, self.collector_addr, self.module_id, 8103,
-            ['database.sandesh'], _disc)
+            ['database.sandesh', 'nodemgr.common.sandesh'], _disc)
         sandesh_global.set_logging_params(enable_local_log=True)
         ConnectionState.init(sandesh_global, socket.gethostname(), self.module_id,
             self.instance_id,
             staticmethod(ConnectionState.get_process_state_cb),
-            NodeStatusUVE, NodeStatus)
+            NodeStatusUVE, NodeStatus, self.table)
+        self.send_system_cpu_info()
+        self.third_party_process_dict = {}
+        self.third_party_process_dict["cassandra"] = "-Dcassandra-pidfile=.*cassandra\.pid"
+        self.third_party_process_dict["zookeeper"] = "org.apache.zookeeper.server.quorum.QuorumPeerMain"
     # end __init__
 
     def _get_cassandra_config_option(self, config):
@@ -154,12 +160,14 @@ class DatabaseEventManager(EventManager):
 
     def send_process_state_db(self, group_names):
         self.send_process_state_db_base(
-            group_names, ProcessInfo, NodeStatus, NodeStatusUVE)
+            group_names, ProcessInfo)
 
     def send_nodemgr_process_status(self):
         self.send_nodemgr_process_status_base(
-            ProcessStateNames, ProcessState, ProcessStatus,
-            NodeStatus, NodeStatusUVE)
+            ProcessStateNames, ProcessState, ProcessStatus)
+
+    def get_node_third_party_process_dict(self):
+        return self.third_party_process_dict 
 
     def get_process_state(self, fail_status_bits):
         return self.get_process_state_base(
@@ -230,34 +238,81 @@ class DatabaseEventManager(EventManager):
             self.msg_log(msg, level=SandeshLevel.SYS_ERR)
             self.fail_status_bits |= self.FAIL_STATUS_DISK_SPACE_NA
 
-        cassandra_cli_cmd = "cassandra-cli --host " + self.hostip + \
-            " --batch  < /dev/null | grep 'Connected to:'"
-        proc = Popen(cassandra_cli_cmd, shell=True, stdout=PIPE, stderr=PIPE)
+        cqlsh_cmd = "cqlsh " + self.hostip + " -e quit"
+        proc = Popen(cqlsh_cmd, shell=True, stdout=PIPE, stderr=PIPE)
         (output, errout) = proc.communicate()
         if proc.returncode != 0:
             self.fail_status_bits |= self.FAIL_STATUS_SERVER_PORT
         else:
             self.fail_status_bits &= ~self.FAIL_STATUS_SERVER_PORT
         self.send_nodemgr_process_status()
+        # Send cassandra nodetool information
+        self.send_database_status()
         # Record cluster status and shut down cassandra if needed
-        subprocess.Popen(["contrail-cassandra-status",
-                          "--log-file", "/var/log/cassandra/status.log",
-                          "--debug"])
+        self.cassandra_mgr.status()
     # end database_periodic
 
-    def cassandra_repair(self):
-        logdir = self.cassandra_repair_logdir + "repair.log"
-        subprocess.Popen(["contrail-cassandra-repair",
-                          "--log-file", logdir,
-                          "--debug"])
-    #end cassandra_repair
+    def send_database_status(self):
+        cassandra_status_uve = CassandraStatusUVE()
+        cassandra_status = CassandraStatusData()
+        cassandra_status.cassandra_compaction_task = CassandraCompactionTask()
+        # Get compactionstats
+        compaction_count = subprocess.Popen("nodetool compactionstats|grep 'pending tasks:'",
+            shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        op, err = compaction_count.communicate()
+        if compaction_count.returncode != 0:
+            msg = "Failed to get nodetool compactionstats " + err
+            self.msg_log(msg, level=SandeshLevel.SYS_ERR)
+            return
+        cassandra_status.cassandra_compaction_task.pending_compaction_tasks = \
+            self.get_pending_compaction_count(op)
+        # Get the tpstats value
+        tpstats_op = subprocess.Popen(["nodetool", "tpstats"], stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+        op, err = tpstats_op.communicate()
+        if tpstats_op.returncode != 0:
+            msg = "Failed to get nodetool tpstats " + err
+            self.msg_log(msg, level=SandeshLevel.SYS_ERR)
+            return
+        cassandra_status.thread_pool_stats = self.get_tp_status(op)
+        cassandra_status.name = socket.gethostname()
+        cassandra_status_uve = CassandraStatusUVE(data=cassandra_status)
+        msg = 'Sending UVE: ' + str(cassandra_status_uve)
+        self.sandesh_global.logger().log(SandeshLogger.get_py_logger_level(
+                            SandeshLevel.SYS_DEBUG), msg)
+        cassandra_status_uve.send()
+    # end send_database_status
 
-    def send_disk_usage_info(self):
-        self.send_disk_usage_info_base(
-            NodeStatusUVE, NodeStatus, DiskPartitionUsageStats)
+    def get_pending_compaction_count(self, pending_count):
+        compaction_count_val = pending_count.strip()
+        # output is of the format pending tasks: x
+        pending_count_val = compaction_count_val.split(':')
+        return int(pending_count_val[1].strip())
+    # end get_pending_compaction_count
+
+    def get_tp_status(self,tp_stats_output):
+        tpstats_rows = tp_stats_output.split('\n')
+        thread_pool_stats_list = []
+        for row_index in range(1, len(tpstats_rows)):
+            cols = tpstats_rows[row_index].split()
+            # If tpstats len(cols) > 2, else we have reached the end
+            if len(cols) > 2:
+                if (cols[0] in ThreadPoolNames):
+                    # Create a CassandraThreadPoolStats for matching entries
+                    tpstat = CassandraThreadPoolStats()
+                    tpstat.pool_name = cols[0]
+                    tpstat.active = int(cols[1])
+                    tpstat.pending = int(cols[2])
+                    tpstat.all_time_blocked = int(cols[5])
+                    thread_pool_stats_list.append(tpstat)
+            else:
+                # Reached end of tpstats, breaking because dropstats follows
+                break
+        return thread_pool_stats_list
+    # end get_tp_status
 
     def runforever(self, test=False):
-        prev_current_time = int(time.time())
+        self.prev_current_time = int(time.time())
         while 1:
             # we explicitly use self.stdin, self.stdout, and self.stderr
             # instead of sys.* so we can unit test this code
@@ -280,8 +335,8 @@ class DatabaseEventManager(EventManager):
             # do periodic events
             if headers['eventname'].startswith("TICK_60"):
                 self.database_periodic()
-                prev_current_time = self.event_tick_60(prev_current_time)
+                self.event_tick_60()
                 # Perform nodetool repair every cassandra_repair_interval hours
                 if self.tick_count % (60 * self.cassandra_repair_interval) == 0:
-                    self.cassandra_repair()
+                    self.cassandra_mgr.repair()
             self.listener_nodemgr.ok(self.stdout)

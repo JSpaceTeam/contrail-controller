@@ -394,10 +394,12 @@ protected:
         sm_->Shutdown(BgpProto::Notification::AdminShutdown);
     }
     void EvAdminUp() {
+        ConcurrencyScope scope("bgp::Config");
         peer_->SetAdminState(false);
         sm_->set_idle_hold_time(1);
     }
     void EvAdminDown() {
+        ConcurrencyScope scope("bgp::Config");
         peer_->SetAdminState(true);
         sm_->set_idle_hold_time(1);
     }
@@ -613,7 +615,7 @@ TEST_F(StateMachineUnitTest, Matrix) {
             TRANSITION2(EvBgpNotification, StateMachine::IDLE)
             TRANSITION(EvConnectTimerExpired, StateMachine::ESTABLISHED)
             TRANSITION(EvOpenTimerExpired, StateMachine::ESTABLISHED)
-            TRANSITION(EvTcpPassiveOpen, StateMachine::ESTABLISHED)
+            TRANSITION(EvTcpPassiveOpen, StateMachine::IDLE)
             TRANSITION2(EvBgpUpdate, StateMachine::ESTABLISHED);
 
     Transitions matrix[] =
@@ -2568,20 +2570,19 @@ protected:
 
 // Old State: Established
 // Event:     EvTcpPassiveOpen
-// New State: Established
+// New State: Idle
 TEST_F(StateMachineEstablishedTest, TcpPassiveOpen) {
     TaskScheduler::GetInstance()->Stop();
     EvTcpPassiveOpen();
     TaskScheduler::GetInstance()->Start();
-    VerifyState(StateMachine::ESTABLISHED);
-    VerifyDirection(BgpSessionMock::ACTIVE);
+    VerifyState(StateMachine::IDLE);
     TASK_UTIL_EXPECT_TRUE(session_mgr_->passive_session() == NULL);
-    TASK_UTIL_EXPECT_TRUE(session_mgr_->active_session() != NULL);
+    TASK_UTIL_EXPECT_TRUE(session_mgr_->active_session() == NULL);
 }
 
 // Old State: Established
 // Event:     EvTcpPassiveOpen + EvBgpOpen (on passive session)
-// New State: Established
+// New State: Idle
 TEST_F(StateMachineEstablishedTest, TcpPassiveOpenThenBgpOpen) {
     TaskScheduler::GetInstance()->Stop();
     EvTcpPassiveOpen();
@@ -2589,7 +2590,7 @@ TEST_F(StateMachineEstablishedTest, TcpPassiveOpenThenBgpOpen) {
     EvBgpOpenCustom(session, lower_id_);
     TaskScheduler::GetInstance()->Start();
     task_util::WaitForIdle();
-    VerifyState(StateMachine::ESTABLISHED);
+    VerifyState(StateMachine::IDLE);
 }
 
 // Old State: Established

@@ -24,12 +24,12 @@ from lxml import etree
 import StringIO
 
 import socket
-from netaddr import IPNetwork
+from netaddr import IPNetwork, IPAddress, IPSet
 
 from cfgm_common.uve.vnc_api.ttypes import *
 from cfgm_common import ignore_exceptions
 from cfgm_common.ifmap.client import client
-from cfgm_common.ifmap.request import NewSessionRequest, PublishRequest
+from cfgm_common.ifmap.request import NewSessionRequest, PublishRequest, SearchRequest
 from cfgm_common.ifmap.id import Identity
 from cfgm_common.ifmap.operations import PublishUpdateOperation, \
     PublishDeleteOperation
@@ -41,7 +41,8 @@ from cfgm_common.vnc_cassandra import VncCassandraClient
 from cfgm_common.vnc_kombu import VncKombuClient
 from cfgm_common.utils import cgitb_hook
 from oslo_utils.importutils import import_class
-
+from cfgm_common import vnc_greenlets
+from cfgm_common import SGID_MIN_ALLOC
 import copy
 from cfgm_common import jsonutils as json
 import uuid
@@ -97,7 +98,33 @@ def trace_msg(trace_obj, trace_name, sandesh_hdl, error_msg=None):
 
 # end trace_msg
 
+def build_idperms_ifmap_obj(prop_field, values):
+    prop_xml = u'<uuid><uuid-mslong>'
+    prop_xml += unicode(json.dumps(values[u'uuid'][u'uuid_mslong']))
+    prop_xml += u'</uuid-mslong><uuid-lslong>'
+    prop_xml += unicode(json.dumps(values[u'uuid'][u'uuid_lslong']))
+    prop_xml += u'</uuid-lslong></uuid><enable>'
+    prop_xml += unicode(json.dumps(values[u'enable']))
+    prop_xml += u'</enable>'
+    return prop_xml
+
 class VncIfmapClient(object):
+
+
+    # * Not all properties in an object needs to be published
+    #   to IfMap.
+    # * In some properties, not all fields are relevant
+    #   to be publised to IfMap.
+
+    # If the property is not relevant at all, define the property
+    # with None. If it is partially relevant, then define the fn.
+    # which would handcraft the generated xml for the object.
+    IFMAP_PUBLISH_SKIP_LIST = {
+        # Format - <prop_field> : None | <Handler_fn>
+        u"perms2" : None,
+        u"id_perms" : build_idperms_ifmap_obj
+    }
+
     def handler(self, signum, frame):
         file = open("/tmp/api-server-ifmap-cache.txt", "w")
         file.write(pformat(self._id_to_metas))
@@ -129,30 +156,35 @@ class VncIfmapClient(object):
                                server_addrs=["%s:%s" % (ifmap_srv_ip, ifmap_srv_port)])
         self._conn_state = ConnectionStatus.INIT
         self._ifmap_disable = ifmap_disable
+        self._is_ifmap_up = False
+
         self.reset()
         # Set the signal handler
         signal.signal(signal.SIGUSR2, self.handler)
         if not self._ifmap_disable:
-            self.reset()
             self._init_conn()
             self._publish_config_root()
-            self._health_checker_greenlet = gevent.spawn(self._health_checker)
 
+            self._health_checker_greenlet =\
+                vnc_greenlets.VncGreenlet('VNC IfMap Health Checker',
+                                         self._health_checker)
     # end __init__
 
-    def object_alloc(self, obj_type, parent_type, fq_name):
-        res_type = obj_type.replace('_', '-')
+    def object_alloc(self, obj_type, parent_res_type, fq_name):
+        res_type =\
+            self._db_client_mgr.get_resource_class(obj_type).resource_type
         my_fqn = ':'.join(fq_name)
         parent_fqn = ':'.join(fq_name[:-1])
 
         my_imid = 'contrail:%s:%s' % (res_type, my_fqn)
         if parent_fqn:
-            if parent_type is None:
+            if parent_res_type is None:
                 err_msg = "Parent: %s type is none for: %s" % (parent_fqn,
                                                                my_fqn)
                 return False, (409, err_msg)
-            parent_imid = 'contrail:' + parent_type + ':' + parent_fqn
-        else:  # parent is config-root
+
+            parent_imid = 'contrail:' + parent_res_type + ':' + parent_fqn
+        else: # parent is config-root
             parent_imid = 'contrail:config-root:root'
 
         # Normalize/escape special chars
@@ -163,8 +195,8 @@ class VncIfmapClient(object):
 
     # end object_alloc
 
-    def object_set(self, res_type, my_imid, existing_metas, obj_dict):
-        obj_class = self._db_client_mgr.get_resource_class(res_type)
+    def object_set(self, obj_type, my_imid, existing_metas, obj_dict):
+        obj_class = self._db_client_mgr.get_resource_class(obj_type)
         update = {}
 
         # Properties Meta
@@ -179,18 +211,30 @@ class VncIfmapClient(object):
             prop_type = prop_field_types['xsd_type']
             # e.g. virtual-network-properties
             prop_meta = obj_class.prop_field_metas[prop_field]
-            if is_simple:
+
+            if prop_field in VncIfmapClient.IFMAP_PUBLISH_SKIP_LIST:
+                # Field not relevant, skip publishing to IfMap
+                if not VncIfmapClient.IFMAP_PUBLISH_SKIP_LIST[prop_field]:
+                    continue
+                # Call the handler fn to generate the relevant fields.
+                if callable(VncIfmapClient.IFMAP_PUBLISH_SKIP_LIST[prop_field]):
+                    prop_xml = VncIfmapClient.IFMAP_PUBLISH_SKIP_LIST[prop_field](
+                                        prop_field, field)
+                    meta = Metadata(prop_meta, '',
+                        {'ifmap-cardinality':'singleValue'}, ns_prefix='contrail',
+                        elements=prop_xml)
+                else:
+                    log_str = '%s is marked for partial publish\
+                               to Ifmap but handler not defined' %(
+                                prop_field)
+                    self.config_log(log_str, level=SandeshLevel.SYS_DEBUG)
+                    continue
+            elif is_simple:
                 norm_str = escape(str(field))
                 meta = Metadata(prop_meta, norm_str,
-                                {'ifmap-cardinality': 'singleValue'}, ns_prefix='contrail')
 
-                if (existing_metas and prop_meta in existing_metas and
-                            str(existing_metas[prop_meta][0]['meta']) == str(meta)):
-                    # no change
-                    pass
-                else:
-                    self._update_id_self_meta(update, meta)
-            else:  # complex type
+                       {'ifmap-cardinality':'singleValue'}, ns_prefix = 'contrail')
+            else: # complex type
                 prop_cls = cfgm_common.utils.str_to_class(prop_type,
                                                           __name__)
                 buf = cStringIO.StringIO()
@@ -216,12 +260,15 @@ class VncIfmapClient(object):
                                 {'ifmap-cardinality': 'singleValue'}, ns_prefix='contrail',
                                 elements=prop_xml)
 
-                if (existing_metas and prop_meta in existing_metas and
-                            str(existing_metas[prop_meta][0]['meta']) == str(meta)):
-                    # no change
-                    pass
-                else:
-                    self._update_id_self_meta(update, meta)
+            # If obj is new (existing metas is none) or
+            # if obj does not have this prop_meta (or)
+            # or if the prop_meta is different from what we have currently,
+            # then update
+            if (not existing_metas or
+                not prop_meta in existing_metas or
+                    ('' in existing_metas[prop_meta] and
+                    str(meta) != str(existing_metas[prop_meta]['']))):
+                self._update_id_self_meta(update, meta)
         # end for all property types
 
         # References Meta
@@ -231,11 +278,13 @@ class VncIfmapClient(object):
                 continue
             for ref in refs:
                 ref_fq_name = ref['to']
-                ref_type, ref_link_type, _ = \
-                    obj_class.ref_field_types[ref_field]
+                ref_fld_types_list = list(
+                    obj_class.ref_field_types[ref_field])
+                ref_res_type = ref_fld_types_list[0]
+                ref_link_type = ref_fld_types_list[1]
                 ref_meta = obj_class.ref_field_metas[ref_field]
                 ref_imid = cfgm_common.imid.get_ifmap_id_from_fq_name(
-                    ref_type, ref_fq_name)
+                    ref_res_type, ref_fq_name)
                 ref_data = ref.get('attr')
                 if ref_data:
                     buf = cStringIO.StringIO()
@@ -259,8 +308,7 @@ class VncIfmapClient(object):
     # end object_set
 
     def object_create(self, obj_ids, obj_dict):
-        obj_type = obj_ids['type'].replace('-', '_')
-
+        obj_type = obj_ids['type']
         if not 'parent_type' in obj_dict:
             # parent is config-root
             parent_type = 'config-root'
@@ -294,16 +342,20 @@ class VncIfmapClient(object):
 
     # end _object_read_to_meta_index
 
-    def object_update(self, res_type, ifmap_id, new_obj_dict):
-        obj_cls = self._db_client_mgr.get_resource_class(res_type)
+    def object_update(self, obj_type, ifmap_id, new_obj_dict):
+        obj_cls = self._db_client_mgr.get_resource_class(obj_type)
         # read in refs from ifmap to determine which ones become inactive after update
         existing_metas = self._object_read_to_meta_index(ifmap_id)
+
+        if not existing_metas:
+            # UPDATE notify queued before CREATE notify, Skip publish to IFMAP.
+            return (True, '')
 
         # remove properties that are no longer active
         props = obj_cls.prop_field_metas
         for prop, meta in props.items():
             if meta in existing_metas and new_obj_dict.get(prop) is None:
-                self._delete_id_self_meta(ifmap_id, 'contrail:' + meta)
+                self._delete_id_self_meta(ifmap_id, meta)
 
         # remove refs that are no longer active
         delete_list = []
@@ -314,37 +366,40 @@ class VncIfmapClient(object):
         #        'virtual-network-network-ipam': 'network-ipam',
         #        'virtual-network-network-policy': 'network-policy',
         #        'virtual-network-route-table': 'route-table'}
-        for meta, to_name in refs.items():
-            old_set = set([m['id'] for m in existing_metas.get(meta, [])])
+        for meta, ref_res_type in refs.items():
+            old_set = set(existing_metas.get(meta, {}).keys())
             new_set = set()
-            to_name_m = to_name.replace('-', '_')
-            for ref in new_obj_dict.get(to_name_m + '_refs', []):
-                to_imid = cfgm_common.imid.get_ifmap_id_from_fq_name(to_name,
-                                                                     ref['to'])
+
+            ref_obj_type = self._db_client_mgr.get_resource_class(
+                ref_res_type).object_type
+            for ref in new_obj_dict.get(ref_obj_type+'_refs', []):
+                to_imid = cfgm_common.imid.get_ifmap_id_from_fq_name(
+                    ref_res_type, ref['to'])
                 new_set.add(to_imid)
 
             for inact_ref in old_set - new_set:
-                delete_list.append((inact_ref, 'contrail:' + meta))
+                delete_list.append((inact_ref, meta))
 
         if delete_list:
             self._delete_id_pair_meta_list(ifmap_id, delete_list)
 
-        (ok, result) = self.object_set(res_type, ifmap_id, existing_metas, new_obj_dict)
+        (ok, result) = self.object_set(obj_type, ifmap_id, existing_metas, new_obj_dict)
         return (ok, result)
 
     # end object_update
 
-    def object_delete(self, res_type, obj_ids):
+    def object_delete(self, obj_ids):
         ifmap_id = obj_ids['imid']
         parent_imid = obj_ids.get('parent_imid')
         existing_metas = self._object_read_to_meta_index(ifmap_id)
         meta_list = []
         for meta_name, meta_infos in existing_metas.items():
-            for meta_info in meta_infos:
-                ref_imid = meta_info.get('id')
-                if ref_imid is None:
-                    continue
-                meta_list.append((ref_imid, 'contrail:' + meta_name))
+
+            # Delete all refs/links in the object.
+            # Refs are identified when the key is a non-empty string.
+            meta_list.extend(
+                [(k, meta_name)
+                  for k in meta_infos if k != ''])
 
         if parent_imid:
             # Remove link from parent
@@ -407,7 +462,9 @@ class VncIfmapClient(object):
 
         self._queue = Queue(self._get_api_server()._args.ifmap_queue_size)
         if self._dequeue_greenlet is None:
-            self._dequeue_greenlet = gevent.spawn(self._ifmap_dequeue_task)
+            self._dequeue_greenlet =\
+                  vnc_greenlets.VncGreenlet("VNC IfMap Dequeue",
+                                            self._ifmap_dequeue_task)
 
     # end reset
 
@@ -478,6 +535,7 @@ class VncIfmapClient(object):
             if publish_discovery and ok:
                 self._get_api_server().publish_ifmap_to_discovery()
 
+                self._is_ifmap_up = True
         # end _publish
 
         while True:
@@ -570,6 +628,7 @@ class VncIfmapClient(object):
 
                 self.reset()
                 self._get_api_server().un_publish_ifmap_to_discovery()
+                self._is_ifmap_up = False
                 # this will block till connection is re-established
                 self._init_conn()
                 self._publish_config_root()
@@ -606,14 +665,14 @@ class VncIfmapClient(object):
 
     def _delete_id_self_meta(self, self_imid, meta_name):
         mapclient = self._mapclient
-
-        del_str = self._build_request(self_imid, 'self', [meta_name], True)
+        contrail_metaname = 'contrail:' + meta_name if meta_name else None
+        del_str = self._build_request(self_imid, 'self', [contrail_metaname],
+                                      True)
         self._publish_to_ifmap_enqueue('delete', del_str)
 
         # del meta from cache and del id if this was last meta
         if meta_name:
-            prop_name = meta_name.replace('contrail:', '')
-            del self._id_to_metas[self_imid][prop_name]
+            del self._id_to_metas[self_imid][meta_name]
             if not self._id_to_metas[self_imid]:
                 del self._id_to_metas[self_imid]
         else:
@@ -625,7 +684,8 @@ class VncIfmapClient(object):
         mapclient = self._mapclient
         del_str = ''
         for id2, metadata in meta_list:
-            del_str += self._build_request(id1, id2, [metadata], True)
+            contrail_metadata = 'contrail:' + metadata if metadata else None
+            del_str += self._build_request(id1, id2, [contrail_metadata], True)
 
         self._publish_to_ifmap_enqueue('delete', del_str)
 
@@ -642,29 +702,24 @@ class VncIfmapClient(object):
                 return
 
             # if meta is prop, noop
-            if 'id' not in self._id_to_metas[id1][meta_name][0]:
-                return
-            self._id_to_metas[id1][meta_name] = [
-                m for m in self._id_to_metas[id1][meta_name] if m['id'] != id2]
+
+            if id2 in self._id_to_metas[id1][meta_name]:
+                del self._id_to_metas[id1][meta_name][id2]
+        #end _id_to_metas_delete
 
         for id2, metadata in meta_list:
             if metadata:
-                meta_name = metadata.replace('contrail:', '')
                 # replace with remaining refs
-                _id_to_metas_delete(id1, id2, meta_name)
-                _id_to_metas_delete(id2, id1, meta_name)
-            else:  # no meta specified remove all links from id1 to id2
+
+                _id_to_metas_delete(id1, id2, metadata)
+                _id_to_metas_delete(id2, id1, metadata)
+            else: # no meta specified remove all links from id1 to id2
                 for meta_name in self._id_to_metas.get(id1, {}).keys():
                     _id_to_metas_delete(id1, id2, meta_name)
                 for meta_name in self._id_to_metas.get(id2, {}).keys():
                     _id_to_metas_delete(id2, id1, meta_name)
 
     # end _delete_id_pair_meta_list
-
-    def _delete_id_pair_meta(self, id1, id2, metadata):
-        self._delete_id_pair_meta_list(id1, [(id2, metadata)])
-
-    # end _delete_id_pair_meta
 
     def _update_id_self_meta(self, update, meta):
         """ update: dictionary of the type
@@ -681,46 +736,45 @@ class VncIfmapClient(object):
         # end _update_id_pair_meta
 
     def _publish_update(self, self_imid, update):
-        if self_imid not in self._id_to_metas:
-            self._id_to_metas[self_imid] = {}
-
         mapclient = self._mapclient
         requests = []
-        for id2 in update:
-            metalist = update[id2]
+        self_metas = self._id_to_metas.setdefault(self_imid, {})
+        for id2, metalist in update.items():
             requests.append(self._build_request(self_imid, id2, metalist))
 
             # remember what we wrote for diffing during next update
             for m in metalist:
-                meta_name = m._Metadata__name.replace('contrail:', '')
-                if id2 == 'self':
-                    self._id_to_metas[self_imid][meta_name] = [{'meta': m}]
-                    continue
-                if meta_name in self._id_to_metas[self_imid]:
-                    for id_meta in self._id_to_metas[self_imid][meta_name]:
-                        if id_meta['id'] == id2:
-                            id_meta['meta'] = m
-                            break
-                    else:
-                        self._id_to_metas[self_imid][meta_name].append({'meta': m,
-                                                                        'id': id2})
-                else:
-                    self._id_to_metas[self_imid][meta_name] = [{'meta': m,
-                                                                'id': id2}]
+                meta_name = m._Metadata__name[9:]
 
-                if id2 not in self._id_to_metas:
-                    self._id_to_metas[id2] = {}
-                if meta_name in self._id_to_metas[id2]:
-                    for id_meta in self._id_to_metas[id2][meta_name]:
-                        if id_meta['id'] == self_imid:
-                            id_meta['meta'] = m
-                            break
-                    else:
-                        self._id_to_metas[id2][meta_name].append({'meta': m,
-                                                                  'id': self_imid})
+                # Objects have two types of members - Props and refs/links.
+                # Props are cached in id_to_metas as
+                #        id_to_metas[self_imid][meta_name]['']
+                #        (with empty string as key)
+
+                # Links are cached in id_to_metas as
+                #        id_to_metas[self_imid][meta_name][id2]
+                #        id2 is used as a key
+
+                if id2 == 'self':
+                    self_metas[meta_name] = {'' : m}
+                    continue
+
+                if meta_name in self_metas:
+                    # Update the link/ref
+                    self_metas[meta_name][id2] = m
                 else:
-                    self._id_to_metas[id2][meta_name] = [{'meta': m,
-                                                          'id': self_imid}]
+                    # Create a new link/ref
+                    self_metas[meta_name] = {id2 : m}
+
+                # Reverse linking from id2 to id1
+                self._id_to_metas.setdefault(id2, {})
+
+                if meta_name in self._id_to_metas[id2]:
+
+                    self._id_to_metas[id2][meta_name][self_imid] = m
+                else:
+                    self._id_to_metas[id2][meta_name] = {self_imid : m}
+
         upd_str = ''.join(requests)
         self._publish_to_ifmap_enqueue('update', upd_str)
 
@@ -737,9 +791,70 @@ class VncIfmapClient(object):
                                 ns_prefix='contrail', elements='')
                 request_str = self._build_request('healthcheck', 'self', [meta])
                 self._publish_to_ifmap_enqueue('update', request_str, do_trace=False)
+
+                # Confirm the existence of the following default global entities in IFMAP.
+                search_list = ['contrail:global-system-config:default-global-system-config']
+                mapclient = self._mapclient
+                srch_params = {}
+                srch_params['max-depth'] = '0'
+                srch_params['max-size'] = '500000'
+                srch_params['result-filter'] = None
+
+                for each_entity in search_list:
+                    start_id = str(
+                        Identity(name = each_entity,
+                        type='other', other_type='extended'))
+
+                    srch_req = SearchRequest(mapclient.get_session_id(), start_id,
+                                             search_parameters = srch_params)
+
+                    result = mapclient.call('search', srch_req)
+                    soap_doc = etree.fromstring(result)
+                    result_items = soap_doc.xpath(
+                        '/env:Envelope/env:Body/ifmap:response/searchResult/resultItem',
+                        namespaces=self._NAMESPACES)
+
+                    # The above IFMAP search call does not return the success of
+                    # the search query. To determine the success of the query
+                    # we verify whether the response has a 'metadata' child
+                    # and that in turn has "perms" sub children, then we can assume
+                    # that the query has succeeded. If not, we raise an
+                    # exception that the IFMAP does not contain basic Contrail
+                    # entities.
+                    for each_result in result_items:
+                        result_children = each_result.getchildren()
+                        metadata = [x for x in result_children if x.tag == 'metadata']
+                        if len(metadata) != 0:
+                            perms = [x for x in metadata[0] if "perms" in x.tag]
+                            if len(perms) != 0:
+                                continue
+                        raise Exception("%s not found in IFMAP DB" % each_entity)
+
+                # If we had unpublished the IFMAP server to discovery server earlier
+                # publish it back now since it is valid now.
+                if not self._is_ifmap_up:
+                    self._get_api_server().publish_ifmap_to_discovery('up', '')
+                    self._is_ifmap_up = True
+                    ConnectionState.update(conn_type = ConnType.IFMAP,
+                                           name = 'IfMap',
+                                           status = ConnectionStatus.UP,
+                                           message = '',
+                                           server_addrs = ["%s:%s" % (self._ifmap_srv_ip,
+                                                                      self._ifmap_srv_port)])
             except Exception as e:
-                log_str = 'Healthcheck to IFMAP failed: %s' % (str(e))
+
+                log_str = 'IFMAP Healthcheck failed: %s' %(str(e))
                 self.config_log(log_str, level=SandeshLevel.SYS_ERR)
+                if self._is_ifmap_up:
+                    self._get_api_server().publish_ifmap_to_discovery('down',
+                                                   'IFMAP DB - Invalid state')
+                    self._is_ifmap_up = False
+                    ConnectionState.update(conn_type = ConnType.IFMAP,
+                                           name = 'IfMap',
+                                           status = ConnectionStatus.DOWN,
+                                           message = 'Invalid IFMAP DB State',
+                                           server_addrs = ["%s:%s" % (self._ifmap_srv_ip,
+                                                                      self._ifmap_srv_port)])
             finally:
                 gevent.sleep(
                     self._get_api_server().get_ifmap_health_check_interval())
@@ -776,12 +891,12 @@ class VncServerCassandraClient(VncCassandraClient):
                  cassandra_credential, cassandra_pool):
         self._db_client_mgr = db_client_mgr
         keyspaces = self._UUID_KEYSPACE.copy()
-        keyspaces[self._USERAGENT_KEYSPACE_NAME] = [
-            (self._USERAGENT_KV_CF_NAME, None)]
+        keyspaces[self._USERAGENT_KEYSPACE_NAME] = {
+            self._USERAGENT_KV_CF_NAME: {}}
         super(VncServerCassandraClient, self).__init__(
             cass_srv_list, db_prefix, keyspaces, None, self.config_log,
-            generate_url=db_client_mgr.generate_uri,
-            reset_config=reset_config, credential=cassandra_credential, pool_config_dict=cassandra_pool)
+            generate_url=db_client_mgr.generate_uri, reset_config=reset_config,
+            credential=cassandra_credential, walk=False, pool_config_dict=cassandra_pool)
         self._useragent_kv_cf = self._cf_dict[self._USERAGENT_KV_CF_NAME]
 
     # end __init__
@@ -792,7 +907,7 @@ class VncServerCassandraClient(VncCassandraClient):
     # end config_log
 
     def prop_collection_update(self, obj_type, obj_uuid, updates):
-        obj_class = self._get_resource_class(obj_type)
+        obj_class = self._db_client_mgr.get_resource_class(obj_type)
         bch = self._obj_uuid_cf.batch()
         for oper_param in updates:
             oper = oper_param['operation']
@@ -831,12 +946,14 @@ class VncServerCassandraClient(VncCassandraClient):
 
     # end prop_collection_update
 
-    def ref_update(self, obj_type, obj_uuid, ref_type, ref_uuid, ref_data, operation):
+    def ref_update(self, obj_type, obj_uuid, ref_obj_type, ref_uuid,
+                   ref_data, operation):
         bch = self._obj_uuid_cf.batch()
         if operation == 'ADD':
-            self._create_ref(bch, obj_type, obj_uuid, ref_type, ref_uuid, ref_data)
+            self._create_ref(bch, obj_type, obj_uuid, ref_obj_type, ref_uuid,
+                             ref_data)
         elif operation == 'DELETE':
-            self._delete_ref(bch, obj_type, obj_uuid, ref_type, ref_uuid)
+            self._delete_ref(bch, obj_type, obj_uuid, ref_obj_type, ref_uuid)
         else:
             pass
         self.update_last_modified(bch, obj_uuid)
@@ -864,12 +981,10 @@ class VncServerCassandraClient(VncCassandraClient):
     # end _relax_ref_for_delete
 
     def get_relaxed_refs(self, obj_uuid):
-        try:
-            relaxed_cols = self._obj_uuid_cf.get(obj_uuid,
 
-                                                 column_start='relaxbackref:',
-                                                 column_finish='relaxbackref;')
-        except pycassa.NotFoundException:
+        relaxed_cols = self.get(self._OBJ_UUID_CF_NAME, obj_uuid,
+                                start='relaxbackref:', finish='relaxbackref;')
+        if not relaxed_cols:
             return []
 
         return [col.split(':')[1] for col in relaxed_cols]
@@ -877,9 +992,7 @@ class VncServerCassandraClient(VncCassandraClient):
     # end get_relaxed_refs
 
     def is_latest(self, id, tstamp):
-        id_perms_json = self._obj_uuid_cf.get(
-            id, columns=['prop:id_perms'])['prop:id_perms']
-        id_perms = json.loads(id_perms_json)
+        id_perms = self.uuid_to_obj_perms(id)
         if id_perms['last_modified'] == tstamp:
             return True
         else:
@@ -898,35 +1011,20 @@ class VncServerCassandraClient(VncCassandraClient):
         bch.send()
 
     def uuid_to_obj_dict(self, id):
-        try:
-            obj_cols = self._obj_uuid_cf.get(id)
-        except pycassa.NotFoundException:
+        obj_cols = self.get(self._OBJ_UUID_CF_NAME, id)
+        if not obj_cols:
             raise NoIdError(id)
         return obj_cols
 
     # end uuid_to_obj_dict
 
     def uuid_to_obj_perms(self, id):
-        try:
-            id_perms_json = self._obj_uuid_cf.get(
-                id, columns=['prop:id_perms'])['prop:id_perms']
-            id_perms = json.loads(id_perms_json)
-        except pycassa.NotFoundException:
-            raise NoIdError(id)
-        return id_perms
-
+        return self.get_one_col(self._OBJ_UUID_CF_NAME, id, 'prop:id_perms')
     # end uuid_to_obj_perms
 
     # fetch perms2 for an object
     def uuid_to_obj_perms2(self, id):
-        try:
-            perms2_json = self._obj_uuid_cf.get(
-                id, columns=['prop:perms2'])['prop:perms2']
-            perms2 = json.loads(perms2_json)
-        except pycassa.NotFoundException:
-            raise NoIdError(id)
-        return perms2
-
+        return self.get_one_col(self._OBJ_UUID_CF_NAME, id, 'prop:perms2')
     # end uuid_to_obj_perms2
 
     def useragent_kv_store(self, key, value):
@@ -959,62 +1057,14 @@ class VncServerCassandraClient(VncCassandraClient):
 
     # end useragent_kv_delete
 
-    def walk(self, fn):
-        walk_results = []
-        obj_infos = [x for x in self._obj_uuid_cf.get_range(
-            columns=['type', 'fq_name'],
-            column_count=self._MAX_COL)]
-        type_to_object = {}
-        for obj_uuid, obj_col in obj_infos:
-            try:
-                obj_type = json.loads(obj_col['type'])
-                obj_fq_name = json.loads(obj_col['fq_name'])
-                # prep cache to avoid n/w round-trip in db.read for ref
-                self.cache_uuid_to_fq_name_add(obj_uuid, obj_fq_name, obj_type)
-
-                try:
-                    type_to_object[obj_type].append(obj_uuid)
-                except KeyError:
-                    type_to_object[obj_type] = [obj_uuid]
-            except Exception as e:
-                self.config_log('Error in db walk read %s' % (str(e)),
-                                level=SandeshLevel.SYS_ERR)
-                continue
-
-        for obj_type, uuid_list in type_to_object.items():
-            try:
-                self.config_log('Resync: obj_type %s len %s'
-                                % (obj_type, len(uuid_list)),
-                                level=SandeshLevel.SYS_INFO)
-                result = fn(obj_type, uuid_list)
-                if result:
-                    walk_results.append(result)
-            except Exception as e:
-                self.config_log('Error in db walk invoke %s' % (str(e)),
-                                level=SandeshLevel.SYS_ERR)
-                continue
-
-        return walk_results
-
-    # end walk
-
-    def _get_resource_class(self, obj_type):
-        return self._db_client_mgr.get_resource_class(obj_type)
-
-    def _get_xsd_class(self, xsd_type):
-        return self._db_client_mgr.get_resource_xsd_class(xsd_type)
-
-    def _get_obj_type_to_db_type(self, obj_type):
-        return self._db_client_mgr.get_obj_type_to_db_type(obj_type)
-
-
 # end class VncCassandraClient
 
 
 
 class VncServerKombuClient(VncKombuClient):
     def __init__(self, db_client_mgr, rabbit_ip, rabbit_port, ifmap_db,
-                 rabbit_user, rabbit_password, rabbit_vhost, rabbit_ha_mode, ifmap_disable=False):
+                 rabbit_user, rabbit_password, rabbit_vhost, rabbit_ha_mode,ifmap_disable=False
+                 **kwargs):
         self._db_client_mgr = db_client_mgr
         self._sandesh = db_client_mgr._sandesh
         self._ifmap_db = ifmap_db
@@ -1025,9 +1075,10 @@ class VncServerKombuClient(VncKombuClient):
         super(VncServerKombuClient, self).__init__(
             rabbit_ip, rabbit_port, rabbit_user, rabbit_password, rabbit_vhost,
             rabbit_ha_mode, q_name, self._dbe_subscribe_callback, self.config_log,
-            '%s.#' % self._db_client_mgr.get_service_module())
+            '%s.#' % self._db_client_mgr.get_service_module(),  **kwargs)
         self._rc_queue = Queue()
         self._search_rc_publish_greenlet = gevent.spawn(self._search_rc_publish)
+
 
     # end __init__
 
@@ -1153,7 +1204,14 @@ class VncServerKombuClient(VncKombuClient):
 
 
     def _dbe_create_notification(self, obj_info):
-        obj_dict = obj_info['obj_dict']
+        try:
+            (ok, result) = self._db_client_mgr.dbe_read(obj_info['type'], obj_info)
+            if not ok:
+                raise Exception(result)
+            obj_dict = result
+        except NoIdError as e:
+            # No error, we will hear a delete shortly
+            return
 
         if not self._ifmap_disable:
             self.dbe_uve_trace("CREATE", obj_info['type'], obj_info['uuid'], obj_dict)
@@ -1204,14 +1262,14 @@ class VncServerKombuClient(VncKombuClient):
             raise
         finally:
             if not self._ifmap_disable:
-                ifmap_id = self._db_client_mgr.uuid_to_ifmap_id(obj_info['type'],
-                                                                obj_info['uuid'])
-                (ok, ifmap_result) = self._ifmap_db.object_update(
-                    obj_info['type'], ifmap_id, new_obj_dict)
-                if not ok:
-                    raise Exception(ifmap_result)
+                    ifmap_id = self._db_client_mgr.uuid_to_ifmap_id(
+                                    r_class.resource_type, obj_info['uuid'])
+                    (ok, ifmap_result) = self._ifmap_db.object_update(obj_info['type'], ifmap_id, new_obj_dict)
+                    if not ok:
+                        raise Exception(ifmap_result)
 
-    # end _dbe_update_notification
+
+    #end _dbe_update_notification
 
     def dbe_delete_publish(self, obj_type, obj_ids, obj_dict, tenantid=None):
         oper_info = {'oper': 'DELETE', 'type': obj_type, 'namespace': self._service_module,
@@ -1240,12 +1298,12 @@ class VncServerKombuClient(VncKombuClient):
             raise
         finally:
             if not self._ifmap_disable:
-                (ok, ifmap_result) = self._ifmap_db.object_delete(obj_info['type'],
-                                                                  obj_info)
+                (ok, ifmap_result) = self._ifmap_db.object_delete(obj_info)
                 if not ok:
                     self.config_log(ifmap_result, level=SandeshLevel.SYS_ERR)
                     raise Exception(ifmap_result)
-                    # end _dbe_delete_notification
+    # end _dbe_delete_notification
+
 
 
 # end class VncKombuClient
@@ -1255,6 +1313,12 @@ class VncZkClient(object):
     _SUBNET_PATH = "/api-server/subnets"
     _FQ_NAME_TO_UUID_PATH = "/fq-name-to-uuid"
     _MAX_SUBNET_ADDR_ALLOC = 65535
+
+    _VN_ID_ALLOC_PATH = "/id/virtual-networks/"
+    _VN_MAX_ID = 1 << 24
+
+    _SG_ID_ALLOC_PATH = "/id/security-groups/id/"
+    _SG_MAX_ID = 1 << 32
 
     def __init__(self, instance_id, zk_server_ip, reset_config, db_prefix,
                  sandesh_hdl, module=''):
@@ -1270,6 +1334,8 @@ class VncZkClient(object):
         client_name = client_pfx + 'api-' + instance_id
         self._subnet_path = zk_path_pfx + self._SUBNET_PATH
         self._fq_name_to_uuid_path = zk_path_pfx + self._FQ_NAME_TO_UUID_PATH + self._module_path
+        _vn_id_alloc_path = zk_path_pfx + self._VN_ID_ALLOC_PATH
+        _sg_id_alloc_path = zk_path_pfx + self._SG_ID_ALLOC_PATH
         self._zk_path_pfx = zk_path_pfx
 
         self._sandesh = sandesh_hdl
@@ -1287,8 +1353,25 @@ class VncZkClient(object):
         if reset_config:
             self._zk_client.delete_node(self._subnet_path, True)
             self._zk_client.delete_node(self._zk_path_pfx + self._FQ_NAME_TO_UUID_PATH, True)
+            self._zk_client.delete_node(_vn_id_alloc_path, True)
+            self._zk_client.delete_node(_vn_id_alloc_path, True)
+
         self._subnet_allocators = {}
 
+        # Initialize the virtual network ID allocator
+        self._vn_id_allocator = IndexAllocator(self._zk_client,
+                                               _vn_id_alloc_path,
+                                               self._VN_MAX_ID)
+
+        # Initialize the security group ID allocator
+        self._sg_id_allocator = IndexAllocator(self._zk_client,
+                                               _sg_id_alloc_path,
+                                               self._SG_MAX_ID)
+        # 0 is not a valid sg id any more. So, if it was previously allocated,
+        # delete it and reserve it
+        if self._sg_id_allocator.read(0) != '__reserved__':
+            self._sg_id_allocator.delete(0)
+        self._sg_id_allocator.reserve(0, '__reserved__')
     # end __init__
 
     def master_election(self, func, *args):
@@ -1306,8 +1389,9 @@ class VncZkClient(object):
 
     def reconnect_zk(self):
         if self._reconnect_zk_greenlet is None:
-            self._reconnect_zk_greenlet = gevent.spawn(self._reconnect_zk)
-
+            self._reconnect_zk_greenlet =\
+                   vnc_greenlets.VncGreenlet("VNC IfMap ZK Reconnect",
+                                             self._reconnect_zk)
     # end
 
     def get_zk_client(self):
@@ -1317,17 +1401,18 @@ class VncZkClient(object):
 
     def create_subnet_allocator(self, subnet, subnet_alloc_list,
                                 addr_from_start, should_persist,
-                                start_subnet, size):
+                                start_subnet, size, alloc_unit):
         # TODO handle subnet resizing change, ignore for now
         if subnet not in self._subnet_allocators:
             if addr_from_start is None:
                 addr_from_start = False
             self._subnet_allocators[subnet] = IndexAllocator(
-                self._zk_client, self._subnet_path + '/' + subnet + '/',
-                size=size, start_idx=start_subnet, reverse=not addr_from_start,
-                alloc_list=subnet_alloc_list,
-                max_alloc=self._MAX_SUBNET_ADDR_ALLOC)
-
+                self._zk_client, self._subnet_path+'/'+subnet+'/',
+                size=size/alloc_unit, start_idx=start_subnet/alloc_unit,
+                reverse=not addr_from_start,
+                alloc_list=[{'start': x['start']/alloc_unit, 'end':x['end']/alloc_unit}
+                            for x in subnet_alloc_list],
+                max_alloc=self._MAX_SUBNET_ADDR_ALLOC/alloc_unit)
     # end create_subnet_allocator
 
     def delete_subnet_allocator(self, subnet):
@@ -1389,17 +1474,14 @@ class VncZkClient(object):
     # end subnet_free_req
 
     def create_fq_name_to_uuid_mapping(self, obj_type, fq_name, id):
-        fq_name_str = ':'.join(fq_name)
-        zk_path = self._fq_name_to_uuid_path + '/%s:%s' % (obj_type.replace('-', '_'),
-                                                           fq_name_str)
+        zk_path = self._fq_name_to_uuid_path+'/%s:%s' %(obj_type, fq_name_str)
         self._zk_client.create_node(zk_path, id)
 
     # end create_fq_name_to_uuid_mapping
 
     def get_fq_name_to_uuid_mapping(self, obj_type, fq_name):
         fq_name_str = ':'.join(fq_name)
-        zk_path = self._fq_name_to_uuid_path + '/%s:%s' % (obj_type.replace('-', '_'),
-                                                           fq_name_str)
+        zk_path = self._fq_name_to_uuid_path+'/%s:%s' %(obj_type, fq_name_str)
         obj_uuid, znode_stat = self._zk_client.read_node(
             zk_path, include_timestamp=True)
 
@@ -1409,8 +1491,8 @@ class VncZkClient(object):
 
     def delete_fq_name_to_uuid_mapping(self, obj_type, fq_name):
         fq_name_str = ':'.join(fq_name)
-        zk_path = self._fq_name_to_uuid_path + '/%s:%s' % (obj_type.replace('-', '_'),
-                                                           fq_name_str)
+
+        zk_path = self._fq_name_to_uuid_path+'/%s:%s' %(obj_type, fq_name_str)
         self._zk_client.delete_node(zk_path)
 
     # end delete_fq_name_to_uuid_mapping
@@ -1420,6 +1502,33 @@ class VncZkClient(object):
         # end is_connected
 
 
+    def alloc_vn_id(self, name):
+        if name is not None:
+            return self._vn_id_allocator.alloc(name)
+
+    def free_vn_id(self, vn_id):
+        if vn_id is not None and vn_id < self._VN_MAX_ID:
+            self._vn_id_allocator.delete(vn_id)
+
+    def get_vn_from_id(self, vn_id):
+        if vn_id is not None and vn_id < self._VN_MAX_ID:
+            return self._vn_id_allocator.read(vn_id)
+
+    def alloc_sg_id(self, name):
+        if name is not None:
+            return self._sg_id_allocator.alloc(name) + SGID_MIN_ALLOC
+
+    def free_sg_id(self, sg_id):
+        if (sg_id is not None and
+                sg_id > SGID_MIN_ALLOC and
+                sg_id < self._SG_MAX_ID):
+            self._sg_id_allocator.delete(sg_id - SGID_MIN_ALLOC)
+
+    def get_sg_from_id(self, sg_id):
+        if (sg_id is not None and
+                sg_id > SGID_MIN_ALLOC and
+                sg_id < self._SG_MAX_ID):
+            return self._sg_id_allocator.read(sg_id - SGID_MIN_ALLOC)
 # end VncZkClient
 
 
@@ -1428,32 +1537,25 @@ class VncDbClient(object):
                  passwd, cass_srv_list,
                  rabbit_servers, rabbit_port, rabbit_user, rabbit_password,
                  rabbit_vhost, rabbit_ha_mode, reset_config=False,
-                 zk_server_ip=None, db_prefix='', cassandra_credential=None, ifmap_disable=False,
-                 cassandra_pool = None):
+                 zk_server_ip=None, db_prefix='', cassandra_credential=None,ifmap_disable=False,cassandra_pool = None
+                 **kwargs):
 
         self._api_svr_mgr = api_svr_mgr
         self._sandesh = api_svr_mgr._sandesh
         self._ifmap_disable = ifmap_disable
 
         self._UVEMAP = {
-            "virtual_network": "ObjectVNTable",
-            "virtual_machine": "ObjectVMTable",
-            "service_instance": "ObjectSITable",
-            "virtual_router": "ObjectVRouter",
-            "analytics_node": "ObjectCollectorInfo",
-            "database_node": "ObjectDatabaseInfo",
-            "config_node": "ObjectConfigNode",
-            "service_chain": "ServiceChain",
-            "physical_router": "ObjectPRouter",
-        }
 
-        self._UVEGLOBAL = set([
-            "virtual_router",
-            "analytics_node",
-            "database_node",
-            "config_node",
-            "physical_router"
-        ])
+            "virtual_network" : ("ObjectVNTable", False),
+            "service_instance" : ("ObjectSITable", False),
+            "virtual_router" : ("ObjectVRouter", True),
+            "analytics_node" : ("ObjectCollectorInfo", True),
+            "database_node" : ("ObjectDatabaseInfo", True),
+            "config_node" : ("ObjectConfigNode", True),
+            "service_chain" : ("ServiceChain", False),
+            "physical_router" : ("ObjectPRouter", True),
+            "bgp_router": ("ObjectBgpRouter", True),
+        }
 
         # certificate auth
         ssl_options = None
@@ -1511,7 +1613,8 @@ class VncDbClient(object):
             self.config_log("Elastic search not enabled", level=SandeshLevel.SYS_NOTICE)
             self._search_db = VncNoOpEsDb()
         self._rollback_handler = VncDBRollBackHandler(self, self._msgbus, self._search_db)
-
+                                            rabbit_vhost, rabbit_ha_mode,
+                                            **kwargs)
     # end __init__
 
     def _update_default_quota(self):
@@ -1656,7 +1759,7 @@ class VncDbClient(object):
     def update_subnet_uuid(self, vn_dict, do_update=False):
         vn_uuid = vn_dict.get('uuid')
 
-        def _read_subnet_uuid(subnet):
+        def _locate_subnet_uuid(subnet):
             if vn_uuid is None:
                 return None
             pfx = subnet['subnet']['ip_prefix']
@@ -1667,21 +1770,16 @@ class VncDbClient(object):
             try:
                 return self.useragent_kv_retrieve(subnet_key)
             except NoUserAgentKey:
-                return None
+                return str(uuid.uuid4())
 
-        ipam_refs = vn_dict.get('network_ipam_refs', [])
         updated = False
-        for ipam in ipam_refs:
-            vnsn = ipam['attr']
-            subnets = vnsn['ipam_subnets']
+        for ipam in vn_dict.get('network_ipam_refs', []):
+            subnets = ipam['attr']['ipam_subnets']
             for subnet in subnets:
                 if subnet.get('subnet_uuid'):
                     continue
-
-                subnet_uuid = _read_subnet_uuid(subnet) or str(uuid.uuid4())
-                subnet['subnet_uuid'] = subnet_uuid
-                if not updated:
-                    updated = True
+                subnet['subnet_uuid'] = _locate_subnet_uuid(subnet)
+                updated = True
 
         if updated and do_update:
             self._cassandra_db.object_update('virtual_network', vn_uuid,
@@ -1694,77 +1792,108 @@ class VncDbClient(object):
         if router_type is not set.
         """
         router_params = obj_dict['bgp_router_parameters']
-        if not router_params['router_type']:
+        if 'router_type' not in router_params:
             router_type = 'router'
             if router_params['vendor'] == 'contrail':
                 router_type = 'control-node'
             router_params.update({'router_type': router_type})
-            obj_dict.update({'bgp_router_parameters': router_params})
             obj_uuid = obj_dict.get('uuid')
             self._cassandra_db.object_update('bgp_router', obj_uuid, obj_dict)
 
     # end update_bgp_router_type
 
+    def iip_update_subnet_uuid(self, iip_dict):
+        """ Set the subnet uuid as instance-ip attribute """
+        for vn_ref in iip_dict.get('virtual_network_refs', []):
+            (ok, results) = self._cassandra_db.object_read(
+                'virtual_network', [vn_ref['uuid']],
+                field_names=['network_ipam_refs'])
+            if not ok:
+                return
+            vn_dict = results[0]
+            for ipam in vn_dict.get('network_ipam_refs', []):
+                subnets = ipam['attr']['ipam_subnets']
+                for subnet in subnets:
+                    pfx = subnet['subnet']['ip_prefix']
+                    pfx_len = subnet['subnet']['ip_prefix_len']
+                    cidr = '%s/%s' % (pfx, pfx_len)
+                    if (IPAddress(iip_dict['instance_ip_address']) in
+                            IPSet([cidr])):
+                        iip_dict['subnet_uuid'] = subnet['subnet_uuid']
+                        self._cassandra_db.object_update('instance-ip',
+                                                         iip_dict['uuid'],
+                                                         iip_dict)
+                        return
+
     def _dbe_resync(self, obj_type, obj_uuids):
         obj_class = cfgm_common.utils.obj_type_to_vnc_class(obj_type, __name__)
         obj_fields = list(obj_class.prop_fields) + list(obj_class.ref_fields)
         (ok, obj_dicts) = self._cassandra_db.object_read(
-            obj_type, obj_uuids, field_names=obj_fields)
+           obj_type, obj_uuids, field_names=obj_fields)
+        uve_trace_list = []
         for obj_dict in obj_dicts:
-            # give chance for zk heartbeat/ping
-            gevent.sleep(0)
-
             try:
                 obj_uuid = obj_dict['uuid']
-                self.dbe_uve_trace("RESYNC", obj_type, obj_uuid, obj_dict)
-                # TODO remove backward compat (use RT instead of VN->LR ref)
-                if (obj_type == 'virtual_network' and
-                            'logical_router_refs' in obj_dict):
-                    for router in obj_dict['logical_router_refs']:
-                        self._cassandra_db._delete_ref(None, obj_type, obj_uuid,
+                uve_trace_list.append(("RESYNC", obj_type, obj_uuid, obj_dict))
+
+                if obj_type == 'virtual_network':
+                    # TODO remove backward compat (use RT instead of VN->LR ref)
+                    for router in obj_dict.get('logical_router_refs', []):
+                        self._cassandra_db._delete_ref(None,
+                                                       obj_type,
+                                                       obj_uuid,
                                                        'logical_router',
                                                        router['uuid'])
+                    if 'network_ipam_refs' in obj_dict:
+                        self.update_subnet_uuid(obj_dict, do_update=True)
+                elif obj_type == 'virtual_machine_interface':
+                    device_owner = obj_dict.get('virtual_machine_interface_device_owner')
+                    li_back_refs = obj_dict.get('logical_interface_back_refs', [])
+                    if not device_owner and li_back_refs:
+                        obj_dict['virtual_machine_interface_device_owner'] = 'PhysicalRouter'
+                        self._cassandra_db.object_update('virtual_machine_interface',
+                                                    obj_uuid, obj_dict)
 
                 # create new perms if upgrading
-                if obj_dict.get('perms2') is None:
+                if 'perms2' not in obj_dict:
                     self._cassandra_db.update_perms2(obj_uuid)
 
-                if (obj_type == 'virtual_network' and
-                            'network_ipam_refs' in obj_dict):
-                    self.update_subnet_uuid(obj_dict, do_update=True)
+
                 if (obj_type == 'bgp_router' and
-                            'bgp_router_parameters' in obj_dict):
+                        'bgp_router_parameters' in obj_dict and
+                        'router_type' not in obj_dict['bgp_router_parameters']):
                     self.update_bgp_router_type(obj_dict)
-            except Exception as e:
-                self.config_object_error(
-                    obj_dict.get('uuid'), None, obj_type,
-                    'dbe_resync:cassandra_read', str(e))
-                continue
-            try:
-                parent_type = obj_dict.get('parent_type', None)
+
+                if obj_type == 'instance_ip' and 'subnet_uuid' not in obj_dict:
+                    self.iip_update_subnet_uuid(obj_dict)
+
+                # Ifmap alloc
+                parent_res_type = obj_dict.get('parent_type', None)
                 (ok, result) = self._ifmap_db.object_alloc(
-                    obj_type, parent_type, obj_dict['fq_name'])
+                    obj_type, parent_res_type, obj_dict['fq_name'])
                 if not ok:
-                    self.config_object_error(
-                        obj_uuid, None, obj_type, 'dbe_resync:ifmap_alloc',
-                        result[1])
+                    msg = "%s(%s), dbe_resync:ifmap_alloc error: %s" % (
+                            obj_type, obj_uuid, result[1])
+                    self.config_log(msg, level=SandeshLevel.SYS_ERR)
                     continue
                 (my_imid, parent_imid) = result
-            except Exception as e:
-                self.config_object_error(
-                    obj_uuid, None, obj_type, 'dbe_resync:ifmap_alloc', str(e))
-                continue
 
-            try:
+                # Ifmap create
                 obj_ids = {'type': obj_type, 'uuid': obj_uuid, 'imid': my_imid,
                            'parent_imid': parent_imid}
                 (ok, result) = self._ifmap_db.object_create(obj_ids, obj_dict)
             except Exception as e:
-                self.config_object_error(
-                    obj_uuid, None, obj_type, 'dbe_resync:ifmap_create', str(e))
+                tb = cfgm_common.utils.detailed_traceback()
+                self.config_log(tb, level=SandeshLevel.SYS_ERR)
                 continue
-                # end for all objects
 
+        # end for all objects
+
+        # Send UVEs resync with a pool of workers
+        uve_workers = gevent.pool.Group()
+        def format_args_for_dbe_uve_trace(args):
+            return self.dbe_uve_trace(*args)
+        uve_workers.map(format_args_for_dbe_uve_trace, uve_trace_list)
     # end _dbe_resync
 
 
@@ -1821,6 +1950,15 @@ class VncDbClient(object):
         except ResourceExistsError as e:
             return (False, (409, str(e)))
 
+
+        parent_res_type = obj_dict.get('parent_type')
+        (ok, result) = self._ifmap_db.object_alloc(obj_type, parent_res_type,
+                                                   obj_dict['fq_name'])
+        if not ok:
+            self.dbe_release(obj_type, obj_dict['fq_name'])
+            return False, result
+
+        (my_imid, parent_imid) = result
         obj_ids = {
             'uuid': obj_dict['uuid']
         }
@@ -1837,54 +1975,35 @@ class VncDbClient(object):
 
     # end dbe_alloc
 
-    def dbe_uve_trace(self, oper, typ, uuid, obj_dict):
-        oo = {}
-        oo['uuid'] = uuid
-        if oper.upper() == 'DELETE':
-            oo['name'] = obj_dict['fq_name']
-        else:
-            oo['name'] = self.uuid_to_fq_name(uuid)
-        oo['value'] = obj_dict
-        oo['type'] = typ.replace('-', '_')
-
-        req_id = get_trace_id()
-        db_trace = DBRequestTrace(request_id=req_id)
-        db_trace.operation = oper
-        db_trace.body = "name=" + str(oo['name']) + " type=" + typ + " value=" + json.dumps(obj_dict)
-        trace_msg(db_trace, 'DBUVERequestTraceBuf', self._sandesh)
-
-        attr_contents = None
-        emap = {}
-        if oo['value']:
-            for ck, cv in oo['value'].iteritems():
-                emap[ck] = json.dumps(cv)
-
-        utype = oo['type']
-        urawkey = ':'.join(oo['name'])
-        ukey = None
-        utab = None
-        if utype in self._UVEMAP:
-            utab = self._UVEMAP[utype]
-            if utype in self._UVEGLOBAL:
-                ukey = urawkey.split(":", 1)[1]
-            else:
-                ukey = urawkey
-        elif utype == 'bgp_router':
-            utab = "ObjectBgpRouter"
-            ukey = urawkey.rsplit(":", 1)[1]
-        else:
+    def dbe_uve_trace(self, oper, type, uuid, obj_dict):
+        if type not in self._UVEMAP:
             return
 
-        if oper.upper() == 'DELETE':
-            cc = ContrailConfig(name=ukey, elements=emap, deleted=True)
+        oper = oper.upper()
+        req_id = get_trace_id()
+        if 'fq_name' not in obj_dict:
+            obj_dict['fq_name'] = self.uuid_to_fq_name(uuid)
+        obj_json = {k: json.dumps(obj_dict[k]) for k in obj_dict or {}}
+
+        db_trace = DBRequestTrace(request_id=req_id)
+        db_trace.operation = oper
+        db_trace.body = "name=%s type=%s value=%s" % (obj_dict['fq_name'],
+                                                      type,
+                                                      json.dumps(obj_dict))
+        uve_table, global_uve = self._UVEMAP[type]
+        if global_uve:
+            uve_name = obj_dict['fq_name'][-1]
         else:
-            cc = ContrailConfig(name=ukey, elements=emap)
+            uve_name = ':'.join(obj_dict['fq_name'])
+        contrail_config = ContrailConfig(name=uve_name,
+                                         elements=obj_json,
+                                         deleted=oper=='DELETE')
+        contrail_config_msg = ContrailConfigTrace(data=contrail_config,
+                                                  table=uve_table,
+                                                  sandesh=self._sandesh)
 
-        cfg_msg = ContrailConfigTrace(data=cc, table=utab,
-                                      sandesh=self._sandesh)
-        cfg_msg.send(sandesh=self._sandesh)
-
-    # end dbe_uve_trace
+        contrail_config_msg.send(sandesh=self._sandesh)
+        trace_msg(db_trace, 'DBUVERequestTraceBuf', self._sandesh)
 
     def dbe_trace(oper):
         def wrapper1(func):
@@ -1925,7 +2044,7 @@ class VncDbClient(object):
                 try:
                     cur_perms2 = self.uuid_to_obj_perms2(obj_uuid)
                 except Exception as e:
-                    cur_perms2 = self.get_default_perms2(obj_type)
+                    cur_perms2 = self.get_default_perms2()
                     pass
 
                 # don't build sharing indexes if operation (create/update) failed
@@ -1982,9 +2101,9 @@ class VncDbClient(object):
         (ok, result) = self._cassandra_db.object_create(
             obj_type, obj_ids['uuid'], obj_dict)
 
-        # publish to ifmap via msgbus
-        self._msgbus.dbe_create_publish(obj_type, obj_ids, obj_dict,
-                                        VncPermissions.get_tenant_id(obj_dict, obj_ids, self))
+        if ok:
+            # publish to ifmap via msgbus
+            self._msgbus.dbe_create_publish(obj_type, obj_ids, obj_dict, VncPermissions.get_tenant_id(obj_dict, obj_ids, self))
 
         return (ok, result)
 
@@ -2065,7 +2184,6 @@ class VncDbClient(object):
     @build_shared_index('update')
     def dbe_update(self, obj_type, obj_ids, new_obj_dict):
         self._search_db.search_update(obj_type, obj_ids, new_obj_dict)
-        method_name = obj_type.replace('-', '_')
         (ok, cassandra_result) = self._cassandra_db.object_update(
             obj_type, obj_ids['uuid'], new_obj_dict)
 
@@ -2205,11 +2323,10 @@ class VncDbClient(object):
 
     def subnet_create_allocator(self, subnet, subnet_alloc_list,
                                 addr_from_start, should_persist,
-                                start_subnet, size):
+                                start_subnet, size, alloc_unit):
         return self._zk_db.create_subnet_allocator(subnet,
-                                                   subnet_alloc_list, addr_from_start,
-                                                   should_persist, start_subnet, size)
-
+                               subnet_alloc_list, addr_from_start,
+                               should_persist, start_subnet, size, alloc_unit)
     # end subnet_create_allocator
 
     def subnet_delete_allocator(self, subnet):
@@ -2222,10 +2339,10 @@ class VncDbClient(object):
 
     # end uuid_vnlist
 
-    def uuid_to_ifmap_id(self, obj_type, id):
+    def uuid_to_ifmap_id(self, res_type, id):
         fq_name = self.uuid_to_fq_name(id)
-        return cfgm_common.imid.get_ifmap_id_from_fq_name(obj_type, fq_name)
 
+        return cfgm_common.imid.get_ifmap_id_from_fq_name(res_type, fq_name)
     # end uuid_to_ifmap_id
 
     def fq_name_to_uuid(self, obj_type, fq_name):
@@ -2269,14 +2386,15 @@ class VncDbClient(object):
         self._msgbus.dbe_update_publish(obj_type.replace('_', '-'),
                                         {'uuid': obj_uuid},
                                         VncPermissions.get_tenant_id(None, {'uuid': obj_uuid}, self))
+
         return True, ''
 
     # end prop_collection_update
 
-    def ref_update(self, obj_type, obj_uuid, ref_type, ref_uuid, ref_data,
+    def ref_update(self, obj_type, obj_uuid, ref_obj_type, ref_uuid, ref_data,
                    operation):
-        self._cassandra_db.ref_update(obj_type, obj_uuid, ref_type, ref_uuid,
-                                      ref_data, operation)
+        self._cassandra_db.ref_update(obj_type, obj_uuid, ref_obj_type,
+                                      ref_uuid, ref_data, operation)
         self._msgbus.dbe_update_publish(obj_type.replace('_', '-'),
                                         {'uuid': obj_uuid},
                                         VncPermissions.get_tenant_id(None, {'uuid': obj_uuid}, self))
@@ -2284,7 +2402,6 @@ class VncDbClient(object):
             self._msgbus.dbe_update_publish(ref_type.replace('_', '-'),
                                             {'uuid': ref_uuid},
                                             VncPermissions.get_tenant_id(None, {'uuid': ref_uuid}, self))
-
     # ref_update
 
     def ref_relax_for_delete(self, obj_uuid, ref_uuid):
@@ -2297,12 +2414,6 @@ class VncDbClient(object):
 
     # end uuid_to_obj_perms2
 
-
-    def get_resource_class(self, resource_type):
-        return self._api_svr_mgr.get_resource_class(resource_type)
-
-    # end get_resource_class
-
     def get_resource_xsd_class(self, xsd_type):
         return self._api_svr_mgr.get_resource_xsd_class(xsd_type)
 
@@ -2311,13 +2422,19 @@ class VncDbClient(object):
     def get_obj_type_to_db_type(self, obj_type):
         return self._api_svr_mgr._get_obj_type_to_db_type(obj_type)
 
-    def get_default_perms2(self, obj_type):
-        return self._api_svr_mgr._get_default_perms2(obj_type)
-
     # Helper routines for REST
     def generate_uri(self, obj_type, obj_uuid):
         return self._api_svr_mgr.generate_uri(obj_type, obj_uuid)
+    def get_resource_class(self, type):
+        return self._api_svr_mgr.get_resource_class(type)
+    # end get_resource_class
 
+    def get_default_perms2(self):
+        return self._api_svr_mgr._get_default_perms2()
+
+    # Helper routines for REST
+    def generate_url(self, resource_type, obj_uuid):
+        return self._api_svr_mgr.generate_url(resource_type, obj_uuid)
     # end generate_url
 
     def config_object_error(self, id, fq_name_str, obj_type,

@@ -10,10 +10,12 @@ import socket
 import psutil
 import gevent
 from uve.cfgm_cpuinfo.ttypes import *
-from uve.cfgm_cpuinfo.cpuinfo.ttypes import *
+from cfgm_common.uve.nodeinfo.ttypes import *
+from cfgm_common.uve.nodeinfo.cpuinfo.ttypes import *
 from buildinfo import build_info
 from sandesh_common.vns.ttypes import Module
 from sandesh_common.vns.constants import ModuleNames
+import vnc_greenlets
 
 # CpuInfo object for config-node
 
@@ -41,7 +43,7 @@ class CpuInfo(object):
         self._new_ip = None
 
         # spawn a Greenlet object to do periodic collect and send.
-        gevent.spawn(self.cpu_stats)
+        vnc_greenlets.VncGreenlet("VNC CPU Info", self.cpu_stats)
     # end __init__
 
     def get_config_node_ip(self):
@@ -126,6 +128,7 @@ class CpuInfo(object):
             mod_cpu.cpu_info.sys_mem_info.used = self._virtmem_info.used / 1024
             mod_cpu.cpu_info.sys_mem_info.free = self._virtmem_info.free / 1024
             mod_cpu.cpu_info.sys_mem_info.buffers = self._virtmem_info.buffers / 1024
+            mod_cpu.cpu_info.sys_mem_info.cached = self._virtmem_info.cached / 1024
 
             # populate CPU Load avg
             mod_cpu.cpu_info.cpuload = CpuLoadAvg()

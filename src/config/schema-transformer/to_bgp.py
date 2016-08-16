@@ -42,7 +42,7 @@ import discoveryclient.client as client
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.process_info.ttypes import ConnectionType as ConnType
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
-from cfgm_common.uve.cfgm_cpuinfo.ttypes import NodeStatusUVE, NodeStatus
+from cfgm_common.uve.nodeinfo.ttypes import NodeStatusUVE, NodeStatus
 from db import SchemaTransformerDB
 from cfgm_common.vnc_kombu import VncKombuClient
 from cfgm_common.dependency_tracker import DependencyTracker
@@ -68,6 +68,7 @@ class SchemaTransformer(object):
             'logical_router': ['virtual_network'],
             'instance_ip': ['virtual_machine', 'port_tuple', 'bgp_as_a_service', 'virtual_network'],
             'floating_ip': ['virtual_machine', 'port_tuple'],
+            'alias_ip': ['virtual_machine', 'port_tuple'],
             'virtual_machine': ['virtual_network'],
             'port_tuple': ['virtual_network'],
             'bgp_as_a_service': [],
@@ -110,14 +111,19 @@ class SchemaTransformer(object):
             'security_group': [],
         },
         'route_table': {
-            'self': ['virtual_network', 'service_instance'],
+            'self': ['virtual_network', 'service_instance', 'logical_router'],
             'virtual_network': ['service_instance'],
+            'logical_router': ['service_instance'],
         },
         'logical_router': {
-            'self': [],
+            'self': ['route_table'],
             'virtual_machine_interface': [],
+            'route_table': [],
         },
         'floating_ip': {
+            'self': ['virtual_machine_interface'],
+        },
+        'alias_ip': {
             'self': ['virtual_machine_interface'],
         },
         'instance_ip': {
@@ -170,6 +176,7 @@ class SchemaTransformer(object):
         module_name = ModuleNames[module]
         node_type = Module2NodeType[module]
         node_type_name = NodeTypeNames[node_type]
+        self.table = "ObjectConfigNode"
         instance_id = INSTANCE_ID_DEFAULT
         hostname = socket.gethostname()
         self._sandesh.init_generator(
@@ -187,7 +194,7 @@ class SchemaTransformer(object):
                                     syslog_facility=args.syslog_facility)
         ConnectionState.init(self._sandesh, hostname, module_name, instance_id,
                 staticmethod(ConnectionState.get_process_state_cb),
-                NodeStatusUVE, NodeStatus)
+                NodeStatusUVE, NodeStatus, self.table)
 
         self._sandesh.trace_buffer_create(name="MessageBusNotifyTraceBuf",
                                           size=1000)
@@ -206,20 +213,34 @@ class SchemaTransformer(object):
                                          rabbit_user, rabbit_password,
                                          rabbit_vhost, rabbit_ha_mode,
                                          q_name, self._vnc_subscribe_callback,
-                                         self.config_log)
-        self._cassandra = SchemaTransformerDB(self, _zookeeper_client)
-        DBBaseST.init(self, self._sandesh.logger(), self._cassandra)
-        DBBaseST._sandesh = self._sandesh
-        DBBaseST._vnc_lib = _vnc_lib
-        ServiceChain.init()
-        self.reinit()
-        # create cpu_info object to send periodic updates
-        sysinfo_req = False
-        cpu_info = vnc_cpu_info.CpuInfo(
-            module_name, instance_id, sysinfo_req, self._sandesh, 60)
-        self._cpu_info = cpu_info
-        self._db_resync_done.set()
-
+                                         self.config_log, rabbit_use_ssl =
+                                         self._args.rabbit_use_ssl,
+                                         kombu_ssl_version =
+                                         self._args.kombu_ssl_version,
+                                         kombu_ssl_keyfile =
+                                         self._args.kombu_ssl_keyfile,
+                                         kombu_ssl_certfile =
+                                         self._args.kombu_ssl_certfile,
+                                         kombu_ssl_ca_certs =
+                                         self._args.kombu_ssl_ca_certs)
+        try:
+            self._cassandra = SchemaTransformerDB(self, _zookeeper_client)
+            DBBaseST.init(self, self._sandesh.logger(), self._cassandra)
+            DBBaseST._sandesh = self._sandesh
+            DBBaseST._vnc_lib = _vnc_lib
+            ServiceChain.init()
+            self.reinit()
+            # create cpu_info object to send periodic updates
+            sysinfo_req = False
+            cpu_info = vnc_cpu_info.CpuInfo(
+                module_name, instance_id, sysinfo_req, self._sandesh, 60)
+            self._cpu_info = cpu_info
+            self._db_resync_done.set()
+        except Exception as e:
+            # If any of the above tasks like CassandraDB read fails, cleanup
+            # the RMQ constructs created earlier and then give up.
+            self._vnc_kombu.shutdown()
+            raise e
     # end __init__
 
     def config_log(self, msg, level):
@@ -245,6 +266,8 @@ class SchemaTransformer(object):
             if oper == 'CREATE':
                 obj_dict = oper_info['obj_dict']
                 obj_fq_name = ':'.join(obj_dict['fq_name'])
+                self._cassandra.cache_uuid_to_fq_name_add(
+                    obj_id, obj_dict['fq_name'], obj_type)
                 obj = obj_class.locate(obj_fq_name)
                 if obj is None:
                     self.config_log('%s id %s fq_name %s not found' % (
@@ -283,6 +306,7 @@ class SchemaTransformer(object):
                                 set(dependency_tracker.resources[resource]) |
                                 set(ids))
             elif oper == 'DELETE':
+                self._cassandra.cache_uuid_to_fq_name_del(obj_id)
                 obj = obj_class.get_by_uuid(obj_id)
                 if obj is None:
                     return
@@ -349,7 +373,7 @@ class SchemaTransformer(object):
         BgpRouterST.reinit()
         LogicalRouterST.reinit()
         vn_list = list(VirtualNetworkST.list_vnc_obj())
-        vn_id_list = [vn.uuid for vn in vn_list]
+        vn_id_list = set([vn.uuid for vn in vn_list])
         ri_dict = {}
         service_ri_dict = {}
         ri_deleted = {}
@@ -445,6 +469,7 @@ class SchemaTransformer(object):
         InstanceIpST.reinit()
         gevent.sleep(0.001)
         FloatingIpST.reinit()
+        AliasIpST.reinit()
 
         gevent.sleep(0.001)
         for si in ServiceInstanceST.list_vnc_obj():
@@ -492,6 +517,10 @@ class SchemaTransformer(object):
                 sc.destroy()
             if sc.present_stale:
                 sc.delete()
+            for rinst in RoutingInstanceST.values():
+                if rinst.stale_route_targets:
+                    rinst.update_route_target_list(
+                            rt_del=rinst.stale_route_targets)
     # end process_stale_objects
 
     def sandesh_ri_build(self, vn_name, ri_name):
@@ -653,6 +682,11 @@ def parse_args(args_str):
         'sandesh_send_rate_limit': SandeshSystem.get_sandesh_send_rate_limit(),
         'bgpaas_port_start': 50000,
         'bgpaas_port_end': 50256,
+        'rabbit_use_ssl': False,
+        'kombu_ssl_version': '',
+        'kombu_ssl_keyfile': '',
+        'kombu_ssl_certfile': '',
+        'kombu_ssl_ca_certs': '',
     }
     secopts = {
         'use_certs': False,

@@ -15,6 +15,9 @@ void RouterIdDepInit(Agent *agent) {
 struct PortInfo input1[] = {
     {"vnet1", 1, "1.1.1.1", "00:00:00:01:01:01", 1, 1},
 };
+IpamInfo ipam_info[] = {
+    {"1.1.1.0", 24, "1.1.1.10"},
+};
 
 class EcmpTest : public ::testing::Test {
     virtual void SetUp() {
@@ -27,6 +30,9 @@ class EcmpTest : public ::testing::Test {
 
         flow_proto_ = agent_->pkt()->get_flow_proto();
         CreateVmportWithEcmp(input1, 1);
+        client->WaitForIdle();
+        AddIPAM("vn1", ipam_info, 1);
+        client->WaitForIdle();
         AddVn("vn2", 2);
         AddVrf("vrf2");
         client->WaitForIdle();
@@ -36,13 +42,16 @@ class EcmpTest : public ::testing::Test {
         strcpy(MX_2, "100.1.1.3");
         strcpy(MX_3, "100.1.1.4");
 
-        const VmInterface *vmi = static_cast<const VmInterface *>(VmPortGet(1));
+        vmi = static_cast<VmInterface *>(VmPortGet(1));
         vm1_label = vmi->label();
         eth_intf_id = EthInterfaceGet("vnet0")->id();
     }
  
     virtual void TearDown() {
         DeleteVmportEnv(input1, 1, true);
+        client->WaitForIdle();
+        DelIPAM("vn1");
+        client->WaitForIdle();
         DelVn("vn2");
         DelVrf("vrf2");
         client->WaitForIdle();
@@ -97,6 +106,7 @@ public:
     char MX_3[80];
     int vm1_label;
     int eth_intf_id;
+    VmInterface *vmi;
 };
 
 //Send packet from VM to ECMP MX
@@ -224,11 +234,22 @@ TEST_F(EcmpTest, EcmpTest_5) {
     //Reverse all the nexthop in vrf2
     AddRemoteEcmpRoute("vrf2", "0.0.0.0", 0, "vn2", 4, true);
 
+    VnListType vn_list;
+    vn_list.insert("vn1");
+    Ip4Address ip = Ip4Address::from_string("1.1.1.1");
+    agent_->fabric_inet4_unicast_table()->
+        AddLocalVmRouteReq(agent_->local_peer(),
+                "vrf2", ip, 32, MakeUuid(1), vn_list,
+                vm1_label, SecurityGroupList(), CommunityList(),
+                false, PathPreference(), Ip4Address(0), EcmpLoadBalance(),
+                false);
+    client->WaitForIdle();
+
     AddVrfAssignNetworkAcl("Acl", 10, "vn1", "vn2", "pass", "vrf2");
     AddLink("virtual-network", "vn1", "access-control-list", "Acl");
     client->WaitForIdle();
 
-    TxIpMplsPacket(eth_intf_id, MX_3, router_id, vm1_label,
+    TxIpMplsPacket(eth_intf_id, MX_3, router_id, vmi->label(),
                    "8.8.8.8", "1.1.1.1", 1, 10);
     client->WaitForIdle();
 
@@ -248,6 +269,7 @@ TEST_F(EcmpTest, EcmpTest_5) {
 
     DeleteRoute("vrf1", "0.0.0.0", 0, bgp_peer);
     DeleteRoute("vrf2", "0.0.0.0", 0, bgp_peer);
+    DeleteRoute("vrf2", "1.1.1.1", 32, agent_->local_peer());
     DelLink("virtual-network", "vn1", "access-control-list", "Acl");
     DelAcl("Acl");
     client->WaitForIdle();
@@ -273,7 +295,7 @@ TEST_F(EcmpTest, EcmpTest_6) {
     AddRemoteEcmpRoute("fip:fip", "0.0.0.0", 0, "fip", 4);
     client->WaitForIdle();
 
-    TxIpMplsPacket(eth_intf_id, MX_3, router_id, vm1_label,
+    TxIpMplsPacket(eth_intf_id, MX_3, router_id, vmi->label(),
                    "8.8.8.8", "2.1.1.1", 1, 10);
     client->WaitForIdle();
 
@@ -329,7 +351,7 @@ TEST_F(EcmpTest, EcmpTest_7) {
     AddLink("virtual-network", "fip", "access-control-list", "Acl");
     client->WaitForIdle();
 
-    TxIpMplsPacket(eth_intf_id, MX_3, router_id, vm1_label,
+    TxIpMplsPacket(eth_intf_id, MX_3, router_id, vmi->label(),
                    "8.8.8.8", "2.1.1.1", 1, 10);
     client->WaitForIdle();
 

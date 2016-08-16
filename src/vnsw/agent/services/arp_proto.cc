@@ -5,6 +5,7 @@
 #include "sandesh/sandesh_types.h"
 #include "sandesh/sandesh.h"
 #include "net/address_util.h"
+#include "init/agent_init.h"
 #include "oper/nexthop.h"
 #include "oper/tunnel_nh.h"
 #include "oper/mirror_table.h"
@@ -21,6 +22,9 @@ ArpProto::ArpProto(Agent *agent, boost::asio::io_service &io,
     ip_fabric_interface_(NULL), gratuitous_arp_entry_(NULL),
     max_retries_(kMaxRetries), retry_timeout_(kRetryTimeout),
     aging_timeout_(kAgingTimeout) {
+    // limit the number of entries in the workqueue
+    work_queue_.SetSize(agent->params()->services_queue_limit());
+    work_queue_.SetBounded(true);
 
     vrf_table_listener_id_ = agent->vrf_table()->Register(
                              boost::bind(&ArpProto::VrfNotify, this, _1, _2));
@@ -108,15 +112,18 @@ bool ArpDBState::SendArpRequest() {
 
     WaitForTrafficIntfMap::iterator it = wait_for_traffic_map_.begin();
     for (;it != wait_for_traffic_map_.end(); it++) {
-        if (it->second >= kMaxRetry) {
-            continue;
-        }
-
         const VmInterface *vm_intf = static_cast<const VmInterface *>(
                 vrf_state_->agent->interface_table()->FindInterface(it->first));
         if (!vm_intf) {
             continue;
         }
+
+        if (it->second >= kMaxRetry) {
+            // In gateway mode with remote VMIs, send regular ARP requests
+            if (vm_intf->vmi_type() != VmInterface::REMOTE_VM)
+                continue;
+        }
+
         MacAddress smac = vm_intf->GetVifMac(vrf_state_->agent);
         it->second++;
         arp_handler.SendArp(ARPOP_REQUEST, smac,
@@ -171,9 +178,11 @@ void ArpDBState::SendArpRequestForAllIntf(const InetUnicastRouteEntry *route) {
             }
             gw_ip_ = path->subnet_service_ip();
             uint32_t intf_id = intf->id();
+            const VmInterface *vm_intf = static_cast<const VmInterface *>(intf);
             bool wait_for_traffic = path->path_preference().wait_for_traffic();
             //Build new list of interfaces in active state
-            if (wait_for_traffic == true) {
+            if (wait_for_traffic == true ||
+                vm_intf->vmi_type() == VmInterface::REMOTE_VM) {
                 WaitForTrafficIntfMap::const_iterator wait_for_traffic_it =
                     wait_for_traffic_map_.find(intf_id);
                 if (wait_for_traffic_it == wait_for_traffic_map_.end()) {
@@ -302,25 +311,33 @@ bool ArpVrfState::DeleteRouteState(DBTablePartBase *part, DBEntryBase *entry) {
 }
 
 void ArpVrfState::Delete() {
+    if (walk_id_ != DBTableWalker::kInvalidWalkerId)
+        return;
     deleted = true;
     DBTableWalker *walker = agent->db()->GetWalker();
-    walker->WalkTable(rt_table, NULL,
+    walk_id_ = walker->WalkTable(rt_table, NULL,
             boost::bind(&ArpVrfState::DeleteRouteState, this, _1, _2),
-            boost::bind(&ArpVrfState::WalkDone, this, _1, this));
+            boost::bind(&ArpVrfState::WalkDone, _1, this));
 }
 
 void ArpVrfState::WalkDone(DBTableBase *partition, ArpVrfState *state) {
-    arp_proto->ValidateAndClearVrfState(vrf);
-    state->rt_table->Unregister(route_table_listener_id);
-    state->table_delete_ref.Reset(NULL);
+    state->PreWalkDone(partition);
     delete state;
+}
+
+void ArpVrfState::PreWalkDone(DBTableBase *partition) {
+    if (arp_proto->ValidateAndClearVrfState(vrf, this) == false)
+        return;
+    rt_table->Unregister(route_table_listener_id);
+    table_delete_ref.Reset(NULL);
 }
 
 ArpVrfState::ArpVrfState(Agent *agent_ptr, ArpProto *proto, VrfEntry *vrf_entry,
                          AgentRouteTable *table):
     agent(agent_ptr), arp_proto(proto), vrf(vrf_entry), rt_table(table),
     route_table_listener_id(DBTableBase::kInvalidId),
-    table_delete_ref(this, table->deleter()), deleted(false) {
+    table_delete_ref(this, table->deleter()), deleted(false),
+    walk_id_(DBTableWalker::kInvalidWalkerId) {
 }
 
 void ArpProto::InterfaceNotify(DBEntryBase *entry) {
@@ -466,6 +483,14 @@ void ArpProto::SendArpIpc(ArpProto::ArpMsgType type, ArpKey &key,
 }
 
 bool ArpProto::AddArpEntry(ArpEntry *entry) {
+    const VrfEntry *vrf = entry->key().vrf;
+    const ArpVrfState *state = static_cast<const ArpVrfState *>
+                         (vrf->GetState(vrf->get_table_partition()->parent(),
+                          vrf_table_listener_id_));
+    // If VRF is delete marked, do not add ARP entries to cache
+    if (state == NULL || state->deleted == true)
+        return false;
+
     bool ret = arp_cache_.insert(ArpCachePair(entry->key(), entry)).second;
     uint32_t intf_id = entry->interface()->id();
     InterfaceArpMap::iterator it = interface_arp_map_.find(intf_id);
@@ -511,14 +536,12 @@ ArpEntry *ArpProto::FindArpEntry(const ArpKey &key) {
     return it->second;
 }
 
-void ArpProto::ValidateAndClearVrfState(VrfEntry *vrf) {
-    if (!vrf->IsDeleted())
-        return;
-
-    ArpKey key(0, vrf);
-    ArpProto::ArpIterator it = arp_cache_.upper_bound(key);
-    if (it != arp_cache_.end() && it->first.vrf == vrf) {
-        return;
+bool ArpProto::ValidateAndClearVrfState(VrfEntry *vrf,
+                                        const ArpVrfState *vrf_state) {
+    if (!vrf_state->deleted) {
+        ARP_TRACE(Trace, "ARP state not cleared - VRF is not delete marked",
+                  "", vrf->GetName(), "");
+        return false;
     }
 
     DBState *state = static_cast<DBState *>
@@ -528,6 +551,7 @@ void ArpProto::ValidateAndClearVrfState(VrfEntry *vrf) {
         vrf->ClearState(vrf->get_table_partition()->parent(),
                         vrf_table_listener_id_);
     }
+    return true;
 }
 
 ArpProto::ArpIterator

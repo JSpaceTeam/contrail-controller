@@ -54,6 +54,26 @@ class FlowTable;
 class FlowTableKSyncEntry;
 class FlowTableKSyncObject;
 class FlowEvent;
+class FlowEventKSync;
+
+#define FLOW_LOCK(flow, rflow, flow_event) \
+    bool is_flow_rflow_key_same = false; \
+    if (flow == rflow) { \
+        if (flow_event == FlowEvent::DELETE_FLOW) { \
+            assert(0); \
+        } \
+        is_flow_rflow_key_same = true; \
+        rflow = NULL; \
+    } \
+    tbb::mutex tmp_mutex1, tmp_mutex2, *mutex_ptr_1, *mutex_ptr_2; \
+    FlowTable::GetMutexSeq(flow ? flow->mutex() : tmp_mutex1, \
+                           rflow ? rflow->mutex() : tmp_mutex2, \
+                           &mutex_ptr_1, &mutex_ptr_2); \
+    tbb::mutex::scoped_lock lock1(*mutex_ptr_1); \
+    tbb::mutex::scoped_lock lock2(*mutex_ptr_2); \
+    if (is_flow_rflow_key_same) { \
+        flow->MakeShortFlow(FlowEntry::SHORT_SAME_FLOW_RFLOW_KEY); \
+    }
 
 /////////////////////////////////////////////////////////////////////////////
 // Class to manage free-list of flow-entries
@@ -95,6 +115,7 @@ private:
     uint64_t total_alloc_;
     uint64_t total_free_;
     FreeList free_list_;
+    uint64_t grow_count_;
     DISALLOW_COPY_AND_ASSIGN(FlowEntryFreeList);
 };
 
@@ -198,46 +219,41 @@ public:
     void SetAceSandeshData(const AclDBEntry *acl, AclFlowCountResp &data, 
                            int ace_id);
    
-    void RevaluateFlow(FlowEntry *flow);
+    void RecomputeFlow(FlowEntry *flow);
     void DeleteMessage(FlowEntry *flow);
     void EvictFlow(FlowEntry *flow);
 
-    void RevaluateInterface(FlowEntry *flow);
-    void RevaluateVn(FlowEntry *flow);
-    void RevaluateAcl(FlowEntry *flow);
-    void RevaluateNh(FlowEntry *flow);
     void DeleteVrf(VrfEntry *vrf);
-    void RevaluateRoute(FlowEntry *flow, const AgentRoute *route);
-    bool FlowResponseHandler(const FlowEvent *req);
 
-    bool FlowRouteMatch(const InetUnicastRouteEntry *rt, uint32_t vrf,
-                        Address::Family family, const IpAddress &ip,
-                        uint8_t plen);
-    bool FlowInetRpfMatch(FlowEntry *flow, const InetUnicastRouteEntry *rt);
-    bool FlowInetSrcMatch(FlowEntry *flow, const InetUnicastRouteEntry *rt);
-    bool FlowInetDstMatch(FlowEntry *flow, const InetUnicastRouteEntry *rt);
-    bool FlowBridgeSrcMatch(FlowEntry *flow, const BridgeRouteEntry *rt);
-    bool FlowBridgeDstMatch(FlowEntry *flow, const BridgeRouteEntry *rt);
-    bool RevaluateSgList(FlowEntry *flow, const AgentRoute *rt,
-                         const SecurityGroupList &sg_list);
-    bool RevaluateRpfNH(FlowEntry *flow, const AgentRoute *rt);
+    void HandleRevaluateDBEntry(const DBEntry *entry, FlowEntry *flow,
+                                bool active_flow, bool deleted_flow);
+    void HandleKSyncError(FlowEntry *flow, FlowTableKSyncEntry *ksync_entry,
+                          int ksync_error, uint32_t flow_handle,
+                          uint32_t gen_id);
     boost::uuids::uuid rand_gen();
 
     void UpdateKSync(FlowEntry *flow, bool update);
     void DeleteKSync(FlowEntry *flow);
 
-    // FlowStatsCollector request queue events
-    void NotifyFlowStatsCollector(FlowEntry *fe);
-    void KSyncSetFlowHandle(FlowEntry *flow, uint32_t flow_handle);
-
     // Free list
     void GrowFreeList();
     FlowEntryFreeList *free_list() { return &free_list_; }
-    bool ProcessFlowEvent(const FlowEvent *req);
+
+    void ProcessKSyncFlowEvent(const FlowEventKSync *req, FlowEntry *flow);
+    bool ProcessFlowEvent(const FlowEvent *req, FlowEntry *flow,
+                          FlowEntry *rflow);
+    void PopulateFlowEntriesUsingKey(const FlowKey &key, bool reverse_flow,
+                                     FlowEntry** flow, FlowEntry** rflow);
 
     // Concurrency check to ensure all flow-table and free-list manipulations
     // are done from FlowEvent task context only
-    bool ConcurrencyCheck();
+    bool ConcurrencyCheck(int task_id);
+    int flow_task_id() const { return flow_task_id_; }
+    int flow_update_task_id() const { return flow_update_task_id_; }
+    int flow_delete_task_id() const { return flow_delete_task_id_; }
+    int flow_ksync_task_id() const { return flow_ksync_task_id_; }
+    static void GetMutexSeq(tbb::mutex &mutex1, tbb::mutex &mutex2,
+                            tbb::mutex **mutex_ptr_1, tbb::mutex **mutex_ptr_2);
 
     // Concurrency check to ensure all flow-table and free-list manipulations
     // are done from FlowEvent task context only
@@ -250,11 +266,11 @@ public:
     friend class PktFlowInfo;
     friend void intrusive_ptr_release(FlowEntry *fe);
 private:
+    void DisableKSyncSend(FlowEntry *flow, uint32_t evict_gen_id);
     bool IsEvictedFlow(const FlowKey &key);
 
-    void DeleteInternal(FlowEntry *fe, uint64_t t);
-    void ResyncAFlow(FlowEntry *fe);
-    void DeleteFlowInfo(FlowEntry *fe);
+    void DeleteInternal(FlowEntry *fe, uint64_t t, const RevFlowDepParams &p);
+    void DeleteFlowInfo(FlowEntry *fe, const RevFlowDepParams &params);
 
     void AddFlowInfo(FlowEntry *fe);
     void UpdateReverseFlow(FlowEntry *flow, FlowEntry *rflow);
@@ -265,23 +281,11 @@ private:
                      bool rev_flow_update);
     void Add(FlowEntry *flow, FlowEntry *new_flow, FlowEntry *rflow,
              FlowEntry *new_rflow, bool fwd_flow_update, bool rev_flow_update);
-    void GetMutexSeq(tbb::mutex &mutex1, tbb::mutex &mutex2,
-                     tbb::mutex **mutex_ptr_1, tbb::mutex **mutex_ptr_2);
-    void EvictFlow(FlowEntry *flow, FlowEntry *rflow);
+    void EvictFlow(FlowEntry *flow, FlowEntry *rflow, uint32_t evict_gen_id);
     bool DeleteFlows(FlowEntry *flow, FlowEntry *rflow);
     bool DeleteUnLocked(const FlowKey &key, bool del_reverse_flow);
-    bool DeleteUnLocked(bool del_reverse_flow, FlowEntry *flow, FlowEntry *rflow);
-    void PopulateFlowEntriesUsingKey(const FlowKey &key, bool reverse_flow,
-                                     FlowEntry** flow, FlowEntry** rflow);
-    bool PopulateFlowPointersFromRequest(const FlowEvent *req,
-                                         FlowEntry **flow,
-                                         FlowEntry **rflow);
-    bool ProcessFlowEventInternal(const FlowEvent *req,
-                                  FlowEntry *flow,
-                                  FlowEntry *rflow);
-    bool FlowResponseHandlerUnLocked(const FlowEvent *resp,
-                                     FlowEntry *flow,
-                                     FlowEntry *rflow);
+    bool DeleteUnLocked(bool del_reverse_flow, FlowEntry *flow,
+                        FlowEntry *rflow);
 
     Agent *agent_;
     boost::uuids::random_generator rand_gen_;
@@ -295,6 +299,9 @@ private:
     FlowEntryFreeList free_list_;
     tbb::mutex mutex_;
     int flow_task_id_;
+    int flow_update_task_id_;
+    int flow_delete_task_id_;
+    int flow_ksync_task_id_;
     DISALLOW_COPY_AND_ASSIGN(FlowTable);
 };
 

@@ -293,7 +293,7 @@ public:
                                  DNS_OPCODE_QUERY, 0, 0, 0, 0);
         if (flag) {
             dns->flags.ret = DNS_ERR_NO_SUCH_NAME;
-            Agent::GetInstance()->GetDnsProto()->SendDnsIpc(buf);
+            Agent::GetInstance()->GetDnsProto()->SendDnsIpc(buf, sizeof(dnshdr));
             return;
         }
         dns->ques_rrcount = htons(numQues);
@@ -315,7 +315,7 @@ public:
         for (int i = 0; i < numAdd; i++)
             ptr = BindUtil::AddAnswerSection(ptr, add[i], len);
 
-        Agent::GetInstance()->GetDnsProto()->SendDnsIpc(buf);
+        Agent::GetInstance()->GetDnsProto()->SendDnsIpc(buf, len);
     }
 
     void SendDnsParseRespError(int numQues, DnsItem *items, int numAuth, DnsItem *auth,
@@ -346,7 +346,7 @@ public:
         for (int i = 0; i < numAdd; i++)
             ptr = BindUtil::AddAnswerSection(ptr, add[i], len);
 
-        Agent::GetInstance()->GetDnsProto()->SendDnsIpc(buf);
+        Agent::GetInstance()->GetDnsProto()->SendDnsIpc(buf, len);
     }
 
 private:
@@ -556,8 +556,8 @@ int main(int argc, char *argv[]) {
     sock.bind(udp::endpoint(udp::v4(), 0), ec);
     ep = sock.local_endpoint(ec);
 
-    BindResolver::DnsServer server("127.0.0.1", ep.port());
-    BindResolver::Resolver()->SetupResolver(server, 0);
+    Agent::GetInstance()->set_dns_server("127.0.0.1", 0);
+    Agent::GetInstance()->set_dns_server_port(ep.port(), 0);
 
     udp::socket sock2(*Agent::GetInstance()->event_manager()->io_service());
     udp::endpoint ep2;
@@ -565,8 +565,8 @@ int main(int argc, char *argv[]) {
     sock2.bind(udp::endpoint(udp::v4(), 0), ec);
     ep2 = sock2.local_endpoint(ec);
 
-    BindResolver::DnsServer server2("127.0.0.2", ep2.port());
-    BindResolver::Resolver()->SetupResolver(server2, 1);
+    Agent::GetInstance()->set_dns_server("127.0.0.2", 0);
+    Agent::GetInstance()->set_dns_server_port(ep2.port(), 0);
 
     int ret = RUN_ALL_TESTS();
     client->WaitForIdle();

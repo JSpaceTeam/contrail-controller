@@ -35,7 +35,7 @@ class LoadbalancerAgent(Agent):
 
     def pre_create_service_vm(self, instance_index, si, st, vm):
         for nic in si.vn_info:
-           if nic['type'] == svc_info.get_right_if_str():
+            if nic['type'] == svc_info.get_right_if_str():
                 vmi = self._get_vip_vmi(si)
                 if not vmi:
                     return False
@@ -49,6 +49,9 @@ class LoadbalancerAgent(Agent):
                     nic['sg-list'] = vmi.security_groups
                     break
                 nic['user-visible'] = False
+            elif nic['type'] == svc_info.get_left_if_str():
+                nic['user-visible'] = False
+
         return True
 
     def _get_vip_vmi(self, si):
@@ -180,6 +183,8 @@ class LoadbalancerAgent(Agent):
         p = self.loadbalancer_pool_get_reqdict(pool)
         driver = self._get_driver_for_pool(p['id'], p['provider'])
         try:
+            if p['loadbalancer_id']:
+                driver.set_config_v2(p['loadbalancer_id'])
             if not pool.last_sent:
                 driver.create_pool(p)
             #elif p != pool.last_sent:
@@ -231,7 +236,8 @@ class LoadbalancerAgent(Agent):
         lb = self.loadbalancer_get_reqdict(loadbalancer)
         driver = self._get_driver_for_loadbalancer(lb['id'], 'opencontrail')
         try:
-            driver.set_config_v2(loadbalancer.uuid)
+            lbaas_config = driver.set_config_v2(loadbalancer.uuid)
+            lb['config'] = lbaas_config
             if not loadbalancer.last_sent:
                 driver.create_loadbalancer(lb)
             elif lb != loadbalancer.last_sent:
@@ -240,9 +246,9 @@ class LoadbalancerAgent(Agent):
             pass
         return lb
 
-    def delete_loadbalancer(self, obj):
-        lb = obj.last_sent
-        driver = self._get_driver_for_pool(lb['pool_id'])
+    def delete_loadbalancer(self, loadbalancer):
+        lb = self.loadbalancer_get_reqdict(loadbalancer)
+        driver = self._get_driver_for_loadbalancer(lb['id'], 'opencontrail')
         try:
             driver.delete_loadbalancer(lb)
         except Exception:
@@ -260,9 +266,9 @@ class LoadbalancerAgent(Agent):
             pass
         return ll
 
-    def delete_listener(self, obj):
-        ll = obj.last_sent
-        driver = self._get_driver_for_pool(ll['pool_id'])
+    def delete_listener(self, listener):
+        ll = self.listener_get_reqdict(listener)
+        driver = self._get_driver_for_loadbalancer(ll['loadbalancer_id'])
         try:
             driver.delete_listener(ll)
         except Exception:
@@ -371,6 +377,7 @@ class LoadbalancerAgent(Agent):
     def loadbalancer_get_reqdict(self, lb):
         props = lb.params
         res = {'id': lb.uuid,
+               'config': None,
                'tenant_id': lb.parent_uuid.replace('-', ''),
                'name': lb.display_name,
                'description': self._get_object_description(lb),
@@ -392,8 +399,10 @@ class LoadbalancerAgent(Agent):
                'protocol_port': props['protocol_port'],
                'protocol': props['protocol'],
                'loadbalancer_id': listener.loadbalancer,
-               'session_persistence': None,
                'admin_state_up': props['admin_state'],
+               'connection_limit': props['connection_limit'],
+               'default_tls_container': props['default_tls_container'],
+               'sni_containers': props['sni_containers'],
                'status': self._get_object_status(listener)}
 
         return res
@@ -480,10 +489,12 @@ class LoadbalancerAgent(Agent):
     def loadbalancer_pool_get_reqdict(self, pool):
         res = {
             'id': pool.uuid,
+            'loadbalancer_id': pool.loadbalancer_id,
             'tenant_id': pool.parent_uuid.replace('-', ''),
             'name': pool.display_name,
             'description': self._get_object_description(pool),
             'status': self._get_object_status(pool),
+            'session_persistence': None,
         }
 
         props = pool.params
@@ -491,6 +502,12 @@ class LoadbalancerAgent(Agent):
             value = props[key]
             if value is not None:
                 res[mapping] = value
+
+        if props['session_persistence']:
+            sp = {'type': props['session_persistence']}
+            if props['session_persistence'] == 'APP_COOKIE':
+                sp['cookie_name'] = props['persistence_cookie_name']
+            res['session_persistence'] = sp
 
         # provider
         res['provider'] = pool.provider

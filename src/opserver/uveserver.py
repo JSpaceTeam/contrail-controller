@@ -379,8 +379,8 @@ class UVEServer(object):
                 pa = ParallelAggregator(state, self._uve_reverse_map)
                 rsp = pa.aggregate(key, flat, base_url)
             except Exception as e:
-                self._logger.error("redis-uve failed %s for : %s tb %s" \
-                               % (str(e), str(r_inst), traceback.format_exc()))
+                self._logger.error("redis-uve failed %s for key %s: %s tb %s" \
+                               % (str(e), key, str(r_inst), traceback.format_exc()))
                 self._redis_inst_down(r_inst)
                 failures = True
             else:
@@ -556,9 +556,20 @@ class ParallelAggregator:
                 return True
         return False
 
-    def _is_union(self, oattr):
+    def _is_list_union(self, oattr):
         akey = oattr.keys()[0]
         if not oattr[akey]['@type'] in ["list"]:
+            return False
+        if '@aggtype' not in oattr[akey]:
+            return False
+        if oattr[akey]['@aggtype'] in ["union"]:
+            return True
+        else:
+            return False
+
+    def _is_map_union(self, oattr):
+        akey = oattr.keys()[0]
+        if not oattr[akey]['@type'] in ["map"]:
             return False
         if '@aggtype' not in oattr[akey]:
             return False
@@ -604,13 +615,17 @@ class ParallelAggregator:
         result['#text'] = str(count)
         return result
 
-    def _union_agg(self, oattr):
+    def _list_union_agg(self, oattr):
         akey = oattr.keys()[0]
-        result = copy.deepcopy(oattr[akey])
+        result = {}
+        for anno in oattr[akey].keys():
+            if anno[0] == "@":
+                result[anno] = oattr[akey][anno]
         itemset = set()
         sname = ParallelAggregator.get_list_name(oattr[akey])
+        result['list'] = {}
         result['list'][sname] = []
-
+        result['list']['@type'] = oattr[akey]['list']['@type']
         siz = 0
         for source in oattr.keys():
             if isinstance(oattr[source]['list'][sname], basestring):
@@ -623,6 +638,51 @@ class ParallelAggregator:
                     siz += 1
         result['list']['@size'] = str(siz)
         
+        return result
+
+    def _map_union_agg(self, oattr):
+        akey = oattr.keys()[0]
+        result = {}
+        for anno in oattr[akey].keys():
+            if anno[0] == "@":
+                result[anno] = oattr[akey][anno]
+        result['map'] = {}
+        result['map']['@key'] = 'string'
+        result['map']['@value'] = oattr[akey]['map']['@value']
+        result['map']['element'] = []
+
+	sname = None
+	for ss in oattr[akey]['map'].keys():
+	    if ss[0] != '@':
+		if ss != 'element':
+		    sname = ss
+                    result['map'][sname] = []
+
+        siz = 0
+        for source in oattr.keys():
+            if sname is None:
+		for subidx in range(0,int(oattr[source]['map']['@size'])):
+		    print "map_union_agg Content %s" % (oattr[source]['map'])
+		    result['map']['element'].append(source + ":" + \
+			    json.dumps(oattr[source]['map']['element'][subidx*2]))
+		    result['map']['element'].append(\
+			    oattr[source]['map']['element'][(subidx*2) + 1])
+		    siz += 1
+            else:
+                if not isinstance(oattr[source]['map']['element'], list):
+                    oattr[source]['map']['element'] = [oattr[source]['map']['element']]
+                if not isinstance(oattr[source]['map'][sname], list):
+                    oattr[source]['map'][sname] = [oattr[source]['map'][sname]]
+                
+                for idx in range(0,int(oattr[source]['map']['@size'])):
+                    result['map']['element'].append(source + ":" + \
+                            json.dumps(oattr[source]['map']['element'][idx]))
+                    result['map'][sname].append(\
+                            oattr[source]['map'][sname][idx])
+                    siz += 1
+        
+        result['map']['@size'] = str(siz)
+             
         return result
 
     def _append_agg(self, oattr):
@@ -697,8 +757,10 @@ class ParallelAggregator:
         It aggregates across all sources and return the global state of the UVE
         '''
         result = {}
+        ltyp = None
         try:
             for typ in self._state[key].keys():
+                ltyp = typ
                 result[typ] = {}
                 for objattr in self._state[key][typ].keys():
                     if self._is_sum(self._state[key][typ][objattr]):
@@ -708,39 +770,22 @@ class ParallelAggregator:
                                 OpServerUtils.uve_attr_flatten(sum_res)
                         else:
                             result[typ][objattr] = sum_res
-                    elif self._is_union(self._state[key][typ][objattr]):
-                        union_res = self._union_agg(
+                    elif self._is_list_union(self._state[key][typ][objattr]):
+                        unionl_res = self._list_union_agg(
                             self._state[key][typ][objattr])
-                        conv_res = None
-                        if union_res.has_key('@ulink') and base_url and \
-                                union_res['list']['@type'] == 'string':
-                            uterms = union_res['@ulink'].split(":",1)
-
-                            # This is the linked UVE's table name
-                            m_table = uterms[0]
-
-                            if self._rev_map.has_key(m_table):
-                                h_table = self._rev_map[m_table]
-                                conv_res = []
-                                sname = ParallelAggregator.get_list_name(union_res)
-                                for el in union_res['list'][sname]:
-                                    lobj = {}
-                                    lobj['name'] = el
-                                    lobj['href'] = base_url + '/analytics/uves/' + \
-                                        h_table + '/' + el
-                                    if len(uterms) == 2:
-                                        lobj['href'] = lobj['href'] + '?cfilt=' + uterms[1]
-                                    else:
-                                        lobj['href'] = lobj['href'] + '?flat'
-                                    conv_res.append(lobj)
                         if flat:
-                            if not conv_res:
-                                result[typ][objattr] = \
-                                        OpServerUtils.uve_attr_flatten(union_res)
-                            else:
-                                result[typ][objattr] = conv_res
+                            result[typ][objattr] = \
+                                OpServerUtils.uve_attr_flatten(unionl_res)
                         else:
-                            result[typ][objattr] = union_res
+                            result[typ][objattr] = unionl_res
+                    elif self._is_map_union(self._state[key][typ][objattr]):
+                        unionm_res = self._map_union_agg(
+                            self._state[key][typ][objattr])
+                        if flat:
+                            result[typ][objattr] = \
+                                OpServerUtils.uve_attr_flatten(unionm_res)
+                        else:
+                            result[typ][objattr] = unionm_res
                     elif self._is_append(self._state[key][typ][objattr]):
                         result[typ][objattr] = self._append_agg(
                             self._state[key][typ][objattr])
@@ -773,6 +818,9 @@ class ParallelAggregator:
                             result[typ][objattr] = default_res
         except KeyError:
             pass
+        except Exception as ex:
+            print "Aggregation Error key %s type %s in %s" % (key, str(ltyp), str(self._state))
+            raise ex
         return result
 
 if __name__ == '__main__':

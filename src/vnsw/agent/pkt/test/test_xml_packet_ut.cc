@@ -12,6 +12,10 @@
 using namespace std;
 namespace opt = boost::program_options;
 
+IpamInfo ipam_info[] = {
+    {"1.1.1.0", 24, "1.1.1.10"},
+};
+
 static void GetArgs(char *test_file, int argc, char *argv[]) {
     test_file[0] = '\0';
     opt::options_description desc("Options");
@@ -28,12 +32,22 @@ static void GetArgs(char *test_file, int argc, char *argv[]) {
     return;
 }
 
+static bool FlowStatsTimerStartStopTrigger(FlowStatsCollector *fsc, bool stop) {
+    fsc->TestStartStopTimer(stop);
+    return true;
+}
+
 class TestPkt : public ::testing::Test {
 public:
     virtual void SetUp() {
         agent_ = Agent::GetInstance();
         proto_ = agent_->pkt()->get_flow_proto();
         interface_count_ = agent_->interface_table()->Size();
+        flow_stats_collector_ = agent_->flow_stats_manager()->
+            default_flow_stats_collector();
+        FlowStatsTimerStartStop(true);
+        AddIPAM("vn1", ipam_info, 1);
+        client->WaitForIdle();
     }
 
     virtual void TearDown() {
@@ -41,11 +55,26 @@ public:
         EXPECT_EQ(agent_->vn_table()->Size(), 0);
         EXPECT_EQ(agent_->interface_table()->Size(), interface_count_);
         agent_->flow_stats_manager()->set_flow_export_count(0);
+        FlowStatsTimerStartStop(false);
+        DelIPAM("vn1");
+        client->WaitForIdle();
+    }
+
+    void FlowStatsTimerStartStop(bool stop) {
+        int task_id =
+            agent_->task_scheduler()->GetTaskId(kTaskFlowStatsCollector);
+        std::auto_ptr<TaskTrigger> trigger_
+            (new TaskTrigger(boost::bind(FlowStatsTimerStartStopTrigger,
+                                         flow_stats_collector_, stop),
+                             task_id, 0));
+        trigger_->Set();
+        client->WaitForIdle();
     }
 
     Agent *agent_;
     FlowProto *proto_;
     uint32_t interface_count_;
+    FlowStatsCollector* flow_stats_collector_;
 };
 
 TEST_F(TestPkt, parse_1) {

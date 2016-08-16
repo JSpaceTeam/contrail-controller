@@ -15,9 +15,9 @@ class DbTableStatistics {
     DbTableStatistics() {
     }
     void Update(const std::string &table_name, bool write, bool fail,
-        uint64_t num);
-    void Get(std::vector<GenDb::DbTableInfo> *vdbti) const;
+        bool back_pressure, uint64_t num);
     void GetDiffs(std::vector<GenDb::DbTableInfo> *vdbti);
+    void GetCumulative(std::vector<GenDb::DbTableInfo> *vdbti) const;
 
  private:
     struct TableStats {
@@ -25,9 +25,10 @@ class DbTableStatistics {
             num_reads_(0),
             num_read_fails_(0),
             num_writes_(0),
-            num_write_fails_(0) {
+            num_write_fails_(0),
+            num_write_back_pressure_fails_(0) {
         }
-        void Update(bool write, bool fail, uint64_t num);
+        void Update(bool write, bool fail, bool back_pressure, uint64_t num);
         void Get(const std::string &table_name,
             GenDb::DbTableInfo *dbti) const;
 
@@ -35,10 +36,15 @@ class DbTableStatistics {
         uint64_t num_read_fails_;
         uint64_t num_writes_;
         uint64_t num_write_fails_;
+        uint64_t num_write_back_pressure_fails_;
     };
 
     typedef boost::ptr_map<const std::string, TableStats> TableStatsMap;
     TableStatsMap table_stats_map_;
+    // cumulative stats for introspect purpose
+    TableStatsMap table_stats_cumulative_map_;
+    void GetInternal(std::vector<GenDb::DbTableInfo> *vdbti,
+        bool cumulative) const;
 };
 
 class IfErrors {
@@ -62,8 +68,8 @@ class IfErrors {
         ERR_WRITE_BATCH_COLUMN,
         ERR_READ_COLUMN,
     };
-    void Get(GenDb::DbErrors *dbe) const;
     void GetDiffs(GenDb::DbErrors *dbe);
+    void GetCumulative(GenDb::DbErrors *dbe) const;
     void Clear();
     void Increment(Type type);
 
@@ -75,6 +81,7 @@ class IfErrors {
     uint64_t write_column_fails_;
     uint64_t write_batch_column_fails_;
     uint64_t read_column_fails_;
+    void GetInternal(GenDb::DbErrors *dbe) const;
 };
 
 class GenDbIfStats {
@@ -85,6 +92,7 @@ class GenDbIfStats {
         TABLE_OP_NONE,
         TABLE_OP_WRITE,
         TABLE_OP_WRITE_FAIL,
+        TABLE_OP_WRITE_BACK_PRESSURE_FAIL,
         TABLE_OP_READ,
         TABLE_OP_READ_FAIL,
     };
@@ -93,20 +101,23 @@ class GenDbIfStats {
     void IncrementTableWrite(const std::string &table_name);
     void IncrementTableWrite(const std::string &table_name, uint64_t num_writes);
     void IncrementTableWriteFail(const std::string &table_name);
+    void IncrementTableWriteBackPressureFail(const std::string &table_name);
     void IncrementTableWriteFail(const std::string &table_name, uint64_t num_writes);
     void IncrementTableRead(const std::string &table_name);
     void IncrementTableRead(const std::string &table_name, uint64_t num_reads);
     void IncrementTableReadFail(const std::string &table_name);
     void IncrementTableReadFail(const std::string &table_name, uint64_t num_reads);
-    void Get(std::vector<GenDb::DbTableInfo> *vdbti, GenDb::DbErrors *dbe) const;
     void GetDiffs(std::vector<GenDb::DbTableInfo> *vdbti, GenDb::DbErrors *dbe);
+    void GetCumulative(std::vector<GenDb::DbTableInfo> *vdbti,
+        GenDb::DbErrors *dbe) const;
 
  private:
     void IncrementTableStatsInternal(const std::string &table_name, bool write,
-        bool fail, uint64_t num);
+        bool fail, bool back_pressure, uint64_t num);
 
     GenDb::DbTableStatistics table_stats_;
     IfErrors errors_;
+    IfErrors cumulative_errors_;
 };
 
 }  // namespace GenDb

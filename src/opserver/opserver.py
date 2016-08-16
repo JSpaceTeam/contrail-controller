@@ -42,13 +42,12 @@ from pysandesh.sandesh_base import *
 from pysandesh.sandesh_session import SandeshWriter
 from pysandesh.gen_py.sandesh_trace.ttypes import SandeshTraceRequest
 from pysandesh.connection_info import ConnectionState
-from pysandesh.gen_py.process_info.ttypes import ConnectionType,\
-    ConnectionStatus
 from sandesh_common.vns.ttypes import Module, NodeType
 from sandesh_common.vns.constants import ModuleNames, CategoryNames,\
      ModuleCategoryMap, Module2NodeType, NodeTypeNames, ModuleIds,\
      INSTANCE_ID_DEFAULT, COLLECTOR_DISCOVERY_SERVICE_NAME,\
-     ANALYTICS_API_SERVER_DISCOVERY_SERVICE_NAME, ALARM_GENERATOR_SERVICE_NAME
+     ANALYTICS_API_SERVER_DISCOVERY_SERVICE_NAME, ALARM_GENERATOR_SERVICE_NAME, \
+     OpServerAdminPort, CLOUD_ADMIN_ROLE
 from sandesh.viz.constants import _TABLES, _OBJECT_TABLES,\
     _OBJECT_TABLE_SCHEMA, _OBJECT_TABLE_COLUMN_VALUES, \
     _STAT_TABLES, STAT_OBJECTID_FIELD, STAT_VT_PREFIX, \
@@ -56,7 +55,9 @@ from sandesh.viz.constants import _TABLES, _OBJECT_TABLES,\
     STAT_SOURCE_FIELD, SOURCE, MODULE
 from sandesh.viz.constants import *
 from sandesh.analytics.ttypes import *
-from sandesh.analytics.cpuinfo.ttypes import ProcessCpuInfo
+from sandesh.nodeinfo.ttypes import NodeStatusUVE, NodeStatus
+from sandesh.nodeinfo.cpuinfo.ttypes import *
+from sandesh.nodeinfo.process_info.ttypes import *
 from sandesh.discovery.ttypes import CollectorTrace
 import discoveryclient.client as discovery_client
 from opserver_util import OpServerUtils
@@ -70,6 +71,9 @@ from overlay_to_underlay_mapper import OverlayToUnderlayMapper, \
 from generator_introspect_util import GeneratorIntrospectUtil
 from stevedore import hook, extension
 from partition_handler import PartInfo, UveStreamer, UveCacheProcessor
+from functools import wraps
+from vnc_cfg_api_client import VncCfgApiClient
+from opserver_local import LocalApp
 
 _ERRORS = {
     errno.EBADMSG: 400,
@@ -331,17 +335,24 @@ class AnalyticsApiStatistics(object):
         self.api_stats = None
         self.sandesh = sandesh
 
-    def collect(self, resp_size):
+    def collect(self, resp_size, resp_size_bytes):
         time_finish = UTCTimestampUsec()
+
+        useragent = bottle.request.headers.get('X-Contrail-Useragent')
+        if not useragent:
+            useragent = bottle.request.headers.get('User-Agent')
 
         # Create api stats object
         self.api_stats = AnalyticsApiSample(
             operation_type=bottle.request.method,
-            remote_ip=bottle.request.headers.get('Host'),
+            remote_ip=bottle.request.environ.get('REMOTE_ADDR'),
             request_url=bottle.request.url,
             object_type=self.obj_type,
             response_time_in_usec=(time_finish - self.time_start),
-            response_size=resp_size,
+            response_size_objects=resp_size,
+            response_size_bytes=resp_size_bytes,
+            resp_code='200',
+            useragent=useragent,
             node=self.sandesh.source_id())
 
     def sendwith(self):
@@ -389,6 +400,26 @@ class OpServer(object):
         self.disc.publish(ANALYTICS_API_SERVER_DISCOVERY_SERVICE_NAME, data)
     # end disc_publish
 
+    def validate_user_token(func):
+        @wraps(func)
+        def _impl(self, *f_args, **f_kwargs):
+            if self._args.auth_conf_info.get('cloud_admin_access_only') and \
+                    bottle.request.app == bottle.app():
+                user_token = bottle.request.headers.get('X-Auth-Token')
+                if not user_token or not \
+                        self._vnc_api_client.is_role_cloud_admin(user_token):
+                    raise bottle.HTTPResponse(status = 401,
+                        body = 'Authentication required',
+                        headers = self._reject_auth_headers())
+            return func(self, *f_args, **f_kwargs)
+        return _impl
+    # end validate_user_token
+
+    def _reject_auth_headers(self):
+        header_val = 'Keystone uri=\'%s\'' % \
+            self._args.auth_conf_info.get('auth_uri')
+        return { "WWW-Authenticate" : header_val }
+
     def __init__(self, args_str=' '.join(sys.argv[1:])):
         self.gevs = []
         self._args = None
@@ -412,6 +443,7 @@ class OpServer(object):
             self._instance_id = self._args.worker_id
         else:
             self._instance_id = INSTANCE_ID_DEFAULT
+        self.table = "ObjectCollectorInfo"
         self._hostname = socket.gethostname()
         if self._args.dup:
             self._hostname += 'dup'
@@ -443,8 +475,8 @@ class OpServer(object):
         ConnectionState.init(self._sandesh, self._hostname, self._moduleid,
             self._instance_id,
             staticmethod(ConnectionState.get_process_state_cb),
-            NodeStatusUVE, NodeStatus)
-        
+            NodeStatusUVE, NodeStatus, self.table)
+        self._uvepartitions_state = None
         # Trace buffer list
         self.trace_buf = [
             {'name':'DiscoveryMsg', 'size':1000}
@@ -464,6 +496,10 @@ class OpServer(object):
 
         body = gevent.queue.Queue()
 
+        self._vnc_api_client = None
+        if self._args.auth_conf_info.get('cloud_admin_access_only'):
+            self._vnc_api_client = VncCfgApiClient(self._args.auth_conf_info,
+                self._sandesh, self._logger)
         self._uvedbstream = UveStreamer(self._logger, None, None,
                 self.get_agp, self._args.redis_password)
 
@@ -505,9 +541,11 @@ class OpServer(object):
         if self._usecache:
             ConnectionState.update(conn_type = ConnectionType.UVEPARTITIONS,
                 name = 'UVE-Aggregation', status = ConnectionStatus.INIT)
+            self._uvepartitions_state = ConnectionStatus.INIT
         else:
             ConnectionState.update(conn_type = ConnectionType.UVEPARTITIONS,
                 name = 'UVE-Aggregation', status = ConnectionStatus.UP)
+            self._uvepartitions_state = ConnectionStatus.UP
 
         if self._args.disc_server_ip:
             self.disc_publish()
@@ -531,6 +569,10 @@ class OpServer(object):
             else:
                 self._state_server.update_redis_list(self.redis_uve_list)
                 self._uve_server.update_redis_uve_list(self.redis_uve_list)
+            ConnectionState.update(conn_type = ConnectionType.UVEPARTITIONS,
+                name = 'UVE-Aggregation', status = ConnectionStatus.UP,
+                message = 'Partitions:%d' % self._args.partitions)
+            self._uvepartitions_state = ConnectionStatus.UP
 
         self._analytics_links = ['uves', 'tables', 'queries',\
                 'alarm-types', 'alarms',\
@@ -555,8 +597,41 @@ class OpServer(object):
                 columnvalues=_OBJECT_TABLE_COLUMN_VALUES)
             self._VIRTUAL_TABLES.append(obj)
 
+        stat_tables = []
+	# read the stat table schemas from vizd first
         for t in _STAT_TABLES:
-            stat_id = t.stat_type + "." + t.stat_attr
+            attributes = []
+            for attr in t.attributes:
+                suffixes = []
+                if attr.suffixes:
+                    for suffix in attr.suffixes:
+                        suffixes.append(suffix)
+                attributes.append({"name":attr.name,"datatype":attr.datatype,"index":attr.index,"suffixes":suffixes})
+            new_table = {"stat_type":t.stat_type,
+                         "stat_attr":t.stat_attr,
+                         "display_name":t.display_name,
+                         "obj_table":t.obj_table,
+                         "attributes":attributes}
+            stat_tables.append(new_table)
+
+        # read all the json files for remaining stat table schema
+        topdir = '/usr/share/doc/contrail-docs/html/messages/'
+        extn = '.json'
+        stat_schema_files = []
+        for dirpath, dirnames, files in os.walk(topdir):
+            for name in files:
+                if name.lower().endswith(extn):
+                    stat_schema_files.append(os.path.join(dirpath, name))
+        for schema_file in stat_schema_files:
+            with open(schema_file) as data_file:
+                data = json.load(data_file)
+            for _, tables in data.iteritems():
+                for table in tables:
+                    if table not in stat_tables:
+                        stat_tables.append(table)
+
+        for table in stat_tables:
+            stat_id = table["stat_type"] + "." + table["stat_attr"]
             scols = []
 
             keyln = stat_query_column(name=STAT_SOURCE_FIELD, datatype='string', index=True)
@@ -579,29 +654,39 @@ class OpServer(object):
             uln = stat_query_column(name=STAT_UUID_FIELD, datatype='uuid', index=False)
             scols.append(uln)
 
-            cln = stat_query_column(name="COUNT(" + t.stat_attr + ")",
+            cln = stat_query_column(name="COUNT(" + table["stat_attr"] + ")",
                     datatype='int', index=False)
             scols.append(cln)
 
             isname = False
-            for aln in t.attributes:
-                if aln.name==STAT_OBJECTID_FIELD:
+            for aln in table["attributes"]:
+                if aln["name"]==STAT_OBJECTID_FIELD:
                     isname = True
-                scols.append(aln)
-                if aln.datatype in ['int','double']:
-                    sln = stat_query_column(name= "SUM(" + aln.name + ")",
-                            datatype=aln.datatype, index=False)
-                    scols.append(sln)
-                    scln = stat_query_column(name= "CLASS(" + aln.name + ")",
-                            datatype=aln.datatype, index=False)
-                    scols.append(scln)
-                    sln = stat_query_column(name= "MAX(" + aln.name + ")",
-                            datatype=aln.datatype, index=False)
-                    scols.append(sln)
-                    scln = stat_query_column(name= "MIN(" + aln.name + ")",
-                            datatype=aln.datatype, index=False)
-                    scols.append(scln)
+                if "suffixes" in aln.keys():
+                    aln_col = stat_query_column(name=aln["name"], datatype=aln["datatype"], index=aln["index"], suffixes=aln["suffixes"]);
+                else:
+                    aln_col = stat_query_column(name=aln["name"], datatype=aln["datatype"], index=aln["index"]);
+                scols.append(aln_col)
 
+                if aln["datatype"] in ['int','double']:
+                    sln = stat_query_column(name= "SUM(" + aln["name"] + ")",
+                            datatype=aln["datatype"], index=False)
+                    scols.append(sln)
+                    scln = stat_query_column(name= "CLASS(" + aln["name"] + ")",
+                            datatype=aln["datatype"], index=False)
+                    scols.append(scln)
+                    sln = stat_query_column(name= "MAX(" + aln["name"] + ")",
+                            datatype=aln["datatype"], index=False)
+                    scols.append(sln)
+                    scln = stat_query_column(name= "MIN(" + aln["name"] + ")",
+                            datatype=aln["datatype"], index=False)
+                    scols.append(scln)
+                    scln = stat_query_column(name= "PERCENTILES(" + aln["name"] + ")",
+                            datatype='percentiles', index=False)
+                    scols.append(scln)
+                    scln = stat_query_column(name= "AVG(" + aln["name"] + ")",
+                            datatype='avg', index=False)
+                    scols.append(scln)
             if not isname: 
                 keyln = stat_query_column(name=STAT_OBJECTID_FIELD, datatype='string', index=True)
                 scols.append(keyln)
@@ -610,7 +695,7 @@ class OpServer(object):
 
             stt = query_table(
                 name = STAT_VT_PREFIX + "." + stat_id,
-                display_name = t.display_name,
+                display_name = table["display_name"],
                 schema = sch,
                 columnvalues = [STAT_OBJECTID_FIELD, SOURCE])
             self._VIRTUAL_TABLES.append(stt)
@@ -729,6 +814,10 @@ class OpServer(object):
             'partitions'        : 15,
             'sandesh_send_rate_limit': SandeshSystem. \
                  get_sandesh_send_rate_limit(),
+            'multi_tenancy'     : False,
+            'api_server'        : '127.0.0.1:8082',
+            'admin_port'        : OpServerAdminPort,
+            'cloud_admin_role'  : CLOUD_ADMIN_ROLE,
         }
         redis_opts = {
             'redis_server_port'  : 6379,
@@ -743,6 +832,14 @@ class OpServer(object):
             'cassandra_user'     : None,
             'cassandra_password' : None,
         }
+        keystone_opts = {
+            'auth_host': '127.0.0.1',
+            'auth_protocol': 'http',
+            'auth_port': 35357,
+            'admin_user': 'admin',
+            'admin_password': 'contrail123',
+            'admin_tenant_name': 'default-domain'
+        }
 
         # read contrail-analytics-api own conf file
         config = None
@@ -751,12 +848,17 @@ class OpServer(object):
             config.read(args.conf_file)
             if 'DEFAULTS' in config.sections():
                 defaults.update(dict(config.items("DEFAULTS")))
+                if 'multi_tenancy' in config.options('DEFAULTS'):
+                    defaults['multi_tenancy'] = config.getboolean(
+                        'DEFAULTS', 'multi_tenancy')
             if 'REDIS' in config.sections():
                 redis_opts.update(dict(config.items('REDIS')))
             if 'DISCOVERY' in config.sections():
                 disc_opts.update(dict(config.items('DISCOVERY')))
             if 'CASSANDRA' in config.sections():
                 cassandra_opts.update(dict(config.items('CASSANDRA')))
+            if 'KEYSTONE' in config.sections():
+                keystone_opts.update(dict(config.items('KEYSTONE')))
 
         # Override with CLI options
         # Don't surpress add_help here so it will handle -h
@@ -770,6 +872,7 @@ class OpServer(object):
         defaults.update(redis_opts)
         defaults.update(disc_opts)
         defaults.update(cassandra_opts)
+        defaults.update(keystone_opts)
         defaults.update()
         parser.set_defaults(**defaults)
 
@@ -841,6 +944,26 @@ class OpServer(object):
             help="Number of partitions for hashing UVE keys")
         parser.add_argument("--sandesh_send_rate_limit", type=int,
             help="Sandesh send rate limit in messages/sec")
+        parser.add_argument("--cloud_admin_role",
+            help="Name of cloud-admin role")
+        parser.add_argument("--multi_tenancy", action="store_true",
+            help="Validate resource permissions (implies token validation)")
+        parser.add_argument("--auth_host",
+            help="IP address of keystone server")
+        parser.add_argument("--auth_protocol",
+            help="Keystone authentication protocol")
+        parser.add_argument("--auth_port", type=int,
+            help="Keystone server port")
+        parser.add_argument("--admin_user",
+            help="Name of keystone admin user")
+        parser.add_argument("--admin_password",
+            help="Password of keystone admin user")
+        parser.add_argument("--admin_tenant_name",
+            help="Tenant name for keystone admin user")
+        parser.add_argument("--api_server",
+            help="Address of VNC API server in ip:port format")
+        parser.add_argument("--admin_port",
+            help="Port with local auth for admin access")
         self._args = parser.parse_args(remaining_argv)
         if type(self._args.collectors) is str:
             self._args.collectors = self._args.collectors.split()
@@ -848,6 +971,25 @@ class OpServer(object):
             self._args.redis_uve_list = self._args.redis_uve_list.split()
         if type(self._args.cassandra_server_list) is str:
             self._args.cassandra_server_list = self._args.cassandra_server_list.split()
+
+        auth_conf_info = {}
+        auth_conf_info['admin_user'] = self._args.admin_user
+        auth_conf_info['admin_password'] = self._args.admin_password
+        auth_conf_info['admin_tenant_name'] = self._args.admin_tenant_name
+        auth_conf_info['auth_protocol'] = self._args.auth_protocol
+        auth_conf_info['auth_host'] = self._args.auth_host
+        auth_conf_info['auth_port'] = self._args.auth_port
+        auth_conf_info['auth_uri'] = '%s://%s:%d' % (self._args.auth_protocol,
+            self._args.auth_host, self._args.auth_port)
+        auth_conf_info['api_server_use_ssl'] = False
+        auth_conf_info['cloud_admin_access_only'] = \
+            self._args.multi_tenancy
+        auth_conf_info['cloud_admin_role'] = self._args.cloud_admin_role
+        auth_conf_info['admin_port'] = self._args.admin_port
+        api_server_info = self._args.api_server.split(':')
+        auth_conf_info['api_server_ip'] = api_server_info[0]
+        auth_conf_info['api_server_port'] = int(api_server_info[1])
+        self._args.auth_conf_info = auth_conf_info
     # end _parse_args
 
     def get_args(self):
@@ -916,9 +1058,11 @@ class OpServer(object):
         ph.start()
         return body
 
+    @validate_user_token
     def uve_stream(self):
         return self._serve_streams(False)
 
+    @validate_user_token
     def alarm_stream(self):
         return self._serve_streams(True)
 
@@ -1024,6 +1168,58 @@ class OpServer(object):
                 % (qid, chunk_id, time.time()))
     # end _query_chunk
 
+    def _is_valid_stats_table_query(self, request, tabn):
+        isT_ = False
+        isT = False
+        for key, value in request.iteritems():
+            if key == "select_fields":
+                for select_field in value:
+                    if select_field == STAT_TIME_FIELD:
+                        isT = True
+                    elif select_field.find(STAT_TIMEBIN_FIELD) == 0:
+                        isT_ = True
+                    else:
+                        agg_field = select_field.split('(')
+                        if len(agg_field) == 2:
+                            oper = agg_field[0]
+                            field = agg_field[1].split(')')[0]
+                            if oper != "COUNT":
+                                if field == STAT_TIME_FIELD:
+                                    isT = True
+                                elif field == STAT_TIMEBIN_FIELD:
+                                    isT_ = True
+                                else:
+                                    field_found = False
+                                    for column in self._VIRTUAL_TABLES[tabn].schema.columns:
+                                        if column.name == field:
+                                            if column.datatype != "":
+                                                field_found = True
+                                    if field_found == False:
+                                        reply = bottle.HTTPError(_ERRORS[errno.EINVAL], \
+                                                            'Unknown field %s' %field)
+                                        return reply
+                            elif field != tabl.split('.')[2]:
+                                reply = bottle.HTTPError(_ERRORS[errno.EINVAL], \
+                                            'Invalid COUNT field %s' %field)
+                                return reply
+                        elif len(agg_field) == 1:
+                            field_found = False
+                            for column in self._VIRTUAL_TABLES[tabn].schema.columns:
+                                if column.name == select_field:
+                                    if column.datatype != "":
+                                        field_found = True
+                            if field_found == False:
+                                reply = bottle.HTTPError(_ERRORS[errno.EINVAL], \
+                                            'Invalid field %s' %select_field)
+                                return reply
+
+                    if isT and isT_:
+                        reply = bottle.HTTPError(_ERRORS[errno.EINVAL], \
+                                    "Stats query cannot have both T and T=")
+                        return reply
+        return None
+    # end _is_valid_stats_table_query
+
     def _query(self, request):
         reply = {}
         try:
@@ -1044,6 +1240,12 @@ class OpServer(object):
             for i in range(0, len(self._VIRTUAL_TABLES)):
                 if self._VIRTUAL_TABLES[i].name == tabl:
                     tabn = i
+
+            if (tabn is not None) and (tabl.find("StatTable") == 0):
+                query_err = self._is_valid_stats_table_query(request.json, tabn)
+                if query_err is not None:
+                    yield query_err
+                    return
 
             if (tabn is not None):
                 tabtypes = {}
@@ -1188,17 +1390,19 @@ class OpServer(object):
         return
     # end _sync_query
 
+    @validate_user_token
     def query_process(self):
         self._post_common(bottle.request, None)
         result = self._query(bottle.request)
         return result
     # end query_process
 
+    @validate_user_token
     def query_status_get(self, queryId):
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
         return self._query_status(bottle.request, queryId)
     # end query_status_get
 
@@ -1206,15 +1410,16 @@ class OpServer(object):
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
         return self._query_chunk(bottle.request, queryId, int(chunkId))
     # end query_chunk_get
 
+    @validate_user_token
     def show_queries(self):
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
         queries = {}
         try:
             redish = redis.StrictRedis(db=0, host='127.0.0.1',
@@ -1340,13 +1545,14 @@ class OpServer(object):
         return filters
     # end _uve_http_post_filter_set
 
+    @validate_user_token
     def dyn_http_post(self, tables):
         (ok, result) = self._post_common(bottle.request, None)
         base_url = bottle.request.urlparts.scheme + \
             '://' + bottle.request.urlparts.netloc
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
         uve_type = tables
         uve_tbl = uve_type
         if uve_type in UVE_MAP:
@@ -1363,18 +1569,21 @@ class OpServer(object):
             yield u'{"value": ['
             first = True
             num = 0
+            byt = 0
             for key in filters['kfilt']:
                 if key.find('*') != -1:
                     for gen in self._uve_server.multi_uve_get(uve_tbl, True,
                                                               filters,
                                                               base_url):
+                        dp = json.dumps(gen)
+                        byt += len(dp)
                         if first:
-                            yield u'' + json.dumps(gen)
+                            yield u'' + dp
                             first = False
                         else:
-                            yield u', ' + json.dumps(gen)
+                            yield u', ' + dp
                         num += 1
-                    stats.collect(num)
+                    stats.collect(num,byt)
                     stats.sendwith()
                     yield u']}'
                     return
@@ -1386,16 +1595,19 @@ class OpServer(object):
                 num += 1
                 if rsp != {}:
                     data = {'name': key, 'value': rsp}
+                    dp = json.dumps(data)
+                    byt += len(dp)
                     if first:
-                        yield u'' + json.dumps(data)
+                        yield u'' + dp
                         first = False
                     else:
-                        yield u', ' + json.dumps(data)
-            stats.collect(num)
+                        yield u', ' + dp
+            stats.collect(num,byt)
             stats.sendwith()
             yield u']}'
     # end _uve_alarm_http_post
 
+    @validate_user_token
     def dyn_http_get(self, table, name):
         # common handling for all resource get
         (ok, result) = self._get_common(bottle.request)
@@ -1403,7 +1615,7 @@ class OpServer(object):
             '://' + bottle.request.urlparts.netloc
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
         uve_tbl = table 
         if table in UVE_MAP:
             uve_tbl = UVE_MAP[table]
@@ -1429,31 +1641,36 @@ class OpServer(object):
             if filters['kfilt'] is None:
                 filters['kfilt'] = [name]
             num = 0
+            byt = 0
             for gen in self._uve_server.multi_uve_get(uve_tbl, flat,
                                                       filters, base_url):
+                dp = json.dumps(gen)
+                byt += len(dp)
                 if first:
-                    yield u'' + json.dumps(gen)
+                    yield u'' + dp
                     first = False
                 else:
-                    yield u', ' + json.dumps(gen)
+                    yield u', ' + dp
                 num += 1
-            stats.collect(num)
+            stats.collect(num,byt)
             stats.sendwith()
             yield u']}'
         else:
             _, rsp = self._uve_server.get_uve(uve_name, flat, filters,
                                            base_url=base_url)
-            stats.collect(1)
+            dp = json.dumps(rsp)
+            stats.collect(1, len(dp))
             stats.sendwith()
-            yield json.dumps(rsp)
+            yield dp
     # end dyn_http_get
 
+    @validate_user_token
     def uve_alarm_http_types(self):
         # common handling for all resource get
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
 
         bottle.response.set_header('Content-Type', 'application/json')
         ret = {}
@@ -1469,12 +1686,13 @@ class OpServer(object):
                 ret[aname] = avalue
         return json.dumps(ret)
 
+    @validate_user_token
     def alarms_http_get(self):
         # common handling for all resource get
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
 
         bottle.response.set_header('Content-Type', 'application/json')
 
@@ -1495,15 +1713,19 @@ class OpServer(object):
                 for uk, uv in av.iteritems():
                    ulist.append({'name':uk, 'value':uv})
                 alms[alm_type ] = ulist
-            return json.dumps(alms)
+            if self._uvepartitions_state == ConnectionStatus.UP:
+                return json.dumps(alms)
+            else:
+                return bottle.HTTPError(_ERRORS[errno.EIO],json.dumps(alms))
     # end alarms_http_get
 
+    @validate_user_token
     def dyn_list_http_get(self, tables):
         # common handling for all resource get
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
         arg_line = bottle.request.url.rsplit('/', 1)[1]
         uve_args = arg_line.split('?')
         uve_type = tables[:-1]
@@ -1542,12 +1764,13 @@ class OpServer(object):
             return json.dumps(uve_links)
     # end dyn_list_http_get
 
+    @validate_user_token
     def analytics_http_get(self):
         # common handling for all resource get
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
 
         base_url = bottle.request.urlparts.scheme + '://' + \
             bottle.request.urlparts.netloc + '/analytics/'
@@ -1557,12 +1780,13 @@ class OpServer(object):
         return json.dumps(analytics_links)
     # end analytics_http_get
 
+    @validate_user_token
     def uves_http_get(self):
         # common handling for all resource get
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
 
         base_url = bottle.request.urlparts.scheme + '://' + \
             bottle.request.urlparts.netloc + '/analytics/uves/'
@@ -1583,11 +1807,15 @@ class OpServer(object):
                 entry = obj_to_dict(LinkObject(rawname + 's',
                                     base_url + rawname + 's'))
                 uvetype_links.append(entry)
-            
+
         bottle.response.set_header('Content-Type', 'application/json')
-        return json.dumps(uvetype_links)
+        if self._uvepartitions_state == ConnectionStatus.UP:
+            return json.dumps(uvetype_links)
+        else:
+	    return bottle.HTTPError(_ERRORS[errno.EIO],json.dumps(uvetype_links))
     # end _uves_http_get
 
+    @validate_user_token
     def alarms_ack_http_post(self):
         self._post_common(bottle.request, None)
         if ('application/json' not in bottle.request.headers['Content-Type']):
@@ -1640,6 +1868,7 @@ class OpServer(object):
         return bottle.HTTPResponse(status=200)
     # end alarms_ack_http_post
 
+    @validate_user_token
     def send_trace_buffer(self, source, module, instance_id, name):
         response = {}
         trace_req = SandeshTraceRequest(name)
@@ -1662,11 +1891,12 @@ class OpServer(object):
         return json.dumps(response)
     # end send_trace_buffer
 
+    @validate_user_token
     def tables_process(self):
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
 
         base_url = bottle.request.urlparts.scheme + '://' + \
             bottle.request.urlparts.netloc + '/analytics/table/'
@@ -1721,6 +1951,7 @@ class OpServer(object):
         return purge_cutoff
     #end get_purge_cutoff
 
+    @validate_user_token
     def process_purge_request(self):
         self._post_common(bottle.request, None)
 
@@ -1902,8 +2133,7 @@ class OpServer(object):
             gevent.sleep(60*30) # sleep for 30 minutes
     # end _auto_purge
 
-
-
+    @validate_user_token
     def _get_analytics_data_start_time(self):
         analytics_start_time = (self._analytics_db.get_analytics_start_time())[SYSTEM_OBJECT_START_TIME]
         response = {'analytics_data_start_time': analytics_start_time}
@@ -1915,7 +2145,7 @@ class OpServer(object):
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
 
         base_url = bottle.request.urlparts.scheme + '://' + \
             bottle.request.urlparts.netloc + '/analytics/table/' + table + '/'
@@ -1935,11 +2165,12 @@ class OpServer(object):
         return json.dumps(json_links)
     # end table_process
 
+    @validate_user_token
     def table_schema_process(self, table):
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
 
         bottle.response.set_header('Content-Type', 'application/json')
         for i in range(0, len(self._VIRTUAL_TABLES)):
@@ -1950,11 +2181,12 @@ class OpServer(object):
         return (json.dumps({}))
     # end table_schema_process
 
+    @validate_user_token
     def column_values_process(self, table):
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
 
         base_url = bottle.request.urlparts.scheme + '://' + \
             bottle.request.urlparts.netloc + \
@@ -2007,7 +2239,9 @@ class OpServer(object):
             return self._LEVEL_LIST
         elif (column == STAT_OBJECTID_FIELD):
             objtab = None
-            for t in _STAT_TABLES:
+            for t in self._VIRTUAL_TABLES:
+              if t.schema.type == 'STAT':
+                self._logger.error("found stat table %s" % t)
                 stat_table = STAT_VT_PREFIX + "." + \
                     t.stat_type + "." + t.stat_attr
                 if (table == stat_table):
@@ -2019,11 +2253,12 @@ class OpServer(object):
         return []
     # end generator_info
 
+    @validate_user_token
     def column_process(self, table, column):
         (ok, result) = self._get_common(bottle.request)
         if not ok:
             (code, msg) = result
-            abort(code, msg)
+            bottle.abort(code, msg)
 
         bottle.response.set_header('Content-Type', 'application/json')
         for i in range(0, len(self._VIRTUAL_TABLES)):
@@ -2135,10 +2370,12 @@ class OpServer(object):
             ConnectionState.update(conn_type = ConnectionType.UVEPARTITIONS,
                 name = 'UVE-Aggregation', status = ConnectionStatus.UP,
                 message = 'Partitions:%d' % len(new_agp))
+            self._uvepartitions_state = ConnectionStatus.UP
         if self._usecache and len(new_agp) != self._args.partitions:
             ConnectionState.update(conn_type = ConnectionType.UVEPARTITIONS,
                 name = 'UVE-Aggregation', status = ConnectionStatus.DOWN,
                 message = 'Partitions:%d' % len(new_agp))
+            self._uvepartitions_state = ConnectionStatus.DOWN
         self.agp = new_agp        
 
     def get_agp(self):
@@ -2166,6 +2403,11 @@ class OpServer(object):
                                 self.disc_agp, self._sandesh)
             sp2.start()
             self.gevs.append(sp2)
+
+        if self._vnc_api_client:
+            self.gevs.append(gevent.spawn(self._vnc_api_client.connect))
+        self._local_app = LocalApp(bottle.app(), self._args.auth_conf_info)
+        self.gevs.append(gevent.spawn(self._local_app.start_http_server))
 
         try:
             gevent.joinall(self.gevs)
