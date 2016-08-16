@@ -93,16 +93,8 @@ class VncApiServerBase(VncApiServer):
         self._rpc_input_types = {}
         self._enable_core_check = False
         for resource_type in all_resource_types:
-            camel_name = cfgm_common.utils.CamelCase(resource_type)
-            r_class_name = '%sServer' % (camel_name)
-            common_class = cfgm_common.utils.str_to_class(camel_name, __name__)
-            # Create Placeholder classes derived from Resource, <Type> so
-            # r_class methods can be invoked in CRUD methods without
-            # checking for None
-            r_class = type(r_class_name,
-                           (vnc_cfg_base_type.Resource, common_class, object), {})
-            self.set_resource_class(resource_type, r_class)
             if resource_type not in system_resource_types:
+                r_class = self.get_resource_class(resource_type)
                 r_class.generate_default_instance = self.generate_default_instance_internal(resource_type)
 
         for rpc_input in all_rpc_input_types:
@@ -239,6 +231,30 @@ class VncApiServerBase(VncApiServer):
         setup_debug_tools()
 
     # end __init__
+
+    def get_resource_class(self, type_str):
+        if type_str in self._resource_classes:
+            return self._resource_classes[type_str]
+
+        common_name = cfgm_common.utils.CamelCase(type_str)
+        server_name = '%sServer' % common_name
+        try:
+            resource_class = getattr(vnc_cfg_base_type, server_name)
+        except AttributeError:
+            common_class = cfgm_common.utils.str_to_class(common_name,
+                                                          __name__)
+            # Create Placeholder classes derived from Resource, <Type> so
+            # resource_class methods can be invoked in CRUD methods without
+            # checking for None
+            resource_class = type(
+                str(server_name),
+                (vnc_cfg_base_type.Resource, common_class, object),
+                {})
+        resource_class.server = self
+        self._resource_classes[resource_class.object_type] = resource_class
+        self._resource_classes[resource_class.resource_type] = resource_class
+        return resource_class
+    # end get_resource_class
 
     def generate_default_instance_internal(self, resource_type):
         """

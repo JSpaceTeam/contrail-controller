@@ -9,11 +9,6 @@ from pycassa.batch import Mutator
 from pycassa.system_manager import SystemManager, SIMPLE_STRATEGY, UTF8_TYPE
 from pycassa.pool import AllServersUnavailable, MaximumRetryException
 import gevent
-from exceptions import NoIdError, DatabaseUnavailableError
-from pycassa.system_manager import SystemManager, SIMPLE_STRATEGY
-from pycassa.pool import AllServersUnavailable, MaximumRetryException
-import gevent
-from vnc_api import vnc_api
 from exceptions import NoIdError, DatabaseUnavailableError, VncError
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
@@ -24,7 +19,6 @@ import time
 from cfgm_common import jsonutils as json
 import utils
 import datetime
-import re
 from operator import itemgetter
 import itertools
 import sys
@@ -144,18 +138,22 @@ class VncCassandraClient(object):
     _UUID_KEYSPACE = {
         _UUID_KEYSPACE_NAME: {
             _OBJ_UUID_CF_NAME: {
-               
+                'create_cf_args': {
+                    'comparator_type': UTF8_TYPE
+                },
                 'cf_args': {
                     'autopack_names': False,
                     'autopack_values': False,
-                    'comparator_type':UTF8_TYPE
+
                     },
                 },
             _OBJ_FQ_NAME_CF_NAME: {
+                'create_cf_args': {
+                    'comparator_type': UTF8_TYPE
+                },
                 'cf_args': {
                     'autopack_values': False,
-                    'comparator_type':UTF8_TYPE,
-                    },
+                 },
                 },
             _OBJ_SHARED_CF_NAME: {}
             }
@@ -584,13 +582,13 @@ class VncCassandraClient(object):
 
         for cf_name in cf_dict:
             create_cf_kwargs = cf_dict[cf_name].get('create_cf_args', {})
-            self.sys_mgr.create_column_family(
-                    keyspace_name, cf_name,
-                    comparator_type = comparator,
-                    gc_grace_seconds=gc_grace_sec,
-                    default_validation_class='UTF8Type',
-                    key_validation_class='UTF8Type'
-                    **create_cf_kwargs)
+            try:
+                self.sys_mgr.create_column_family(
+                        keyspace_name, cf_name,
+                        gc_grace_seconds=gc_grace_sec,
+                        default_validation_class='UTF8Type',
+                        key_validation_class='UTF8Type',
+                        **create_cf_kwargs)
             except pycassa.cassandra.ttypes.InvalidRequestException as e:
                 # TODO verify only EEXISTS
                 self._logger("Info! " + str(e), level=SandeshLevel.SYS_INFO)
@@ -630,18 +628,12 @@ class VncCassandraClient(object):
         self._logger(msg, level=SandeshLevel.SYS_NOTICE)
     # end _cassandra_init_conn_pools
 
-    def _get_resource_class(self, obj_type):
-        if hasattr(self, '_db_client_mgr'):
-            return self._db_client_mgr.get_resource_class(obj_type)
 
-        cls_name = '%s' % (utils.CamelCase(obj_type))
-        return getattr(vnc_api, cls_name)
-    # end _get_resource_class
 
 
     def object_create(self, obj_type, obj_id, obj_dict,
                       uuid_batch=None, fqname_batch=None):
-        obj_class = self._get_resource_class(obj_type)
+        obj_class = self.get_resource_class(obj_type)
 
         if uuid_batch:
             bch = uuid_batch
@@ -659,7 +651,7 @@ class VncCassandraClient(object):
             if parent_type not in obj_class.parent_types:
                 return False, (400, 'Invalid parent type: %s' % parent_type)
             parent_object_type = \
-                self._get_resource_class(parent_type).object_type
+                self.get_resource_class(parent_type).object_type
             parent_fq_name = obj_dict['fq_name'][:-1]
             obj_cols['parent_type'] = json.dumps(parent_type)
             parent_uuid = self.fq_name_to_uuid(parent_object_type,
@@ -714,7 +706,7 @@ class VncCassandraClient(object):
             ref_fld_types_list = list(obj_class.ref_field_types[ref_field])
             ref_res_type = ref_fld_types_list[0]
             ref_link_type = ref_fld_types_list[1]
-            ref_obj_type = self._get_resource_class(ref_res_type).object_type
+            ref_obj_type = self.get_resource_class(ref_res_type).object_type
             refs = obj_dict.get(ref_field, [])
             for ref in refs:
                 ref_uuid = self.fq_name_to_uuid(ref_obj_type, ref['to'])
@@ -743,7 +735,7 @@ class VncCassandraClient(object):
         if not obj_uuids:
             return (True, [])
         # if field_names=None, all fields will be read/returned
-        obj_class = self._get_resource_class(obj_type)
+        obj_class = self.get_resource_class(obj_type)
         ref_fields = obj_class.ref_fields
         backref_fields = obj_class.backref_fields
         children_fields = obj_class.children_fields
@@ -943,7 +935,7 @@ class VncCassandraClient(object):
         if child_type is None:
             return (False, '')
 
-        obj_class = self._get_resource_class(obj_type)
+        obj_class = self.get_resource_class(obj_type)
         obj_uuid_cf = self._obj_uuid_cf
         if child_type not in obj_class.children_fields:
             return (False,
@@ -968,7 +960,7 @@ class VncCassandraClient(object):
 
     def object_update(self, obj_type, obj_uuid, new_obj_dict,
                       uuid_batch=None):
-        obj_class = self._get_resource_class(obj_type)
+        obj_class = self.get_resource_class(obj_type)
          # Grab ref-uuids and properties in new version
         new_ref_infos = {}
 
@@ -988,7 +980,7 @@ class VncCassandraClient(object):
             ref_res_type = ref_fld_types_list[0]
             ref_link_type = ref_fld_types_list[1]
             is_weakref = ref_fld_types_list[2]
-            ref_obj_type = self._get_resource_class(ref_res_type).object_type
+            ref_obj_type = self.get_resource_class(ref_res_type).object_type
 
             if ref_field in new_obj_dict:
                 new_refs = new_obj_dict[ref_field]
@@ -1094,7 +1086,7 @@ class VncCassandraClient(object):
 
     def object_list(self, obj_type, parent_uuids=None, back_ref_uuids=None,
                      obj_uuids=None, count=False, filters=None):
-        obj_class = self._get_resource_class(obj_type)
+        obj_class = self.get_resource_class(obj_type)
 
         children_fq_names_uuids = []
 
@@ -1244,7 +1236,7 @@ class VncCassandraClient(object):
     # end object_list
 
     def object_delete(self, obj_type, obj_uuid):
-        obj_class = self._get_resource_class(obj_type)
+        obj_class = self.get_resource_class(obj_type)
         obj_uuid_cf = self._obj_uuid_cf
         fq_name = self.get_one_col(self._OBJ_UUID_CF_NAME,
                                    obj_uuid, 'fq_name')
@@ -1290,7 +1282,7 @@ class VncCassandraClient(object):
     # end object_delete
 
     def prop_collection_read(self, obj_type, obj_uuid, obj_fields, position):
-        obj_class = self._get_resource_class(obj_type)
+        obj_class = self.get_resource_class(obj_type)
 
         result = {}
         # always read-in id-perms for upper-layers to do rbac/visibility
@@ -1415,7 +1407,7 @@ class VncCassandraClient(object):
                     child_tstamp):
         if '%ss' % (child_obj_type) not in result:
             result['%ss' % (child_obj_type)] = []
-        child_res_type = self._get_resource_class(child_obj_type).resource_type
+        child_res_type = self.get_resource_class(child_obj_type).resource_type
 
         child_info = {}
         child_info['to'] = self.uuid_to_fq_name(child_uuid)
@@ -1430,7 +1422,7 @@ class VncCassandraClient(object):
     def _read_ref(self, result, obj_uuid, ref_obj_type, ref_uuid, ref_data_json):
         if '%s_refs' % (ref_obj_type) not in result:
             result['%s_refs' % (ref_obj_type)] = []
-        ref_res_type = self._get_resource_class(ref_obj_type).resource_type
+        ref_res_type = self.get_resource_class(ref_obj_type).resource_type
 
         ref_data = ref_data_json
         ref_info = {}
@@ -1456,7 +1448,7 @@ class VncCassandraClient(object):
                        back_ref_data_json):
         if '%s_back_refs' % (back_ref_obj_type) not in result:
             result['%s_back_refs' % (back_ref_obj_type)] = []
-        back_ref_res_type = self._get_resource_class(back_ref_obj_type).resource_type
+        back_ref_res_type = self.get_resource_class(back_ref_obj_type).resource_type
 
         back_ref_info = {}
         back_ref_info['to'] = self.uuid_to_fq_name(back_ref_uuid)

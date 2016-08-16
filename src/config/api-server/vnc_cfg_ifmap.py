@@ -1027,6 +1027,11 @@ class VncServerCassandraClient(VncCassandraClient):
         return self.get_one_col(self._OBJ_UUID_CF_NAME, id, 'prop:perms2')
     # end uuid_to_obj_perms2
 
+    def get_resource_class(self, resource_type):
+        return self._db_client_mgr.get_resource_class(resource_type)
+
+    # end get_resource_class
+
     def useragent_kv_store(self, key, value):
         columns = {'value': value}
         self._useragent_kv_cf.insert(key, columns)
@@ -1063,7 +1068,7 @@ class VncServerCassandraClient(VncCassandraClient):
 
 class VncServerKombuClient(VncKombuClient):
     def __init__(self, db_client_mgr, rabbit_ip, rabbit_port, ifmap_db,
-                 rabbit_user, rabbit_password, rabbit_vhost, rabbit_ha_mode,ifmap_disable=False
+                 rabbit_user, rabbit_password, rabbit_vhost, rabbit_ha_mode,ifmap_disable=False,
                  **kwargs):
         self._db_client_mgr = db_client_mgr
         self._sandesh = db_client_mgr._sandesh
@@ -1474,6 +1479,7 @@ class VncZkClient(object):
     # end subnet_free_req
 
     def create_fq_name_to_uuid_mapping(self, obj_type, fq_name, id):
+        fq_name_str = ':'.join(fq_name)
         zk_path = self._fq_name_to_uuid_path+'/%s:%s' %(obj_type, fq_name_str)
         self._zk_client.create_node(zk_path, id)
 
@@ -1537,7 +1543,7 @@ class VncDbClient(object):
                  passwd, cass_srv_list,
                  rabbit_servers, rabbit_port, rabbit_user, rabbit_password,
                  rabbit_vhost, rabbit_ha_mode, reset_config=False,
-                 zk_server_ip=None, db_prefix='', cassandra_credential=None,ifmap_disable=False,cassandra_pool = None
+                 zk_server_ip=None, db_prefix='', cassandra_credential=None,ifmap_disable=False,cassandra_pool = None,
                  **kwargs):
 
         self._api_svr_mgr = api_svr_mgr
@@ -1593,7 +1599,9 @@ class VncDbClient(object):
         self._msgbus = VncServerKombuClient(self, rabbit_servers,
                                             rabbit_port, self._ifmap_db,
                                             rabbit_user, rabbit_password,
-                                            rabbit_vhost, rabbit_ha_mode, self._ifmap_disable)
+                                            rabbit_vhost, rabbit_ha_mode, self._ifmap_disable,
+                                            **kwargs)
+
         if cfg.CONF.elastic_search.search_enabled:
             if cfg.CONF.elastic_search.search_client:
                 try:
@@ -1613,8 +1621,7 @@ class VncDbClient(object):
             self.config_log("Elastic search not enabled", level=SandeshLevel.SYS_NOTICE)
             self._search_db = VncNoOpEsDb()
         self._rollback_handler = VncDBRollBackHandler(self, self._msgbus, self._search_db)
-                                            rabbit_vhost, rabbit_ha_mode,
-                                            **kwargs)
+
     # end __init__
 
     def _update_default_quota(self):

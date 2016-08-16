@@ -105,8 +105,11 @@ import discoveryclient.client as client
 # from gen_py.vnc_api.ttypes import *
 import netifaces
 from pysandesh.connection_info import ConnectionState
-from cfgm_common.uve.nodeinfo.ttypes import NodeStatusUVE, \
-    NodeStatus
+try:
+    from cfgm_common.uve.nodeinfo.ttypes import NodeStatusUVE, \
+        NodeStatus
+except:
+    pass
 
 from sandesh.discovery_client_stats import ttypes as sandesh
 from sandesh.traces.ttypes import RestApiTrace
@@ -645,7 +648,7 @@ class VncApiServer(object):
             parent_res_type = parent_class.resource_type
             parent_fq_name = obj_dict['fq_name'][:-1]
             try:
-                parent_uuid = self._db_conn.fq_name_to_uuid(parent_type, parent_fq_name)
+                parent_uuid = self._db_conn.fq_name_to_uuid(parent_obj_type, parent_fq_name)
 
                 (ok, status) = self._permissions.check_perms_write(
                     get_request(), parent_uuid)
@@ -1460,22 +1463,22 @@ class VncApiServer(object):
             # obj.route('/virtual-networks', 'GET', obj.virtual_networks_http_get)
 
             # leaf resource
-            obj.route('%s/%s/<id>' %(SERVICE_PATH, resource_type),
+            obj.route('%s/%s/<id>' % (SERVICE_PATH, resource_type),
                       'GET',
-                      getattr(obj, '%s_http_get' %(object_type)))
-            obj.route('/%s/<id>' %(resource_type),
+                      getattr(obj, '%s_http_get' % object_type))
+            obj.route('%s/%s/<id>' % (SERVICE_PATH, resource_type),
                       'PUT',
-                      getattr(obj, '%s_http_put' %(object_type)))
-            obj.route('/%s/<id>' %(resource_type),
+                      getattr(obj, '%s_http_put' % object_type))
+            obj.route('%s/%s<id>' % (SERVICE_PATH, resource_type),
                       'DELETE',
-                      getattr(obj, '%s_http_delete' %(object_type)))
+                      getattr(obj, '%s_http_delete' % object_type))
             # collection of leaf
-            obj.route('%s/%s' %(SERVICE_PATH, resource_type),
+            obj.route('%s/%s' % (SERVICE_PATH, resource_type),
                       'POST',
-                      getattr(obj, '%ss_http_post' %(object_type)))
-            obj.route('/%ss' %(resource_type),
+                      getattr(obj, '%ss_http_post' % object_type))
+            obj.route('%s/%s' % (SERVICE_PATH, resource_type),
                       'GET',
-                      getattr(obj, '%ss_http_get' %(object_type)))
+                      getattr(obj, '%ss_http_get' % object_type))
     # end _generate_resource_crud_uri
 
     def __init__(self, args_str=None):
@@ -1870,7 +1873,7 @@ class VncApiServer(object):
                 stats.end("route")
                 gevent.getcurrent().stats.print_stats()
                 gevent.getcurrent().stats = None
-
+        print "ADD ROUTE: %s %s" % (uri, method)
         bottle.route(uri, method, handler_trap_exception)
     # end route
 
@@ -3017,8 +3020,8 @@ class VncApiServer(object):
             id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
             return
         except NoIdError:
-        self._create_singleton_entry(ApiAccessList(parent_type='domain', fq_name=fq_name))
-        id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
+            self._create_singleton_entry(ApiAccessList(parent_type='domain', fq_name=fq_name))
+            id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
         (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid': id})
         if 'api_access_list_entries' in obj_dict:
            api_access_list_entries = obj_dict['api_access_list_entries']
@@ -3282,7 +3285,7 @@ class VncApiServer(object):
         if resource_type in gen.vnc_api_client_gen.all_resource_types:
             obj_uri_type = '/' + resource_type
         else:
-            obj_uri_type = '/' + obj_type.replace('_', '-')
+            obj_uri_type = '/' + resource_type
         return '%s%s/%s' % (SERVICE_PATH, obj_uri_type, obj_uuid)
 
 

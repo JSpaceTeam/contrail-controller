@@ -298,7 +298,7 @@ class VncKombuClientV2(VncKombuClientBase):
         return ret
 
     def __init__(self, rabbit_hosts, rabbit_port, rabbit_user, rabbit_password,
-                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger, routing_key='#'):
+                 rabbit_vhost, rabbit_ha_mode, q_name, subscribe_cb, logger, routing_key='#',
                  **kwargs):
         super(VncKombuClientV2, self).__init__(rabbit_hosts, rabbit_port,
                                                rabbit_user, rabbit_password,

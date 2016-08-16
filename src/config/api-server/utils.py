@@ -78,7 +78,7 @@ def parse_args(args_str):
         'disable_ifmap': False,
         'cloud_admin_role': _CLOUD_ADMIN_ROLE,
         'disable_validation': False,
-        'enable_stats': False
+        'enable_stats': False,
         'rabbit_use_ssl': False,
         'kombu_ssl_version': '',
         'kombu_ssl_keyfile': '',
