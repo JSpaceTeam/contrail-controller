@@ -42,7 +42,7 @@ local_sources = [
                   'dependency_tracker.py',
                   'vnc_api_stats.py',
                   'ssl_adapter.py',
-                  'stats_collector.py'
+                  'stats_collector.py',
                   'vnc_greenlets.py',
                  ]
 local_sources_rules = []

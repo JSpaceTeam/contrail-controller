@@ -429,8 +429,6 @@ class VncApiServer(object):
                     type_name, value))
         elif xsd_type == "any": #anyxml
             pass
-        elif xsd_type == 'string' and simple_type == 'CommunityAttribute':
-            cls._validate_communityattribute_type(value)
         else:
             if not isinstance(value, basestring):
                 raise ValueError('%s: string value expected instead of %s' %(
@@ -1418,7 +1416,7 @@ class VncApiServer(object):
             child_infos = parent_dict.get(child_field, [])
             for child_info in child_infos:
                 if child_info['to'][-1] == default_child_name:
-                    default_child_id = has_info['uri'].split('/')[-1]
+                    default_child_id = child_info['uri'].split('/')[-1]
                     self.http_resource_delete(child_type, default_child_id)
                     break
     # end delete_default_children
@@ -3012,7 +3010,7 @@ class VncApiServer(object):
 
     # generate default rbac group rule, merge it with the already existing ones
     def _create_default_rbac_rule(self, fq_name=None):
-        obj_type = 'api-access-list'
+        obj_type = 'api_access_list'
         rule_list = []
         if not fq_name:
             fq_name = ['default-domain', 'default-api-access-list']
@@ -3185,7 +3183,7 @@ class VncApiServer(object):
             if not self.is_admin_request():
                 obj_ids_list = [{'uuid': obj_uuid}
                                 for _, obj_uuid in fq_names_uuids]
-                obj_fields = [u'id_perms']
+                obj_fields = [u'id_perms', u'perms2']
                 if req_fields:
                     obj_fields = obj_fields + req_fields
                 (ok, result) = self._db_conn.dbe_read_multi(

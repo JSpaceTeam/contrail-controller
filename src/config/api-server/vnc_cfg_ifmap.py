@@ -1062,6 +1062,16 @@ class VncServerCassandraClient(VncCassandraClient):
 
     # end useragent_kv_delete
 
+
+    def _get_resource_class(self, obj_type):
+        return self._db_client_mgr.get_resource_class(obj_type)
+
+    def _get_xsd_class(self, xsd_type):
+        return self._db_client_mgr.get_resource_xsd_class(xsd_type)
+
+    def _get_obj_type_to_db_type(self, obj_type):
+        return self._db_client_mgr.get_obj_type_to_db_type(obj_type)
+
 # end class VncCassandraClient
 
 
@@ -2432,6 +2442,7 @@ class VncDbClient(object):
     # Helper routines for REST
     def generate_uri(self, obj_type, obj_uuid):
         return self._api_svr_mgr.generate_uri(obj_type, obj_uuid)
+
     def get_resource_class(self, type):
         return self._api_svr_mgr.get_resource_class(type)
     # end get_resource_class

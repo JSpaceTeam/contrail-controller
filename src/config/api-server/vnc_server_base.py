@@ -298,7 +298,7 @@ class VncApiServerBase(VncApiServer):
     # end get_rpc_input_type
 
     def _update_default_rbac_rule(self, rbac_rule, fq_name=None):
-        obj_type = 'api-access-list'
+        obj_type = 'api_access_list'
         rule_list = []
         if not fq_name:
             fq_name = ['default-domain', 'default-api-access-list']

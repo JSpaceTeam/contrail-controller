@@ -130,7 +130,7 @@ class VncRbac(object):
             obj_ids = {'uuid' : service_api_access_list_uuid} if service_api_access_list_uuid else \
                 {'uuid' : default_api_access_list_uuid}
 
-        (ok, result) = self._read_cached_objects('api-access-list', obj_ids['uuid'], obj_fields)
+        (ok, result) = self._read_cached_objects('api_access_list', obj_ids['uuid'], obj_fields)
         if not ok or 'api_access_list_entries' not in result:
             return rule_list
         # {u'rbac_rule': [{u'rule_object': u'*', u'rule_perms': [{u'role_crud': u'CRUD', u'role_name': u'admin'}], u'rule_field': None}]}

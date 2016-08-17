@@ -4,6 +4,7 @@
 import logging
 
 import pycassa
+from cfgm_common.stats_collector import StatsCollector, NoOpStatsCollector
 from pycassa import ColumnFamily
 from pycassa.batch import Mutator
 from pycassa.system_manager import SystemManager, SIMPLE_STRATEGY, UTF8_TYPE
@@ -727,13 +728,17 @@ class VncCassandraClient(object):
         if fqname_batch:
             fqname_batch.insert(obj_type, fq_name_cols)
         else:
-            self._obj_fq_name_cf.insert(obj_type, fq_name_cols)
+            self._obj_fq_name_cf.insert(self._get_obj_type_to_db_type(obj_type), fq_name_cols)
         return (True, '')
     # end object_create
 
     def object_read(self, obj_type, obj_uuids, field_names=None):
         if not obj_uuids:
             return (True, [])
+        if hasattr(gevent.getcurrent(), 'stats'):
+            stats = gevent.getcurrent().stats
+        else:
+            stats = NoOpStatsCollector()
         # if field_names=None, all fields will be read/returned
         obj_class = self.get_resource_class(obj_type)
         ref_fields = obj_class.ref_fields
@@ -754,6 +759,7 @@ class VncCassandraClient(object):
                                      obj_uuids,
                                      timestamp=True)
         elif not set(field_names) & ref_fields:
+            stats.start('multiget')
             # specific props have been asked fetch exactly those
             columns = set(['type', 'fq_name', 'parent_type'])
             for fname in set(field_names) & prop_fields:
@@ -764,6 +770,7 @@ class VncCassandraClient(object):
                                      start='parent:',
                                      finish='parent;',
                                      timestamp=True)
+            stats.end('multiget')
             for fname in set(field_names) & list_fields:
                 merge_dict(obj_rows,
                            self.multiget(self._OBJ_UUID_CF_NAME,
@@ -792,6 +799,7 @@ class VncCassandraClient(object):
                 return (True, [])
 
         results = []
+        stats.start('process_results')
         for obj_uuid, obj_cols in obj_rows.items():
             if obj_type != obj_cols.pop('type')[0]:
                 continue
@@ -927,7 +935,7 @@ class VncCassandraClient(object):
 
             results.append(result)
         # end for all rows
-
+        stats.end('process_results')
         return (True, results)
     # end object_read
 
@@ -1212,7 +1220,7 @@ class VncCassandraClient(object):
 
             else: # grab all resources of this type
                 obj_fq_name_cf = self._obj_fq_name_cf
-                cols = obj_fq_name_cf.xget('%s' %(obj_type))
+                cols = obj_fq_name_cf.xget(self._get_obj_type_to_db_type('%s' %(obj_type)))
 
                 def filter_rows_no_anchor():
                     all_obj_infos = {}
@@ -1362,7 +1370,7 @@ class VncCassandraClient(object):
         fq_name_str = utils.encode_string(':'.join(fq_name))
 
         col_infos = self.get(self._OBJ_FQ_NAME_CF_NAME,
-                             obj_type,
+                             self._get_obj_type_to_db_type(obj_type),
                              start=fq_name_str + ':',
                              finish=fq_name_str + ';')
         if not col_infos:

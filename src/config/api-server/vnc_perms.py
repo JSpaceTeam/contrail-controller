@@ -1,12 +1,7 @@
 #
 # Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
 #
-import sys
-
 from cfgm_common.stats_collector import collect_stats
-from cfgm_common import jsonutils as json
-import string
-import uuid
 from provision_defaults import *
 from cfgm_common.exceptions import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
@@ -83,7 +78,6 @@ class VncPermissions(object):
 
     def validate_perms_rbac(self, request, obj_uuid, mode=PERMS_R, obj_name = None, obj_type=None, perms2=None):
         err_msg = (403, 'Permission Denied')
-
         # retrieve object and permissions
         try:
             if not perms2 or not obj_name or not obj_type:
@@ -93,12 +87,10 @@ class VncPermissions(object):
                 obj_type = config.get("type")
         except NoIdError:
             return (True, '')
-
         user, roles = self.get_user_roles(request)
         is_admin = self.cloud_admin_role in [x.lower() for x in roles]
         if is_admin:
             return (True, 'RWX')
-
         env = request.headers.environ
         tenant = env.get('HTTP_X_PROJECT_ID', None)
         tenant_name = env.get('HTTP_X_PROJECT_NAME', '*')
@@ -123,11 +115,9 @@ class VncPermissions(object):
                 perms = perms | item['tenant_access'] << 3
                 mask |= 0070
                 break
-
         mode_mask = mode | mode << 3 | mode << 6
         ok = (mask & perms & mode_mask)
         granted = ok & 07 | (ok >> 3) & 07 | (ok >> 6) & 07
-
         msg = 'rbac: %s (%s:%s) %s %s admin=%s, mode=%03o mask=%03o perms=%03o, \
             (usr=%s(%s)/own=%s/sh=%s)' \
             % ('+++' if ok else '---', self.mode_str[mode], obj_uuid, obj_type, obj_name,
@@ -136,7 +126,7 @@ class VncPermissions(object):
         self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
         if not ok:
             msg = "rbac: %s doesn't have %s permission in tenant %s" % (user, self.mode_str2[mode], owner)
-            self._server_mgr.config_log(msg, level=SandeshLevel.SYS_NOTICE)
+            self._server_mgr.config_log(msg, level=SandeshLevel.SYS_DEBUG)
 
         return (True, self.mode_str[granted]) if ok else (False, err_msg)
     # end validate_perms
@@ -190,6 +180,7 @@ class VncPermissions(object):
         else:
             return (True, '')
     # end check_perms_read
+
 
     def check_perms_link(self, request, id):
         app = request.environ['bottle.app']
